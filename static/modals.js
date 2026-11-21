@@ -121,7 +121,7 @@ export async function openSettingsModal() {
         <label>生圖風格提示（英文，接在每個畫面描述後面）</label>
         <input id="v-style_hint" value="${esc(s.visuals?.style_hint || "")}">
         <div class="grid-2">
-          <div><label>單張逾時（秒）</label><input id="v-timeout_s" type="number" min="60" max="1800" value="${s.visuals?.timeout_s ?? 600}"></div>
+          <div><label>單張逾時（秒）</label><input id="v-timeout_s" type="number" min="60" max="3600" value="${s.visuals?.timeout_s ?? 600}"></div>
           <div style="display:flex;align-items:flex-end"><label style="margin:0"><input type="checkbox" id="v-free_after" style="width:auto;margin-right:6px" ${s.visuals?.free_after !== false ? "checked" : ""}> 生完圖釋放 ComfyUI 模型（把 GPU 還給別的工作）</label></div>
         </div>
         <div class="row" style="margin-top:10px"><button type="button" class="btn" id="v-health">測試 ComfyUI 連線</button><span class="muted" id="v-health-out"></span></div>
@@ -734,7 +734,8 @@ async function setupVisualPane(root, s, collect) {
       $("#v-vae", root).value = p.vae;
       $("#v-steps", root).value = p.steps;
       $("#v-cfg", root).value = p.cfg;
-      s.visuals = { ...(s.visuals || {}), clip_type: p.clip_type, sampler: p.sampler };
+      s.visuals = { ...(s.visuals || {}), clip_type: p.clip_type, encode: p.encode || "", sampler: p.sampler };
+      if (p.timeout_s) $("#v-timeout_s", root).value = p.timeout_s;
       presetNote.textContent = (p.installed ? "" : `✗ 檔案缺：${p.missing.join("、")}　`) + p.note;
     };
     presetSel.onchange = apply;

@@ -41,16 +41,19 @@ PRESETS: dict[str, dict] = {
         "clip_type": "moss_image",
         "vae": "flux2-vae_small.safetensors",
         "steps": 25, "cfg": 3.0, "sampler": "heun",
-        "note": "中文文字、NSFW 都可以；25 步較慢，配 dmd2 LoRA 可降到 8 步",
+        "timeout_s": 2400,
+        "note": "中文文字、NSFW 都可以；25 步較慢（實測超過 15 分鐘），配 dmd2 LoRA 可降到 8 步",
     },
     "qwen21": {
         "label": "Qwen Image 2.1",
         "unet": "qwen_image_2.1_int8_convrot.safetensors",
-        "clip": "qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors",
+        "clip": "qwen3vl_8b_int8_convrot.safetensors",
         "clip_type": "qwen_image",
         "vae": "qwen_image_2.1_vae_bf16.safetensors",
+        "encode": "qwen21",                # 2.1 要 TextEncodeQwenImage21，不能用 CLIPTextEncode（會出雜訊）
         "steps": 25, "cfg": 1.0, "sampler": "dpmpp_2m_sde_gpu",
-        "note": "中文文字最強、NSFW 亦可以；25 步較慢",
+        "timeout_s": 900,
+        "note": "中文文字最強、NSFW 亦可以；25 步較慢，文字編碼器用 qwen3vl_8b",
     },
 }
 
@@ -120,6 +123,11 @@ def _graph(prompt: str, w: int, h: int, seed: int) -> dict:
         g["10"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
             "model": ["1", 0], "lora_name": lora, "strength_model": float(c.get("lora_strength") or 0.8)}}
         g["7"]["inputs"]["model"] = ["10", 0]
+    if (c.get("encode") or "") == "qwen21":
+        g["4"] = {"class_type": "TextEncodeQwenImage21", "inputs": {
+            "clip": ["2", 0], "prompt": prompt, "negative_prompt": "", "resolution": 0, "images": {}}}
+        g.pop("5", None)
+        g["7"]["inputs"]["negative"] = ["4", 1]
     return g
 
 

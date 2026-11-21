@@ -48,6 +48,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "unet": "kromaKrea2_opd.safetensors",
         "clip": "Huihui-Qwen3-VL-4B-Instruct-abliterated-fp8_scaled.safetensors",
         "clip_type": "krea2",
+        "encode": "",                      # qwen21 preset 會設成 qwen21（改用 TextEncodeQwenImage21）
         "vae": "qwen_image_vae.safetensors",
         "lora": "",                        # 例：Krea 2/KREA2turboNSFW.safetensors
         "lora_strength": 0.8,
