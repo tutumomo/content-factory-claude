@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from . import comfy, cost, llm, media, music, prompts, render, sfx, stock, store, video
+from . import comfy, cost, h3video, llm, media, music, prompts, render, sfx, stock, store, video
 
 STAGES = ["sources", "brief", "script", "critique", "storyboard", "assemble", "package", "review", "approved"]
 STAGE_LABEL = {
@@ -349,6 +349,29 @@ def st_assemble(ep: dict) -> bool:
         else:
             store.log(eid, f"{ch['detail']}；改用字卡畫面")
 
+    vids: dict[int, Path] = {}
+    if src == "h3video":
+        hc = h3video.cfg()
+        ch = comfy.health()
+        if not hc.get("enabled", True):
+            store.log(eid, "MiniMax-H3 影片已關閉，改用字卡")
+        elif not ch["ok"]:
+            store.log(eid, f"{ch['detail']}；改用字卡畫面")
+        else:
+            store.log(eid, f"ComfyUI MiniMax-H3 生成影片：{len(scenes)} 段"
+                           f"（{hc.get('steps')} 步、單段最多 {hc.get('max_seconds')} 秒，影片本身不出聲）")
+            for i, sc in enumerate(scenes):
+                desc = (sc.get("visual") or sc.get("headline") or "").strip()
+                secs = len(re.sub(r"\s", "", sc["narration"])) / 4.6 + 0.7
+                try:
+                    vids[i] = h3video.generate(desc, size, secs, assets / f"v{i:02d}.mp4", i=i, seed=2000 + i)
+                    store.log(eid, f"畫面 {i + 1}/{len(scenes)} 影片就緒")
+                except comfy.ComfyError as e:
+                    store.log(eid, f"畫面 {i + 1} 生成影片失敗，改用字卡：{e}")
+            if vis.get("free_after", True):
+                comfy.free()
+                store.log(eid, "已請 ComfyUI 釋放模型記憶體")
+
     # 2) narration, subtitles, per-scene clips
     sfxc = store.get_settings()["sfx"]
     sfx_on = bool(sfxc.get("enabled", True))
@@ -372,7 +395,9 @@ def st_assemble(ep: dict) -> bool:
         sc["_aligned"] = bool(words)
         all_cues += [{**c, "start": c["start"] + t0, "end": c["end"] + t0} for c in cues]
         img = assets / f"s{i:02d}.jpg"
-        if i in clip_bgs:
+        if i in vids:
+            sc["_visual"] = "h3video"
+        elif i in clip_bgs:
             sc["_visual"] = "stock"
         elif i in bgs:
             render.scene_with_bg(sc, size, bgs[i], img, channel, i, n)
@@ -383,7 +408,9 @@ def st_assemble(ep: dict) -> bool:
         if engine == "remotion":
             # the React composition draws the text itself, so it needs a text-free plate
             rm = assets / f"p{i:02d}.jpg"
-            if i in clip_bgs:
+            if i in vids:
+                media.frame(vids[i], 1.0, rm)  # Remotion gets a still from the clip
+            elif i in clip_bgs:
                 media.frame(clip_bgs[i], 1.0, rm)  # Remotion gets a still from the footage
             elif i in bgs:
                 shutil.copy2(bgs[i], rm)
@@ -398,7 +425,10 @@ def st_assemble(ep: dict) -> bool:
         elif tag:
             missing_sfx.add(tag)
             sc.pop("_sfx", None)
-        if i in clip_bgs:
+        if i in vids:
+            clip_dur = media.scene_clip_video(vids[i], wav, assets / f"s{i:02d}.mp4", size,
+                                              sfx=fx, sfx_gain=sfx_gain)
+        elif i in clip_bgs:
             clip_dur = media.scene_clip_video(clip_bgs[i], wav, assets / f"s{i:02d}.mp4", size,
                                               sfx=fx, sfx_gain=sfx_gain)
         else:
@@ -453,11 +483,13 @@ def st_assemble(ep: dict) -> bool:
     v["checks"]["字幕對齊"] = {"ok": aligned == n, "value": f"{aligned}/{n} 個畫面用強制對齊，其餘按字數估算"}
     v["checks"]["語速"] = {"ok": not rate_warn, "value": "正常" if not rate_warn else f"畫面 {rate_warn} 異常"}
     parts = []
+    if vids:
+        parts.append(f"MiniMax-H3 影片 {len(vids)} 段")
     if clip_bgs:
         parts.append(f"實拍素材 {len(clip_bgs)} 段")
     if bgs:
         parts.append(f"ComfyUI 生圖 {len(bgs)} 張")
-    slides = n - len(clip_bgs) - len(bgs)
+    slides = n - len(vids) - len(clip_bgs) - len(bgs)
     if slides:
         parts.append(f"字卡 {slides} 張")
     v["checks"]["畫面來源"] = {"ok": True, "value": ("、".join(parts) or "字卡")}

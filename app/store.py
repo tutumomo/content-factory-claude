@@ -43,7 +43,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "align_language": "Chinese",
     },
     "visuals": {
-        "source": "slides",                # slides = Pillow 字卡；comfy = ComfyUI 生圖當底
+        "source": "slides",                # slides = 字卡；comfy = 生圖當底；h3video = MiniMax-H3 生影片
         "comfy_url": "http://127.0.0.1:8188",
         "unet": "kromaKrea2_opd.safetensors",
         "clip": "Huihui-Qwen3-VL-4B-Instruct-abliterated-fp8_scaled.safetensors",
@@ -60,6 +60,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "style_hint": "cinematic editorial illustration, soft natural light, shallow depth of field, high detail",
         "pexels_key_env": "PEXELS_API_KEY",   # 只存名稱；實拍素材（Pexels）
         "pixabay_key_env": "PIXABAY_API_KEY", # 只存名稱；實拍素材（Pixabay）
+    },
+    "h3video": {
+        "enabled": True,
+        "unet": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "clip": "qwen3vl_32b_h3_ultra_uncensored_heretic_int8_convrot.safetensors",
+        "vae": "minimax_h3_video_vae_fp16.safetensors",
+        "sampler": "res_multistep",        # 參考工作流用的取樣器
+        "steps": 25,
+        "max_seconds": 6,                  # 單段最長秒數（H3 一次約 5–6 秒最自然）
+        "megapixels": 0.4,                 # 生成面積 ≈ 0.4 × 1024²（依畫框比例取整到 32 的倍數）
+        "timeout_s": 1800,                 # 單段逾時
+        "style_hint": "cinematic live-action photography, soft natural light, shallow depth of field, realistic texture",
     },
     "sfx": {
         "enabled": True,

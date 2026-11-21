@@ -133,10 +133,13 @@ def _graph(prompt: str, w: int, h: int, seed: int) -> dict:
 
 def generate(prompt: str, size: tuple[int, int], out: Path, seed: int | None = None) -> Path:
     """Run one text-to-image job and save the result to `out`."""
-    cid = uuid.uuid4().hex
-    tmo = float(cfg().get("timeout_s") or 600)
-    body = {"prompt": _graph(prompt, size[0], size[1], seed if seed is not None else int(time.time()) % 2**31),
-            "client_id": cid}
+    graph = _graph(prompt, size[0], size[1], seed if seed is not None else int(time.time()) % 2**31)
+    return run_graph(graph, out, float(cfg().get("timeout_s") or 600), "出圖")
+
+
+def run_graph(graph: dict, out: Path, tmo: float, what: str = "出圖") -> Path:
+    """Queue an API-format graph, wait for its first saved file (image or video) and copy it to `out`."""
+    body = {"prompt": graph, "client_id": uuid.uuid4().hex}
     try:
         r = httpx.post(base() + "/prompt", json=body, timeout=30)
         r.raise_for_status()
@@ -153,17 +156,20 @@ def generate(prompt: str, size: tuple[int, int], out: Path, seed: int | None = N
         entry = hr.get(pid) or {}
         status = entry.get("status") or {}
         if status.get("status_str") == "error":
-            raise ComfyError("ComfyUI 生成失敗（看 ComfyUI 主控台錯誤）")
-        imgs = [i for o in (entry.get("outputs") or {}).values() for i in (o.get("images") or [])]
+            why = next((m[1].get("exception_message", "") for m in status.get("messages") or []
+                        if m and m[0] == "execution_error" and isinstance(m[1], dict)), "")
+            raise ComfyError("ComfyUI 生成失敗：" + (why.strip()[:200] or "看 ComfyUI 主控台錯誤"))
+        imgs = [i for o in (entry.get("outputs") or {}).values() for k in ("images", "videos", "gifs")
+                for i in (o.get(k) or []) if isinstance(i, dict) and i.get("filename")]
         if imgs:
             im = imgs[0]
             vr = httpx.get(base() + "/view", params={"filename": im["filename"], "subfolder": im.get("subfolder", ""),
-                                                     "type": im.get("type", "output")}, timeout=60)
+                                                     "type": im.get("type", "output")}, timeout=300)
             vr.raise_for_status()
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(vr.content)
             return out
-    raise ComfyError(f"等超過 {tmo:.0f} 秒還沒出圖")
+    raise ComfyError(f"等超過 {tmo:.0f} 秒還沒{what}")
 
 
 def free() -> None:

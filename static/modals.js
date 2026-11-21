@@ -1,4 +1,4 @@
-import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261121e";
+import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261121f";
 
 export async function openSettingsModal() {
   const s = await api("/api/settings");
@@ -99,6 +99,7 @@ export async function openSettingsModal() {
           <option value="comfy" ${s.visuals?.source === "comfy" ? "selected" : ""}>ComfyUI 生圖當底（文字疊在上面）</option>
           <option value="stock" ${s.visuals?.source === "stock" ? "selected" : ""}>免費實拍素材（Pexels／Pixabay，真動態畫面）</option>
           <option value="mix" ${s.visuals?.source === "mix" ? "selected" : ""}>混合：有素材用素材，其餘生圖／字卡</option>
+          <option value="h3video" ${s.visuals?.source === "h3video" ? "selected" : ""}>ComfyUI MiniMax-H3 生影片（每段一段 AI 動態畫面，文字疊上去）</option>
         </select>
         <div class="grid-2">
           <div><label>Pexels 金鑰環境變數名稱（只填名稱，免費申請）</label><input id="v-pexels_key_env" value="${esc(s.visuals?.pexels_key_env || "PEXELS_API_KEY")}"></div>
@@ -126,6 +127,21 @@ export async function openSettingsModal() {
         </div>
         <div class="row" style="margin-top:10px"><button type="button" class="btn" id="v-health">測試 ComfyUI 連線</button><span class="muted" id="v-health-out"></span></div>
         <div class="warn" style="margin-top:10px">ComfyUI、LM Studio、Strata 共用同一塊 GPU 記憶體。生圖那一段時間不要把兩個大模型同時開著。</div>
+        <h2 style="margin-top:18px">MiniMax-H3 影片（畫面來源選 h3video 時使用）</h2>
+        <label style="margin-top:0"><input type="checkbox" id="h-enabled" style="width:auto;margin-right:6px" ${s.h3video?.enabled !== false ? "checked" : ""}> 啟用 H3 影片</label>
+        <div class="grid-2">
+          <div><label>UNET</label><input id="h-unet" value="${esc(s.h3video?.unet || "")}"></div>
+          <div><label>CLIP</label><input id="h-clip" value="${esc(s.h3video?.clip || "")}"></div>
+          <div><label>VAE（影片用，不是生圖那顆）</label><input id="h-vae" value="${esc(s.h3video?.vae || "")}"></div>
+          <div><label>取樣器</label><input id="h-sampler" value="${esc(s.h3video?.sampler || "res_multistep")}"></div>
+          <div><label>步數</label><input id="h-steps" type="number" min="1" max="50" value="${s.h3video?.steps ?? 25}"></div>
+          <div><label>單段最長秒數</label><input id="h-max_seconds" type="number" min="2" max="15" value="${s.h3video?.max_seconds ?? 6}"></div>
+          <div><label>生成畫素（百萬；0.4 ≈ 650×650）</label><input id="h-megapixels" type="number" min="0.15" max="1.2" step="0.05" value="${s.h3video?.megapixels ?? 0.4}"></div>
+          <div><label>單段逾時（秒）</label><input id="h-timeout_s" type="number" min="120" max="7200" value="${s.h3video?.timeout_s ?? 1800}"></div>
+        </div>
+        <label>影片風格提示（英文，接在畫面描述前面）</label>
+        <input id="h-style_hint" value="${esc(s.h3video?.style_hint || "")}">
+        <div class="muted" style="margin-top:6px">H3 每段 2–15 秒、24 fps；旁白比影片長時影片會循環補滿。影片自己的聲音不用，旁白／音效／音樂另外混。生每段都要重載 32B 文字編碼器，很吃時間，段數多就先少跑幾段試。</div>
         <h2 style="margin-top:18px">音效</h2>
         <label style="margin-top:0"><input type="checkbox" id="x-enabled" style="width:auto;margin-right:6px" ${s.sfx?.enabled !== false ? "checked" : ""}> 每個畫面開頭墊一個音效（講稿有指定才放）</label>
         <div class="grid-2">
@@ -225,6 +241,10 @@ export async function openSettingsModal() {
           }
           for (const k of ["steps", "cfg", "timeout_s"]) s.visuals[k] = +$(`#v-${k}`, root).value;
           s.visuals.free_after = $("#v-free_after", root).checked;
+          s.h3video = { ...(s.h3video || {}) };
+          for (const k of ["unet", "clip", "vae", "sampler", "style_hint"]) s.h3video[k] = $(`#h-${k}`, root).value;
+          for (const k of ["steps", "max_seconds", "megapixels", "timeout_s"]) s.h3video[k] = +$(`#h-${k}`, root).value;
+          s.h3video.enabled = $("#h-enabled", root).checked;
           s.sfx = { ...(s.sfx || {}) };
           for (const k of ["library_dir", "model_path"]) s.sfx[k] = $(`#x-${k}`, root).value;
           s.sfx.gain_db = +$("#x-gain_db", root).value;
