@@ -6,6 +6,10 @@ const KIND_LABEL = { radar: "雷達", note: "筆記", link: "連結", quote: "�
 let ideaFilter = "all";
 let ideaQuery = "";
 let quickTab = "note";
+let ideaView = (() => {
+  try { return localStorage.getItem("cf_ideas_view") === "table" ? "table" : "board"; }
+  catch { return "board"; }
+})();
 let radarTimer = null;
 
 export async function viewIdeas(main) {
@@ -27,38 +31,74 @@ export async function viewIdeas(main) {
       );
     });
 
-    const grid = $("#idea-grid", main);
-    if (!grid) return;
+    const box = $("#idea-view", main);
+    if (!box) return;
     if (!filtered.length) {
-      grid.innerHTML = `<div class="card empty" style="grid-column:1/-1">目前沒有符合條件的靈感。隨手記一條，或用右邊「AI 雷達掃描」找題目。</div>`;
+      box.innerHTML = `<div class="card empty">目前沒有符合條件的靈感。隨手記一條，或用右邊「AI 雷達掃描」找題目。</div>`;
       return;
     }
 
-    grid.innerHTML = filtered.map((it) => {
+    const linkUrl = (it) => (it.urls && it.urls[0]) || (String(it.source || "").startsWith("http") ? it.source : "");
+    const actions = (it) => {
       const ep = it.episode_id ? epMap.get(it.episode_id) : null;
-      const bodyTxt = it.notes || it.why || "";
-      const linkUrl = (it.urls && it.urls[0]) || (String(it.source || "").startsWith("http") ? it.source : "");
-      return `<article class="card idea-card">
-        <div class="idea-card-head">
-          <span class="pill accent">${esc(KIND_LABEL[it.kind] || it.kind)}</span>
-          <span class="pill">${fmtName(it.format)}</span>
-          ${it.heat ? `<span class="pill">熱度：${esc(it.heat)}</span>` : ""}
-          <span class="grow"></span>
-          <span class="muted" style="font-size:12px">${when(it.found).slice(5, 16)}</span>
-        </div>
-        <div class="idea-title">${esc(it.title)}</div>
-        ${bodyTxt && bodyTxt !== it.title ? `<div class="idea-body">${esc(bodyTxt)}</div>` : ""}
-        ${linkUrl ? `<div class="muted" style="word-break:break-all"><a href="${esc(linkUrl)}" target="_blank" rel="noopener noreferrer">🔗 ${esc(linkUrl)}</a></div>` : it.source ? `<div class="muted">來源：${esc(it.source)}</div>` : ""}
-        <div class="idea-foot">
-          ${ep ? `${statusPill(ep)}<a class="btn sm" href="#/ep/${encodeURIComponent(ep.id)}">前往集數 →</a>` : `<button type="button" class="btn primary sm" data-make="${esc(it.id)}">開做這支 →</button>`}
-          ${ep ? `<button type="button" class="btn sm" data-make="${esc(it.id)}">再開新集</button>` : ""}
-          <span class="grow"></span>
-          <button type="button" class="btn danger sm" data-del="${esc(it.id)}">刪除</button>
-        </div>
-      </article>`;
-    }).join("");
+      return `${ep ? `<a class="btn sm" href="#/ep/${encodeURIComponent(ep.id)}">前往集數 →</a>` : `<button type="button" class="btn primary sm" data-make="${esc(it.id)}">開做這支 →</button>`}
+        ${ep ? `<button type="button" class="btn sm" data-make="${esc(it.id)}">再開新集</button>` : ""}
+        <button type="button" class="btn danger sm" data-del="${esc(it.id)}">刪除</button>`;
+    };
 
-    $$("[data-make]", grid).forEach((btn) => {
+    box.innerHTML = ideaView === "board"
+      ? `<div class="idea-grid">${filtered.map((it) => {
+          const ep = it.episode_id ? epMap.get(it.episode_id) : null;
+          const bodyTxt = it.notes || it.why || "";
+          const url = linkUrl(it);
+          return `<article class="card idea-card">
+            <div class="idea-card-head">
+              <span class="pill accent">${esc(KIND_LABEL[it.kind] || it.kind)}</span>
+              <span class="pill">${fmtName(it.format)}</span>
+              ${it.heat ? `<span class="pill">熱度：${esc(it.heat)}</span>` : ""}
+              <span class="grow"></span>
+              <span class="muted" style="font-size:12px">${when(it.found).slice(5, 16)}</span>
+            </div>
+            <div class="idea-title">${esc(it.title)}</div>
+            ${bodyTxt && bodyTxt !== it.title ? `<div class="idea-body">${esc(bodyTxt)}</div>` : ""}
+            ${url ? `<div class="muted" style="word-break:break-all"><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">🔗 ${esc(url)}</a></div>` : it.source ? `<div class="muted">來源：${esc(it.source)}</div>` : ""}
+            <div class="idea-foot">
+              ${ep ? statusPill(ep) : ""}
+              ${actions(it)}
+            </div>
+          </article>`;
+        }).join("")}</div>`
+      : `<div class="data-table-wrap">
+          <table class="data-table" style="table-layout:fixed">
+            <colgroup>
+              <col style="width:32%"><col style="width:76px"><col style="width:64px"><col style="width:72px">
+              <col style="width:170px"><col style="width:100px"><col style="width:84px"><col style="width:168px">
+            </colgroup>
+            <thead><tr><th>靈感</th><th>類型</th><th>格式</th><th>熱度</th><th>來源</th><th>集數</th><th>收錄時間</th><th>操作</th></tr></thead>
+            <tbody>
+              ${filtered.map((it) => {
+                const ep = it.episode_id ? epMap.get(it.episode_id) : null;
+                const url = linkUrl(it);
+                const bodyTxt = it.notes || it.why || "";
+                return `<tr>
+                  <td>
+                    <b>${esc(it.title)}</b>
+                    ${bodyTxt && bodyTxt !== it.title ? `<div class="muted" style="font-size:12px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(bodyTxt)}</div>` : ""}
+                  </td>
+                  <td><span class="pill accent">${esc(KIND_LABEL[it.kind] || it.kind)}</span></td>
+                  <td><span class="pill">${fmtName(it.format)}</span></td>
+                  <td>${it.heat ? `<span class="pill" title="${esc(it.heat)}" style="max-width:66px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle">${esc(it.heat)}</span>` : `<span class="muted">—</span>`}</td>
+                  <td class="muted" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(url || it.source || "")}">${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>` : esc(it.source || "—")}</td>
+                  <td>${ep ? statusPill(ep) : `<span class="muted">未開拍</span>`}</td>
+                  <td class="muted">${when(it.found).slice(5, 16)}</td>
+                  <td><div class="row" style="gap:6px;flex-wrap:nowrap;white-space:nowrap">${actions(it)}</div></td>
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>`;
+
+    $$("[data-make]", box).forEach((btn) => {
       btn.onclick = () => {
         const it = ideas.find((x) => x.id === btn.dataset.make);
         if (!it) return;
@@ -72,7 +112,7 @@ export async function viewIdeas(main) {
       };
     });
 
-    $$("[data-del]", grid).forEach((btn) => {
+    $$("[data-del]", box).forEach((btn) => {
       btn.onclick = async () => {
         await api(`/api/ideas/${encodeURIComponent(btn.dataset.del)}`, { method: "DELETE" });
         const idx = ideas.findIndex((x) => x.id === btn.dataset.del);
@@ -132,8 +172,13 @@ export async function viewIdeas(main) {
           ["short", "短片"], ["long", "長片"],
         ].map(([k, l]) => `<button type="button" class="fpill ${ideaFilter === k ? "on" : ""}" data-ifilt="${k}">${l}</button>`).join("")}
       </div>
+      <span class="grow"></span>
+      <div class="seg">
+        <button type="button" data-iview="board" class="${ideaView === "board" ? "on" : ""}">看板</button>
+        <button type="button" data-iview="table" class="${ideaView === "table" ? "on" : ""}">表格</button>
+      </div>
     </div>
-    <div class="idea-grid" id="idea-grid"></div>
+    <div id="idea-view"></div>
   `;
 
   $$("[data-qtab]", main).forEach((b) => {
@@ -217,6 +262,14 @@ export async function viewIdeas(main) {
     b.onclick = () => {
       ideaFilter = b.dataset.ifilt;
       $$("[data-ifilt]", main).forEach((x) => x.classList.toggle("on", x.dataset.ifilt === ideaFilter));
+      renderList();
+    };
+  });
+  $$("[data-iview]", main).forEach((b) => {
+    b.onclick = () => {
+      ideaView = b.dataset.iview;
+      try { localStorage.setItem("cf_ideas_view", ideaView); } catch {}
+      $$("[data-iview]", main).forEach((x) => x.classList.toggle("on", x.dataset.iview === ideaView));
       renderList();
     };
   });
