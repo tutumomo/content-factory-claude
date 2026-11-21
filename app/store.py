@@ -38,6 +38,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "emotion": "",                    # index-tts2.5 的情緒示範文字
         "emotion_alpha": 1.0,             # 0–1，情緒強度
         "per_scene_emotion": False,       # 逐段套用講稿情緒；Qwen3 的語氣指令會讓聲音聽起來像換人，預設關
+        "convert_simplified": True,       # 送 TTS 前把繁體轉簡體（audio.cpp 讀繁常常出錯）
         "align_model": "qwen3-forced-aligner-0.6b",
         "align_language": "Chinese",
     },

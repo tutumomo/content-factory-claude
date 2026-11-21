@@ -12,6 +12,7 @@ import httpx
 from . import store
 
 PUNCT = "，。！？；：、,.!?;:…—「」『』（）()\"'"
+_CC = None  # lazily built OpenCC converter (tw2sp); False when the package is missing
 
 
 class MediaError(RuntimeError):
@@ -77,8 +78,26 @@ def split_for_tts(text: str, limit: int = 110) -> list[str]:
     return [c.strip() for c in out if c.strip()]
 
 
+def to_simplified(text: str) -> str:
+    """audio.cpp 的 TTS 對繁體字常讀錯，送進去前先轉簡體（台灣用詞一併轉，例如 軟體→软件）。字幕仍用原文。"""
+    global _CC
+    if not text:
+        return text
+    if _CC is None:
+        try:
+            from opencc import OpenCC
+            _CC = OpenCC("tw2sp")
+        except ImportError:
+            _CC = False
+    if _CC is False:
+        return text
+    return _CC.convert(text)
+
+
 def tts(text: str, out: Path, emotion: str = "") -> Path:
     cfg = store.get_settings()["tts"]
+    if cfg.get("convert_simplified", True) and str(cfg.get("language", "")).lower() in ("chinese", "中文", "zh"):
+        text = to_simplified(text)
     opts = {k: v for k, v in (("language", cfg.get("language")), ("instruct", cfg.get("instruct"))) if v}
     emo = (emotion or "").strip() or (cfg.get("emotion") or "")
     if emo:

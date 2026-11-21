@@ -46,6 +46,31 @@ def style_of(script: dict | None = None) -> str:
     return s or (cfg().get("style") or "").strip() or DEFAULT_STYLE
 
 
+def model_id(base: str) -> str:
+    """Configured id when the server has it; otherwise whatever YuE2 entry the server exposes.
+
+    Model ids come from whoever installed the package (the sync tool names them after the
+    package, e.g. yue2-main-q8-0), so a stale id should fall back to the family rather than fail.
+    """
+    want = cfg().get("model") or "yue2"
+    try:
+        r = httpx.get(base + "/v1/models", timeout=5)
+        r.raise_for_status()
+        rows = r.json().get("data", [])
+    except httpx.HTTPError:
+        return want
+    ids = [m.get("id") for m in rows]
+    if want in ids:
+        return want
+    for m in rows:
+        if m.get("family") == "yue2":
+            return m.get("id")
+    for i in ids:
+        if str(i).startswith("yue2"):
+            return i
+    return want
+
+
 def _key(style: str, seconds: float, seed: int) -> str:
     return hashlib.sha1(f"{style}|{seconds:.1f}|{seed}".encode()).hexdigest()[:16]
 
@@ -61,7 +86,7 @@ def generate(seconds: float, style: str = "", seed: int | None = None, out: Path
     if path.exists() and path.stat().st_size > 44 and not force:
         return path
     base = (c.get("base_url") or store.get_settings()["tts"]["base_url"]).rstrip("/")
-    model = c.get("model") or "yue2"
+    model = model_id(base)
     options = {
         "style": style,
         "cot": "off",
@@ -99,7 +124,7 @@ def duration(p: Path) -> float:
 def status() -> dict:
     c = cfg()
     base = (c.get("base_url") or store.get_settings()["tts"]["base_url"]).rstrip("/")
-    model = c.get("model") or "yue2"
+    model = model_id(base)
     info = {"enabled": bool(c.get("enabled", True)), "base_url": base, "model": model,
             "style": style_of(), "cache": str(cache_dir()), "models": [], "ok": False, "detail": ""}
     try:
