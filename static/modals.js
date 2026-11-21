@@ -69,6 +69,7 @@ export async function openSettingsModal() {
           <div><label>情緒示範文字（index-tts2.5 用）</label><input id="t-emotion" value="${esc(s.tts.emotion || "")}"></div>
           <div><label>情緒強度 0–1</label><input id="t-emotion_alpha" type="number" min="0" max="1" step="0.1" value="${s.tts.emotion_alpha ?? 1}"></div>
         </div>
+        <label style="margin-top:0"><input type="checkbox" id="t-per_scene_emotion" style="width:auto;margin-right:6px" ${s.tts?.per_scene_emotion ? "checked" : ""}> 每段套用講稿情緒（qwen3 的語氣指令會讓聲音聽起來像換人，想固定同一個聲音就關掉）</label>
         <label>字幕對齊模型 id（留空改用字數估算）</label>
         <input id="t-align_model" value="${esc(s.tts.align_model)}">
       </div>
@@ -171,6 +172,7 @@ export async function openSettingsModal() {
             s.tts[k] = $(`#t-${k}`, root).value;
           }
           s.tts.emotion_alpha = +$("#t-emotion_alpha", root).value;
+          s.tts.per_scene_emotion = $("#t-per_scene_emotion", root).checked;
           s.youtube = { ...(s.youtube || {}), client_file: $("#y-client_file", root).value,
             privacy: $("#y-privacy", root).value, category_id: $("#y-category_id", root).value,
             made_for_kids: $("#y-made_for_kids", root).checked };

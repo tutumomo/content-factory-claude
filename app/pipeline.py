@@ -275,15 +275,18 @@ def st_assemble(ep: dict) -> bool:
     sfxc = store.get_settings()["sfx"]
     sfx_on = bool(sfxc.get("enabled", True))
     sfx_gain = float(sfxc.get("gain_db", -16))
+    per_emo = bool(store.get_settings()["tts"].get("per_scene_emotion"))
     clips, all_cues, t0, n = [], [], 0.0, len(scenes)
     durs: list[float] = []
     rm_imgs: list[str] = []
     used_sfx, missing_sfx = 0, set()
     for i, sc in enumerate(scenes):
-        store.log(eid, f"畫面 {i + 1}/{n}：配音中" + (f"（{sc['emotion']}）" if sc.get("emotion") else ""))
+        # Qwen3 的語氣指令會把聲音帶走（同一段文字換語氣聽起來像換人）；逐段情緒要使用者主動打開才套用
+        emo = sc.get("emotion", "") if per_emo else ""
+        store.log(eid, f"畫面 {i + 1}/{n}：配音中" + (f"（{emo}）" if emo else ""))
         parts = []
         for j, chunk in enumerate(media.split_for_tts(sc["narration"])):
-            parts.append(media.tts(chunk, assets / f"s{i:02d}_{j:02d}.wav", emotion=sc.get("emotion", "")))
+            parts.append(media.tts(chunk, assets / f"s{i:02d}_{j:02d}.wav", emotion=emo))
         wav = media.concat_wavs(parts, assets / f"s{i:02d}.wav") if len(parts) > 1 else parts[0].rename(assets / f"s{i:02d}.wav")
         dur = media.wav_duration(wav)
         words = media.align(wav, sc["narration"])

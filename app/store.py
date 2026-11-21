@@ -37,6 +37,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "voice_ref": "",                  # 參考音檔路徑；index-tts2.5 / zonos3-mini 必填
         "emotion": "",                    # index-tts2.5 的情緒示範文字
         "emotion_alpha": 1.0,             # 0–1，情緒強度
+        "per_scene_emotion": False,       # 逐段套用講稿情緒；Qwen3 的語氣指令會讓聲音聽起來像換人，預設關
         "align_model": "qwen3-forced-aligner-0.6b",
         "align_language": "Chinese",
     },
