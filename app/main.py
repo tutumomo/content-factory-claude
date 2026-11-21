@@ -71,6 +71,12 @@ def get_settings():
     return store.get_settings()
 
 
+@app.get("/api/tts/models")
+def tts_models(base_url: str = ""):
+    """Voice-capable models the audio.cpp server has registered (for the settings dropdown)."""
+    return media.list_models(base_url or None)
+
+
 @app.put("/api/settings")
 def put_settings(s: dict = Body(...)):
     return store.save_settings(s)

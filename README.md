@@ -43,7 +43,7 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 ## 設定
 
 - **LLM**：預設 `claude -p`（用你本機 Claude Code 的登入）。也可換成 OpenAI 相容端點（LM Studio :1234、Strata :8081），或「示範模式」只測流程。API key 只填環境變數名稱。
-- **配音**：audio.cpp `qwen3-tts-1.7b-customvoice`，聲音 `vivian`；字幕對齊 `qwen3-forced-aligner-0.6b`。audio.cpp 同時只載入一個模型，被別的程式佔用時會自動等待重試（最多 15 分鐘）。送進 TTS 的文字會先轉成簡體（OpenCC tw2sp，例如 軟體→软件），因為 audio.cpp 讀繁體字常讀錯；字幕仍用原文。逐段情緒預設關閉，避免同一支片聽起來像換人。
+- **配音**：audio.cpp `qwen3-tts-1.7b-customvoice`，聲音 `vivian`；字幕對齊 `qwen3-forced-aligner-0.6b`。設定頁的 TTS 模型改成下拉選單，清單自動讀取 audio.cpp 上已登記的語音模型（`tts`／`clon`／`vdes`）。audio.cpp 同時只載入一個模型，被別的程式佔用時會自動等待重試（最多 15 分鐘）。送進 TTS 的文字會先轉成簡體（OpenCC tw2sp，例如 軟體→软件），因為 audio.cpp 讀繁體字常讀錯；字幕仍用原文。逐段情緒預設關閉，避免同一支片聽起來像換人。
 - **畫面**：預設 Pillow 字卡；可切 ComfyUI（Krea-2）生底圖、文字疊在上面。
 - **音效**：每個畫面可指定一個標籤，從 `data/sfx` 音效庫挑；缺的用 MOSS-SoundEffect 在設定頁批次生成。
 - **背景音樂**：YuE2 3B（audio.cpp）生成純音樂，長度跟著成片，講話時自動壓低（sidechain），結果依風格／長度／seed 快取在 `data/music`。講稿的 `music` 欄位可逐集指定風格。

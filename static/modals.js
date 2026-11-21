@@ -58,9 +58,10 @@ export async function openSettingsModal() {
         <label>audio.cpp 伺服器</label>
         <input id="t-base_url" value="${esc(s.tts.base_url)}">
         <div class="grid-2">
-          <div><label>TTS 模型 id</label><input id="t-model" value="${esc(s.tts.model)}"></div>
+          <div><label>TTS 模型 id</label><select id="t-model"><option value="${esc(s.tts.model)}" selected>${esc(s.tts.model)}</option></select></div>
           <div><label>聲音</label><select id="t-voice">${["vivian", "serena", "uncle_fu", "dylan", "eric", "ryan", "aiden", "ono_anna", "sohee"].map((v) => `<option ${v === s.tts.voice ? "selected" : ""}>${v}</option>`).join("")}</select></div>
         </div>
+        <div class="row" style="margin-top:4px"><button type="button" class="btn" id="t-models-refresh">重新讀取模型清單</button><span class="muted" id="t-models-out"></span><span class="muted">清單來自 audio.cpp 已下載的語音模型</span></div>
         <label>語氣指示</label>
         <input id="t-instruct" value="${esc(s.tts.instruct)}">
         <label>參考音檔路徑（index-tts2.5、zonos3-mini 必填；qwen3 模型可留空）</label>
@@ -233,6 +234,7 @@ export async function openSettingsModal() {
           $("#s-test-out", root).textContent = (h.llm.ok ? "✓ " : "✗ ") + h.llm.detail;
         };
         setupYouTubePane(root, s, collect);
+        setupTtsModels(root, s);
         setupVisualPane(root, s, collect);
       },
     });
@@ -259,6 +261,35 @@ export function loginGoogle() {
     window.addEventListener("message", onMsg);
     const timer = setInterval(() => { if (w.closed) done(); }, 1000);
   });
+}
+
+async function setupTtsModels(root, s) {
+  const sel = $("#t-model", root);
+  const out = $("#t-models-out", root);
+  const options = (keep, rows) => rows.map((m) =>
+    `<option value="${esc(m.id)}" ${m.id === keep ? "selected" : ""}>${esc(m.id)}（${esc(m.family || m.task || "")}${m.loaded ? "・已載入" : ""}）</option>`).join("");
+
+  const load = async () => {
+    const keep = sel.value || s.tts.model || "";
+    out.textContent = "讀取模型清單…";
+    try {
+      const base = $("#t-base_url", root)?.value || s.tts.base_url;
+      const res = await api(`/api/tts/models?base_url=${encodeURIComponent(base)}`);
+      const rows = res.models || [];
+      sel.innerHTML = options(keep, rows);
+      if (keep && !rows.some((m) => m.id === keep)) {
+        sel.insertAdjacentHTML("afterbegin", `<option value="${esc(keep)}" selected>${esc(keep)}（伺服器上沒有這個 id）</option>`);
+      }
+      if (!rows.length) sel.innerHTML = `<option value="${esc(keep)}" selected>${esc(keep)}</option>`;
+      out.textContent = res.ok ? `已讀到 ${rows.length} 個語音模型` : (res.detail || "伺服器上沒有語音模型");
+    } catch (e) {
+      sel.innerHTML = `<option value="${esc(keep)}" selected>${esc(keep)}</option>`;
+      out.textContent = `讀不到模型清單：${e.message}（保留原本的 id）`;
+    }
+  };
+
+  $("#t-models-refresh", root).onclick = load;
+  await load();
 }
 
 async function setupYouTubePane(root, s, collect) {

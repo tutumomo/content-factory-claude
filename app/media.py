@@ -54,6 +54,30 @@ def tts_health() -> dict:
         return {"ok": False, "models": [], "detail": f"audio.cpp 伺服器連不上：{e}（請先執行 audiocpp-webui 或啟動 audiocpp_server）"}
 
 
+VOICE_TASKS = {"tts", "clon", "vdes"}  # audio.cpp task tokens that produce narration
+
+
+def list_models(base_url: str | None = None) -> dict:
+    """Every model the audio.cpp server has registered, split into voice-capable and the rest."""
+    cfg = store.get_settings()["tts"]
+    base = (base_url or cfg["base_url"]).rstrip("/")
+    out = {"base_url": base, "models": [], "other": [], "current": cfg["model"], "ok": False, "detail": ""}
+    try:
+        r = httpx.get(base + "/v1/models", timeout=5)
+        r.raise_for_status()
+        rows = r.json().get("data", [])
+    except httpx.HTTPError as e:
+        out["detail"] = f"audio.cpp 伺服器連不上：{e}"
+        return out
+    for m in rows:
+        item = {"id": m.get("id"), "family": m.get("family") or "", "task": m.get("task") or "",
+                "loaded": bool(m.get("loaded"))}
+        (out["models"] if item["task"] in VOICE_TASKS else out["other"]).append(item)
+    out["ok"] = bool(out["models"])
+    out["detail"] = f"{len(out['models'])} 個語音模型" if out["ok"] else "伺服器上沒有語音模型"
+    return out
+
+
 def split_for_tts(text: str, limit: int = 110) -> list[str]:
     parts = re.split(r"(?<=[。！？!?；;])", text)
     chunks, cur = [], ""
