@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -23,6 +24,14 @@ DEFAULT_STYLE = ("instrumental background music, warm lo-fi, soft piano, light b
 FRAMES_PER_SEC = 25            # YuE2 semantic frames per second of audio
 MAX_SECONDS = 354.0            # semantic_max_tokens cap 9000 → 360 s; stay under it
 
+# Google DeepMind Lyria through the Gemini API "Interactions" endpoint.
+LYRIA_API = "https://generativelanguage.googleapis.com/v1beta/interactions"
+LYRIA_REVISION = "2026-05-20"
+LYRIA_MODELS = {
+    "lyria-3-clip-preview": "Lyria 3 Clip（固定 30 秒片段，成片時 loop）",
+    "lyria-3.5": "Lyria 3.5（完整編曲，約 2 分鐘，用提示控制長度）",
+}
+
 
 class MusicError(RuntimeError):
     pass
@@ -30,6 +39,16 @@ class MusicError(RuntimeError):
 
 def cfg() -> dict:
     return store.get_settings().get("music") or {}
+
+
+def provider() -> str:
+    return (cfg().get("provider") or "audiocpp").lower()
+
+
+def lyria_key() -> tuple[str, str]:
+    """(key value, env var name). The value is never logged or returned by the API."""
+    name = (cfg().get("lyria_key_env") or "GEMINI_API_KEY").strip()
+    return os.environ.get(name, ""), name
 
 
 def cache_dir() -> Path:
@@ -77,7 +96,9 @@ def _key(style: str, seconds: float, seed: int) -> str:
 
 def generate(seconds: float, style: str = "", seed: int | None = None, out: Path | None = None,
              force: bool = False) -> Path:
-    """Render an instrumental bed of `seconds` length (capped) and return the wav path."""
+    """Render an instrumental bed of `seconds` length (capped) and return the audio path."""
+    if provider() == "lyria":
+        return lyria_generate(style, seconds, out=out, force=force)
     c = cfg()
     style = (style or "").strip() or (c.get("style") or "").strip() or DEFAULT_STYLE
     seed = int(seed if seed is not None else (c.get("seed") or 1234))
@@ -112,6 +133,67 @@ def generate(seconds: float, style: str = "", seed: int | None = None, out: Path
     return path
 
 
+def _find_audio(node):
+    """First audio content block anywhere in an Interactions response."""
+    if isinstance(node, dict):
+        if node.get("type") in ("audio", "audio_output") and isinstance(node.get("data"), str) and node["data"]:
+            return node
+        for v in node.values():
+            hit = _find_audio(v)
+            if hit:
+                return hit
+    elif isinstance(node, list):
+        for v in node:
+            hit = _find_audio(v)
+            if hit:
+                return hit
+    return None
+
+
+def lyria_generate(style: str = "", seconds: float = 30.0, out: Path | None = None,
+                   force: bool = False) -> Path:
+    """Instrumental bed from Google Lyria 3 (Gemini API). Cached per model+prompt."""
+    c = cfg()
+    key, key_name = lyria_key()
+    if not key:
+        raise MusicError(f"沒有 Google API 金鑰：請設定環境變數 {key_name}")
+    model = (c.get("lyria_model") or "lyria-3-clip-preview").strip()
+    style = (style or c.get("style") or "").strip() or DEFAULT_STYLE
+    prompt = style.rstrip(".")
+    low = prompt.lower()
+    if "instrumental" not in low:
+        prompt += ", instrumental"
+    if "no vocals" not in low:
+        prompt += ", no vocals"
+    if model != "lyria-3-clip-preview":
+        prompt += f". Target length about {int(max(20, min(float(seconds), 170)))} seconds"
+    prompt += "."
+    tag = hashlib.sha1(f"lyria|{model}|{prompt}".encode()).hexdigest()[:16]
+    path = out or (cache_dir() / f"bgm_lyria_{tag}.mp3")
+    if path.exists() and path.stat().st_size > 1024 and not force:
+        return path
+    body = {"model": model, "input": prompt}
+    if model != "lyria-3-clip-preview":
+        body["response_format"] = {"type": "audio"}
+    try:
+        r = httpx.post(LYRIA_API, json=body, timeout=float(c.get("timeout_s") or 600),
+                       headers={"x-goog-api-key": key, "Api-Revision": LYRIA_REVISION})
+    except httpx.HTTPError as e:
+        raise MusicError(f"Lyria 連線失敗：{e}") from e
+    if r.status_code != 200:
+        raise MusicError(f"Lyria 生成失敗 HTTP {r.status_code}：{r.text[:300]}")
+    data = r.json()
+    block = _find_audio(data)
+    if not block:
+        raise MusicError(f"Lyria 沒有回傳音訊：{json.dumps(data, ensure_ascii=False)[:300]}")
+    raw = base64.b64decode(block["data"])
+    if raw[:4] == b"RIFF":
+        path = path.with_suffix(".wav")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    return path
+
+
 def duration(p: Path) -> float:
     out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
                           "-of", "default=nw=1:nk=1", str(p)], capture_output=True, text=True)
@@ -123,10 +205,21 @@ def duration(p: Path) -> float:
 
 def status() -> dict:
     c = cfg()
+    cached = sorted(p.name for p in cache_dir().glob("bgm_*.*"))
+    if provider() == "lyria":
+        key, key_name = lyria_key()
+        model = (c.get("lyria_model") or "lyria-3-clip-preview").strip()
+        return {"enabled": bool(c.get("enabled", True)), "provider": "lyria", "model": model,
+                "models": list(LYRIA_MODELS), "style": style_of(), "cache": str(cache_dir()),
+                "key_env": key_name, "key_set": bool(key), "ok": bool(key),
+                "detail": "就緒" if key else f"沒有環境變數 {key_name}（Google AI Studio 金鑰）",
+                "note": "Lyria 產生的音訊內嵌 SynthID 浮水印；Gemini API 專案需有額度且未達月上限",
+                "cached": cached}
     base = (c.get("base_url") or store.get_settings()["tts"]["base_url"]).rstrip("/")
     model = model_id(base)
-    info = {"enabled": bool(c.get("enabled", True)), "base_url": base, "model": model,
-            "style": style_of(), "cache": str(cache_dir()), "models": [], "ok": False, "detail": ""}
+    info = {"enabled": bool(c.get("enabled", True)), "provider": "audiocpp", "base_url": base,
+            "model": model, "style": style_of(), "cache": str(cache_dir()), "models": [],
+            "ok": False, "detail": ""}
     try:
         r = httpx.get(base + "/v1/models", timeout=5)
         r.raise_for_status()
@@ -135,7 +228,7 @@ def status() -> dict:
         info["detail"] = "就緒" if info["ok"] else f"伺服器上沒有 {model}"
     except httpx.HTTPError as e:
         info["detail"] = f"audio.cpp 伺服器連不上：{e}"
-    info["cached"] = sorted(p.name for p in cache_dir().glob("bgm_*.wav"))
+    info["cached"] = cached
     return info
 
 

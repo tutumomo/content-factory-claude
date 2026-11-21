@@ -31,7 +31,7 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 | 方向簡報 | 3–4 個切入方向＋需求證清單 | **挑方向**、補觀點 |
 | 寫講稿 | 依方向寫、拆成畫面 | — |
 | 多模型互審 | 事實查核／觀眾理解／節奏／AI 腔四個角色打分，未過門檻自動修（最多 3 輪） | 看講稿、可直接改字（可在設定關掉這個關卡） |
-| 配音／畫面／字幕 | audio.cpp Qwen3-TTS 配音、強制對齊做字幕、Pillow 字卡或 ComfyUI 生圖當底、每畫面墊音效、YuE2 生成背景音樂、ffmpeg 合成＋音量正規化；也可改用 Remotion 渲染動畫版成片 | — |
+| 配音／畫面／字幕 | audio.cpp Qwen3-TTS 配音、強制對齊做字幕、Pillow 字卡或 ComfyUI 生圖當底、每畫面墊音效、YuE2／Lyria 生成背景音樂、ffmpeg 合成＋音量正規化；也可改用 Remotion 渲染動畫版成片 | — |
 | 自動檢查 | 實測長度、解析度、音量、長靜音、字幕對齊、語速、畫面來源、音效、背景音樂、成片引擎 | — |
 | 包裝 | 標題候選、縮圖候選、說明欄、IG 輪播圖卡、FB 貼文 | **挑標題、挑縮圖**、排程時間 |
 | 成片審核 | — | 看成片 → **核准**或**退件**（一句理由） |
@@ -46,7 +46,7 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 - **配音**：audio.cpp `qwen3-tts-1.7b-customvoice`，聲音 `vivian`；字幕對齊 `qwen3-forced-aligner-0.6b`。設定頁的 TTS 模型改成下拉選單，清單自動讀取 audio.cpp 上已登記的語音模型（`tts`／`clon`／`vdes`）。**參考音色**下拉也從 audio.cpp 的 `/v1/audio/voices` 抓：內建聲音（vivian 等，只適用 Qwen3 CustomVoice）與伺服器 `voice_dir` 音色庫（搭配 clon 模型；qwen3 Base 沒參考文字時自動改用 speaker-embedding 模式）。audio.cpp 同時只載入一個模型，被別的程式佔用時會自動等待重試（最多 15 分鐘）。送進 TTS 的文字會先轉成簡體（OpenCC tw2sp，例如 軟體→软件），因為 audio.cpp 讀繁體字常讀錯；字幕仍用原文。逐段情緒預設關閉，避免同一支片聽起來像換人。
 - **畫面**：預設 Pillow 字卡；可切 ComfyUI（Krea-2）生底圖、文字疊在上面。
 - **音效**：每個畫面可指定一個標籤，從 `data/sfx` 音效庫挑；缺的用 MOSS-SoundEffect 在設定頁批次生成。
-- **背景音樂**：YuE2 3B（audio.cpp）生成純音樂，長度跟著成片，講話時自動壓低（sidechain），結果依風格／長度／seed 快取在 `data/music`。講稿的 `music` 欄位可逐集指定風格。
+- **背景音樂**：預設 YuE2 3B（audio.cpp）生成純音樂；設定頁可改 **Google Lyria 3**（Gemini API，`lyria-3-clip-preview` 固定 30 秒片段、`lyria-3.5` 完整編曲約 2 分鐘；金鑰用環境變數名，音訊含 SynthID 浮水印，專案要有額度）。長度跟著成片（片段會 loop），講話時自動壓低（sidechain），結果依引擎／風格／長度快取在 `data/music`。講稿的 `music` 欄位可逐集指定風格。
 - **成片引擎**：`ffmpeg`（燒字幕）或 `remotion`（React 動畫：Ken Burns、標題與重點逐條進場、浮動字幕條）。Remotion 音軌仍由 ffmpeg 準備後再合成，失敗會自動退回 ffmpeg。Remotion 專案在 `remotion/`，第一次用要先 `npm install`。
 - **GPU**：LM Studio、Strata、ComfyUI 共用同一塊記憶體，不要同時載入大模型。
 

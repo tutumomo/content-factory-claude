@@ -65,6 +65,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "music": {
         "enabled": True,
+        "provider": "audiocpp",            # audiocpp = YuE2；lyria = Google Lyria 3（Gemini API）
+        "lyria_model": "lyria-3-clip-preview",  # 或 lyria-3.5
+        "lyria_key_env": "GEMINI_API_KEY",  # 只存環境變數名稱，金鑰不進設定檔
         "base_url": "",                    # 空 = 跟 tts 同一個 audio.cpp 伺服器
         "model": "yue2",                   # audio.cpp 裡的 YuE2 3B 音樂模型
         "style": "",                       # 空 = 內建 lo-fi 風格；講稿的 music 欄位優先

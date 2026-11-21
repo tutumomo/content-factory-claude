@@ -127,15 +127,29 @@ export async function openSettingsModal() {
         </div>
         <div class="muted" style="margin-top:8px">檔名規則：<code>標籤__備註.wav</code>，例如 <code>whoosh__1.wav</code>。沒有對應音效的畫面只留旁白，不會自動猜。</div>
         <h2 style="margin-top:18px">背景音樂</h2>
-        <label style="margin-top:0"><input type="checkbox" id="m-enabled" style="width:auto;margin-right:6px" ${s.music?.enabled !== false ? "checked" : ""}> 成片墊一層 YuE2 生成的純音樂（無人聲）</label>
-        <div class="grid-2">
-          <div><label>音樂模型（audio.cpp 模型 id）</label><input id="m-model" value="${esc(s.music?.model || "yue2")}"></div>
-          <div><label>音樂音量（相對旁白，dB）</label><input id="m-gain_db" type="number" min="-40" max="0" value="${s.music?.gain_db ?? -20}"></div>
+        <label style="margin-top:0"><input type="checkbox" id="m-enabled" style="width:auto;margin-right:6px" ${s.music?.enabled !== false ? "checked" : ""}> 成片墊一層生成的純音樂（無人聲）</label>
+        <label>音樂引擎</label>
+        <select id="m-provider">
+          <option value="audiocpp" ${(s.music?.provider || "audiocpp") === "audiocpp" ? "selected" : ""}>audio.cpp YuE2 3B（本機 GPU）</option>
+          <option value="lyria" ${s.music?.provider === "lyria" ? "selected" : ""}>Google Lyria 3（Gemini API，雲端）</option>
+        </select>
+        <div id="m-ac" style="${s.music?.provider === "lyria" ? "display:none" : ""}">
+          <div class="grid-2" style="margin-top:8px">
+            <div><label>YuE2 模型 id（audio.cpp）</label><input id="m-model" value="${esc(s.music?.model || "yue2")}"></div>
+            <div><label>seed</label><input id="m-seed" type="number" value="${s.music?.seed ?? 1234}"></div>
+          </div>
+        </div>
+        <div id="m-ly" style="${s.music?.provider === "lyria" ? "" : "display:none"}">
+          <div class="grid-2" style="margin-top:8px">
+            <div><label>Lyria 模型</label><select id="m-lyria_model">${[["lyria-3-clip-preview", "Lyria 3 Clip（固定 30 秒，成片時 loop）"], ["lyria-3.5", "Lyria 3.5（完整編曲，約 2 分鐘）"]].map(([v, l]) => `<option value="${v}" ${v === (s.music?.lyria_model || "lyria-3-clip-preview") ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+            <div><label>API 金鑰環境變數名稱</label><input id="m-lyria_key_env" value="${esc(s.music?.lyria_key_env || "GEMINI_API_KEY")}"></div>
+          </div>
+          <div class="muted" style="margin-top:4px">走 Gemini API（generativelanguage.googleapis.com）；金鑰需有額度、專案未達月上限。Lyria 音訊含 SynthID 浮水印。</div>
         </div>
         <label>預設風格（英文；留空 = 內建 lo-fi。講稿的 music 欄位優先）</label>
         <input id="m-style" value="${esc(s.music?.style || "")}">
         <div class="grid-2">
-          <div><label>seed</label><input id="m-seed" type="number" value="${s.music?.seed ?? 1234}"></div>
+          <div><label>音樂音量（相對旁白，dB）</label><input id="m-gain_db" type="number" min="-40" max="0" value="${s.music?.gain_db ?? -20}"></div>
           <div style="display:flex;align-items:flex-end"><label style="margin:0"><input type="checkbox" id="m-duck" style="width:auto;margin-right:6px" ${s.music?.duck !== false ? "checked" : ""}> 旁白講話時自動壓低音樂</label></div>
         </div>
         <div class="row" style="margin-top:10px"><button type="button" class="btn" id="m-preview">試聽 20 秒</button><span class="muted" id="m-out"></span></div>
@@ -195,7 +209,7 @@ export async function openSettingsModal() {
           s.sfx.gain_db = +$("#x-gain_db", root).value;
           s.sfx.enabled = $("#x-enabled", root).checked;
           s.music = { ...(s.music || {}) };
-          for (const k of ["model", "style"]) s.music[k] = $(`#m-${k}`, root).value;
+          for (const k of ["provider", "model", "style", "lyria_model", "lyria_key_env"]) s.music[k] = $(`#m-${k}`, root).value;
           s.music.gain_db = +$("#m-gain_db", root).value;
           s.music.seed = +$("#m-seed", root).value;
           s.music.enabled = $("#m-enabled", root).checked;
@@ -669,6 +683,13 @@ async function setupVisualPane(root, s, collect) {
     load();
   };
   const mout = $("#m-out", root);
+  const syncMusicPane = () => {
+    const lyria = $("#m-provider", root).value === "lyria";
+    $("#m-ac", root).style.display = lyria ? "none" : "";
+    $("#m-ly", root).style.display = lyria ? "" : "none";
+  };
+  $("#m-provider", root).onchange = syncMusicPane;
+  syncMusicPane();
   api("/api/music").then((st) => {
     mout.textContent = (st.ok ? "✓ " : "✗ ") + st.detail + (st.cached?.length ? `・已快取 ${st.cached.length} 首` : "");
   }).catch((e) => (mout.textContent = e.message));
@@ -676,7 +697,7 @@ async function setupVisualPane(root, s, collect) {
     $("#r-out", root).textContent = (st.ok ? " ✓ 已安裝" : " ✗ " + st.detail);
   }).catch(() => {});
   $("#m-preview", root).onclick = async () => {
-    mout.textContent = "生成 20 秒試聽…（第一次載模型要一點時間）";
+    mout.textContent = "生成試聽…（Lyria Clip 固定 30 秒；YuE2 第一次要載模型）";
     $("#m-player", root).innerHTML = "";
     await api("/api/settings", { method: "PUT", body: collect() });
     const r = await api("/api/music/preview", { method: "POST", body: { seconds: 20, style: $("#m-style", root).value } })

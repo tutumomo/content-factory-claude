@@ -331,12 +331,13 @@ def st_assemble(ep: dict) -> bool:
     ass = media.write_ass(all_cues, size, assets / "subs.ass")
     media.write_srt(all_cues, out / "subtitles.srt")
 
-    # 3) background music (YuE2 instrumental, cached per style/length/seed)
+    # 3) background music (YuE2 or Lyria, cached per provider/style/length)
     mc = store.get_settings()["music"]
     bgm, bgm_note = None, "已關閉"
     if mc.get("enabled", True):
         style = music.style_of(scr)
-        store.log(eid, f"背景音樂：YuE2 生成 {t0:.0f} 秒（{style[:48]}）")
+        engine = "Lyria 3" if music.provider() == "lyria" else "YuE2"
+        store.log(eid, f"背景音樂：{engine} 生成 {t0:.0f} 秒（{style[:48]}）")
         try:
             bgm = music.generate(t0, style)
             bgm_note = f"{music.duration(bgm):.0f} 秒，{mc.get('gain_db', -20)} dB" + ("，自動閃避旁白" if mc.get("duck", True) else "")
