@@ -63,13 +63,19 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "h3video": {
         "enabled": True,
-        "unet": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
-        "clip": "qwen3vl_32b_h3_ultra_uncensored_heretic_int8_convrot.safetensors",
-        "vae": "minimax_h3_video_vae_fp16.safetensors",
-        "audio_vae": "minimax_h3_audio_vae_fp32.safetensors",  # H3 同時生環境音
+        "recipe": "flex",                  # flex = Pika H3 Flex 6 步；native = 原生 res_multistep 25 步
+        "unet": "minimax_h3_fl2va_pruned_int8_convrot_ssd.safetensors",   # 本機 SSD 副本；gdrive 原檔載入要 150–380 秒
+        "clip": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",          # ComfyUI 的 fast_disk 會自己快取到本機
+        "vae": "minimax_h3_video_vae_int8_convrot_ssd.safetensors",
+        "audio_vae": "minimax_h3_audio_vae_fp32_ssd.safetensors",  # H3 同時生環境音
         "ambient_gain_db": -14,            # H3 環境音相對旁白的音量；≤ -60 = 靜音
-        "sampler": "res_multistep",        # 參考工作流用的取樣器
-        "steps": 25,
+        "lora": "MiniMax H3/pika_h3_flex_fl2va_v1_noprefix.safetensors",
+        "lora_strength": 1.0,
+        "lora_node": "turbo",              # turbo = MiniMax-H3-Turbo 轉接器（快）；stock = LoraLoaderModelOnly
+        "lora_merge": False,               # True = 併進權重（省 VRAM、量化基底較鈍）；False = bypass（銳利）
+        "sigmas": "1.0, 0.972973, 0.923077, 0.8, 0.571429, 0.333333, 0.0",
+        "sampler": "lcm",                  # flex 固定 lcm；native 才用這個值
+        "steps": 25,                       # 只有 native 配方會用到
         "max_seconds": 6,                  # 單段最長秒數（H3 一次約 5–6 秒最自然）
         "megapixels": 0.4,                 # 生成面積 ≈ 0.4 × 1024²（依畫框比例取整到 32 的倍數）
         "timeout_s": 1800,                 # 單段逾時

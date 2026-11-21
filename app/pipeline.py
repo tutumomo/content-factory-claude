@@ -359,7 +359,7 @@ def st_assemble(ep: dict) -> bool:
             store.log(eid, f"{ch['detail']}；改用字卡畫面")
         else:
             store.log(eid, f"ComfyUI MiniMax-H3 生成影片：{len(scenes)} 段"
-                           f"（{hc.get('steps')} 步、單段最多 {hc.get('max_seconds')} 秒，"
+                           f"（{hc.get('recipe') or 'flex'} 配方、單段最多 {hc.get('max_seconds')} 秒，"
                            f"環境音 {hc.get('ambient_gain_db', -14)} dB 墊在旁白下）")
             for i, sc in enumerate(scenes):
                 desc = (sc.get("visual") or sc.get("headline") or "").strip()

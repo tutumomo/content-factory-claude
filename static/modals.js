@@ -1,4 +1,4 @@
-import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261121g";
+import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261121h";
 
 export async function openSettingsModal() {
   const s = await api("/api/settings");
@@ -130,13 +130,25 @@ export async function openSettingsModal() {
         <h2 style="margin-top:18px">MiniMax-H3 影片（畫面來源選 h3video 時使用）</h2>
         <label style="margin-top:0"><input type="checkbox" id="h-enabled" style="width:auto;margin-right:6px" ${s.h3video?.enabled !== false ? "checked" : ""}> 啟用 H3 影片</label>
         <div class="grid-2">
+          <div><label>配方</label><select id="h-recipe">
+            <option value="flex" ${(s.h3video?.recipe || "flex") === "flex" ? "selected" : ""}>Pika H3 Flex（6 步，快）</option>
+            <option value="native" ${s.h3video?.recipe === "native" ? "selected" : ""}>原生 H3（25 步，慢）</option>
+          </select></div>
+          <div><label>LoRA（Flex 轉接器；留空不用）</label><input id="h-lora" value="${esc(s.h3video?.lora || "")}"></div>
+          <div><label>LoRA 套用方式</label><select id="h-lora_node">
+            <option value="turbo" ${(s.h3video?.lora_node || "turbo") === "turbo" ? "selected" : ""}>Turbo 轉接器（快；LoRA 檔要先把 diffusion_model. 前綴去掉）</option>
+            <option value="stock" ${s.h3video?.lora_node === "stock" ? "selected" : ""}>原生 LoraLoaderModelOnly（慢，每步多約 13 秒）</option>
+          </select></div>
+          <div style="display:flex;align-items:flex-end"><label style="margin:0"><input type="checkbox" id="h-lora_merge" style="width:auto;margin-right:6px" ${s.h3video?.lora_merge ? "checked" : ""}> LoRA 併進權重（省 VRAM；int8 基底會變鈍）</label></div>
+          <div><label>LoRA 強度</label><input id="h-lora_strength" type="number" min="0" max="2" step="0.05" value="${s.h3video?.lora_strength ?? 1}"></div>
+          <div><label>Sigma 節點（Flex 固定六段；原生不用）</label><input id="h-sigmas" value="${esc(s.h3video?.sigmas || "")}"></div>
           <div><label>UNET</label><input id="h-unet" value="${esc(s.h3video?.unet || "")}"></div>
           <div><label>CLIP</label><input id="h-clip" value="${esc(s.h3video?.clip || "")}"></div>
           <div><label>VAE（影片用，不是生圖那顆）</label><input id="h-vae" value="${esc(s.h3video?.vae || "")}"></div>
           <div><label>音訊 VAE（H3 同時生環境音）</label><input id="h-audio_vae" value="${esc(s.h3video?.audio_vae || "")}"></div>
           <div><label>環境音音量（相對旁白 dB；≤ -60 靜音）</label><input id="h-ambient_gain_db" type="number" min="-60" max="0" value="${s.h3video?.ambient_gain_db ?? -14}"></div>
-          <div><label>取樣器</label><input id="h-sampler" value="${esc(s.h3video?.sampler || "res_multistep")}"></div>
-          <div><label>步數</label><input id="h-steps" type="number" min="1" max="50" value="${s.h3video?.steps ?? 25}"></div>
+          <div><label>取樣器（native 配方才用）</label><input id="h-sampler" value="${esc(s.h3video?.sampler || "lcm")}"></div>
+          <div><label>步數（native 配方才用）</label><input id="h-steps" type="number" min="1" max="50" value="${s.h3video?.steps ?? 25}"></div>
           <div><label>單段最長秒數</label><input id="h-max_seconds" type="number" min="2" max="15" value="${s.h3video?.max_seconds ?? 6}"></div>
           <div><label>生成畫素（百萬；0.4 ≈ 650×650）</label><input id="h-megapixels" type="number" min="0.15" max="1.2" step="0.05" value="${s.h3video?.megapixels ?? 0.4}"></div>
           <div><label>單段逾時（秒）</label><input id="h-timeout_s" type="number" min="120" max="7200" value="${s.h3video?.timeout_s ?? 1800}"></div>
@@ -244,9 +256,10 @@ export async function openSettingsModal() {
           for (const k of ["steps", "cfg", "timeout_s"]) s.visuals[k] = +$(`#v-${k}`, root).value;
           s.visuals.free_after = $("#v-free_after", root).checked;
           s.h3video = { ...(s.h3video || {}) };
-          for (const k of ["unet", "clip", "vae", "audio_vae", "sampler", "style_hint"]) s.h3video[k] = $(`#h-${k}`, root).value;
-          for (const k of ["steps", "max_seconds", "megapixels", "timeout_s", "ambient_gain_db"]) s.h3video[k] = +$(`#h-${k}`, root).value;
+          for (const k of ["recipe", "unet", "clip", "vae", "audio_vae", "lora", "lora_node", "sigmas", "sampler", "style_hint"]) s.h3video[k] = $(`#h-${k}`, root).value;
+          for (const k of ["steps", "max_seconds", "megapixels", "timeout_s", "ambient_gain_db", "lora_strength"]) s.h3video[k] = +$(`#h-${k}`, root).value;
           s.h3video.enabled = $("#h-enabled", root).checked;
+          s.h3video.lora_merge = $("#h-lora_merge", root).checked;
           s.sfx = { ...(s.sfx || {}) };
           for (const k of ["library_dir", "model_path"]) s.sfx[k] = $(`#x-${k}`, root).value;
           s.sfx.gain_db = +$("#x-gain_db", root).value;
