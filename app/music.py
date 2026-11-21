@@ -1,4 +1,4 @@
-"""Background music: YuE2 3B instrumental through audio.cpp, mixed under the narration.
+"""Background music from audio.cpp music generators, mixed under the narration.
 
 Generation goes through the running audiocpp_server (`POST /v1/tasks/run`), so the model is
 loaded once per episode instead of once per scene. Results are cached by (style, seconds, seed),
@@ -66,10 +66,10 @@ def style_of(script: dict | None = None) -> str:
 
 
 def model_id(base: str) -> str:
-    """Configured id when the server has it; otherwise whatever YuE2 entry the server exposes.
+    """Configured id when the server has it; otherwise the closest music model of the same family.
 
     Model ids come from whoever installed the package (the sync tool names them after the
-    package, e.g. yue2-main-q8-0), so a stale id should fall back to the family rather than fail.
+    package, e.g. yue2-main-q8-0), so a stale id should fall back rather than fail.
     """
     want = cfg().get("model") or "yue2"
     try:
@@ -81,17 +81,33 @@ def model_id(base: str) -> str:
     ids = [m.get("id") for m in rows]
     if want in ids:
         return want
-    for m in rows:
-        if m.get("family") == "yue2":
-            return m.get("id")
-    for i in ids:
-        if str(i).startswith("yue2"):
+    prefix = want.split("-")[0].lower()
+    for i in ids:                       # same install prefix, e.g. yue2-…
+        if str(i).lower().startswith(prefix):
             return i
+    for m in rows:                      # same family
+        if m.get("family") == family_of(base, want):
+            return m.get("id")
+    for m in rows:                      # last resort: any installed music generator
+        if m.get("task") == "gen" and m.get("family") != "moss_soundeffect":
+            return m.get("id")
     return want
 
 
-def _key(style: str, seconds: float, seed: int) -> str:
-    return hashlib.sha1(f"{style}|{seconds:.1f}|{seed}".encode()).hexdigest()[:16]
+def family_of(base: str, model: str) -> str:
+    try:
+        r = httpx.get(base + "/v1/models", timeout=5)
+        r.raise_for_status()
+        for m in r.json().get("data", []):
+            if m.get("id") == model:
+                return (m.get("family") or "").lower()
+    except httpx.HTTPError:
+        pass
+    return model.split("-")[0].lower()
+
+
+def _key(style: str, seconds: float, seed: int, model: str = "") -> str:
+    return hashlib.sha1(f"{model}|{style}|{seconds:.1f}|{seed}".encode()).hexdigest()[:16]
 
 
 def generate(seconds: float, style: str = "", seed: int | None = None, out: Path | None = None,
@@ -103,21 +119,28 @@ def generate(seconds: float, style: str = "", seed: int | None = None, out: Path
     style = (style or "").strip() or (c.get("style") or "").strip() or DEFAULT_STYLE
     seed = int(seed if seed is not None else (c.get("seed") or 1234))
     want = max(8.0, min(float(seconds), MAX_SECONDS))
-    path = out or (cache_dir() / f"bgm_{_key(style, want, seed)}.wav")
-    if path.exists() and path.stat().st_size > 44 and not force:
-        return path
     base = (c.get("base_url") or store.get_settings()["tts"]["base_url"]).rstrip("/")
     model = model_id(base)
-    options = {
-        "style": style,
-        "cot": "off",
-        "semantic_max_tokens": int(round(want * FRAMES_PER_SEC)),
-        "num_inference_steps": int(c.get("steps") or 8),
-        "seed": seed,
-    }
-    if c.get("guidance_scale"):
-        options["guidance_scale"] = float(c["guidance_scale"])
-    body = {"model": model, "request": {"lyrics": "", "options": options}}
+    path = out or (cache_dir() / f"bgm_{_key(style, want, seed, model)}.wav")
+    if path.exists() and path.stat().st_size > 44 and not force:
+        return path
+    fam = family_of(base, model)
+    if fam.startswith("minimax_music"):
+        # MiniMax Music 3 wants both a text prompt and non-empty lyrics; the bracketed
+        # tag is the model's instrumental marker, everything else stays style-driven.
+        options = {"lyrics": (c.get("minimax_lyrics") or "[Instrumental]"),
+                   "duration_sec": float(round(want)),
+                   "num_inference_steps": int(c.get("steps") or 30), "seed": seed}
+        if c.get("guidance_scale"):
+            options["guidance_scale"] = float(c["guidance_scale"])
+        body = {"model": model, "request": {"text": style, "options": options}}
+    else:  # yue2: style is the required field, empty lyrics = instrumental
+        options = {"style": style, "cot": "off",
+                   "semantic_max_tokens": int(round(want * FRAMES_PER_SEC)),
+                   "num_inference_steps": int(c.get("steps") or 8), "seed": seed}
+        if c.get("guidance_scale"):
+            options["guidance_scale"] = float(c["guidance_scale"])
+        body = {"model": model, "request": {"lyrics": "", "options": options}}
     try:
         r = httpx.post(base + "/v1/tasks/run", json=body, timeout=float(c.get("timeout_s") or 3600))
     except httpx.HTTPError as e:
@@ -219,11 +242,16 @@ def status() -> dict:
     model = model_id(base)
     info = {"enabled": bool(c.get("enabled", True)), "provider": "audiocpp", "base_url": base,
             "model": model, "style": style_of(), "cache": str(cache_dir()), "models": [],
-            "ok": False, "detail": ""}
+            "available": [], "ok": False, "detail": ""}
     try:
         r = httpx.get(base + "/v1/models", timeout=5)
         r.raise_for_status()
-        info["models"] = [m.get("id") for m in r.json().get("data", [])]
+        rows = r.json().get("data", [])
+        info["models"] = [m.get("id") for m in rows]
+        info["available"] = [{"id": m.get("id"), "family": m.get("family") or "",
+                              "loaded": bool(m.get("loaded"))}
+                             for m in rows
+                             if m.get("task") == "gen" and m.get("family") != "moss_soundeffect"]
         info["ok"] = model in info["models"]
         info["detail"] = "就緒" if info["ok"] else f"伺服器上沒有 {model}"
     except httpx.HTTPError as e:

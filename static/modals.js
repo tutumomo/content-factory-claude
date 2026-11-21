@@ -135,9 +135,10 @@ export async function openSettingsModal() {
         </select>
         <div id="m-ac" style="${s.music?.provider === "lyria" ? "display:none" : ""}">
           <div class="grid-2" style="margin-top:8px">
-            <div><label>YuE2 模型 id（audio.cpp）</label><input id="m-model" value="${esc(s.music?.model || "yue2")}"></div>
+            <div><label>音樂模型（自動讀取 audio.cpp 已安裝的音樂生成模型）</label><select id="m-model"><option value="${esc(s.music?.model || "yue2")}" selected>${esc(s.music?.model || "yue2")}</option></select></div>
             <div><label>seed</label><input id="m-seed" type="number" value="${s.music?.seed ?? 1234}"></div>
           </div>
+          <div class="row" style="margin-top:4px"><button type="button" class="btn" id="m-models-refresh">重新讀取模型清單</button><span class="muted" id="m-models-out"></span></div>
         </div>
         <div id="m-ly" style="${s.music?.provider === "lyria" ? "" : "display:none"}">
           <div class="grid-2" style="margin-top:8px">
@@ -683,16 +684,39 @@ async function setupVisualPane(root, s, collect) {
     load();
   };
   const mout = $("#m-out", root);
+  const musicModel = $("#m-model", root);
+  const musicModelsOut = $("#m-models-out", root);
   const syncMusicPane = () => {
     const lyria = $("#m-provider", root).value === "lyria";
     $("#m-ac", root).style.display = lyria ? "none" : "";
     $("#m-ly", root).style.display = lyria ? "" : "none";
   };
+  const loadMusicModels = async () => {
+    const keep = musicModel.value || s.music?.model || "";
+    musicModelsOut.textContent = "讀取模型清單…";
+    try {
+      const st = await api("/api/music");
+      const rows = st.available || [];
+      const selected = rows.some((m) => m.id === keep)
+        ? keep : (rows.some((m) => m.id === st.model) ? st.model : keep);
+      musicModel.innerHTML = rows.map((m) =>
+        `<option value="${esc(m.id)}" ${m.id === selected ? "selected" : ""}>${esc(m.id)}（${esc(m.family || "")}${m.loaded ? "・已載入" : ""}）</option>`).join("");
+      if (selected && !rows.some((m) => m.id === selected)) {
+        musicModel.insertAdjacentHTML("afterbegin", `<option value="${esc(selected)}" selected>${esc(selected)}（伺服器上沒有這個 id）</option>`);
+      }
+      if (!rows.length) musicModel.innerHTML = `<option value="${esc(selected)}" selected>${esc(selected)}</option>`;
+      musicModelsOut.textContent = st.ok ? `已讀到 ${rows.length} 個音樂生成模型` : (st.detail || "伺服器上沒有音樂生成模型");
+      mout.textContent = (st.ok ? "✓ " : "✗ ") + st.detail + (st.cached?.length ? `・已快取 ${st.cached.length} 首` : "");
+    } catch (e) {
+      musicModel.innerHTML = `<option value="${esc(keep)}" selected>${esc(keep)}</option>`;
+      musicModelsOut.textContent = `讀不到模型清單：${e.message}（保留原本的 id）`;
+      mout.textContent = e.message;
+    }
+  };
   $("#m-provider", root).onchange = syncMusicPane;
+  $("#m-models-refresh", root).onclick = loadMusicModels;
   syncMusicPane();
-  api("/api/music").then((st) => {
-    mout.textContent = (st.ok ? "✓ " : "✗ ") + st.detail + (st.cached?.length ? `・已快取 ${st.cached.length} 首` : "");
-  }).catch((e) => (mout.textContent = e.message));
+  loadMusicModels();
   api("/api/render/remotion").then((st) => {
     $("#r-out", root).textContent = (st.ok ? " ✓ 已安裝" : " ✗ " + st.detail);
   }).catch(() => {});
