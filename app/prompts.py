@@ -21,12 +21,14 @@ def channel_block() -> str:
     )
 
 
-def base_system() -> str:
+def base_system(style_id: str | None = None) -> str:
     return (
         "你是一人自媒體「內容工廠」裡的專業 agent。用繁體中文（台灣用語）寫作。"
         "你做苦工，使用者做決定：給選項時要讓使用者「只需要挑一個」。"
         "事實要有依據，不確定或可能過時的資訊要標出來，不要編造數字、日期或引言。\n\n"
-        f"# 頻道定位\n{channel_block()}\n\n# 使用者品味紀錄（必須遵守）\n{store.prefs_text()}"
+        f"# 頻道定位\n{channel_block()}\n\n"
+        f"# 採用風格卡\n{store.style_block(style_id)}\n\n"
+        f"# 使用者品味紀錄（必須遵守）\n{store.prefs_text()}"
     )
 
 
@@ -41,7 +43,7 @@ def radar(seeds: str) -> tuple[str, str]:
 
 
 def brief(ep: dict, sources: str) -> tuple[str, str]:
-    sys = base_system() + """
+    sys = base_system(ep.get("style_id")) + """
 
 # 任務：方向簡報
 同一個題目可以做成很不一樣的內容。給 3–4 個切入方向。
@@ -62,7 +64,7 @@ SCRIPT_SHAPE = """輸出：{"working_title":"暫定標題","scenes":[{"narration
 
 
 def script(ep: dict, direction: dict, sources: str) -> tuple[str, str]:
-    sys = base_system() + "\n\n# 任務：寫講稿\n依使用者選定的方向寫完整講稿，拆成畫面。\n" + SCRIPT_SHAPE
+    sys = base_system(ep.get("style_id")) + "\n\n# 任務：寫講稿\n依使用者選定的方向寫完整講稿，拆成畫面。\n" + SCRIPT_SHAPE
     prompt = (
         f"# 題目\n{ep['topic']}\n\n# 格式\n{fmt_desc(ep)}\n\n# 選定方向\n{json.dumps(direction, ensure_ascii=False)}\n\n"
         f"# 使用者補充（最優先）\n{ep.get('direction_notes') or '（無）'}\n\n# 資料\n{sources or '（無）'}"
@@ -80,7 +82,7 @@ CRITICS = {
 
 def critique(role: str, ep: dict, scr: dict, sources: str) -> tuple[str, str]:
     name, job = CRITICS[role]
-    sys = base_system() + f"""
+    sys = base_system(ep.get("style_id")) + f"""
 
 # 任務：審稿（角色：{name}）
 {job}
@@ -91,7 +93,7 @@ def critique(role: str, ep: dict, scr: dict, sources: str) -> tuple[str, str]:
 
 
 def revise(ep: dict, scr: dict, reviews: dict, extra: str = "") -> tuple[str, str]:
-    sys = base_system() + "\n\n# 任務：依審稿意見修稿\n保留好的部分，只修被指出的問題。\n" + SCRIPT_SHAPE
+    sys = base_system(ep.get("style_id")) + "\n\n# 任務：依審稿意見修稿\n保留好的部分，只修被指出的問題。\n" + SCRIPT_SHAPE
     prompt = (
         f"# 格式\n{fmt_desc(ep)}\n\n# 原講稿\n{json.dumps(scr, ensure_ascii=False)}\n\n"
         f"# 審稿意見\n{json.dumps(reviews, ensure_ascii=False)}\n\n# 使用者意見（最優先）\n{extra or '（無）'}"
@@ -100,7 +102,7 @@ def revise(ep: dict, scr: dict, reviews: dict, extra: str = "") -> tuple[str, st
 
 
 def package(ep: dict, scr: dict, n_titles: int, n_thumbs: int) -> tuple[str, str]:
-    sys = base_system() + f"""
+    sys = base_system(ep.get("style_id")) + f"""
 
 # 任務：包裝
 做標題候選、縮圖文案、說明欄、IG 輪播、FB 貼文。標題要與內容相符、不誇大、不騙點擊。
@@ -114,7 +116,29 @@ def package(ep: dict, scr: dict, n_titles: int, n_thumbs: int) -> tuple[str, str
 
 
 def pref_rule(stage: str, reason: str) -> tuple[str, str]:
-    sys = """你把使用者的退件意見抽象成一條「下次可重用」的規則，用繁體中文，一句話，具體可檢查。
-分類只能是：選題、方向與觀點、講稿語氣、開頭與節奏、畫面風格、標題、縮圖、配音與字幕。
-輸出：{"category":"分類","rule":"規則"}"""
+    cats = "、".join(store.PREF_CATS)
+    sys = f"""你把使用者的退件意見抽象成一條「下次可重用」的規則，用繁體中文，一句話，具體可檢查。
+分類只能是：{cats}。
+輸出：{{"category":"分類","rule":"規則"}}"""
     return sys, f"# 階段\n{stage}\n\n# 使用者意見\n{reason}"
+
+
+def extract_style(sample_text: str, name_hint: str = "") -> tuple[str, str]:
+    cats = "、".join(store.STYLE_CATEGORIES)
+    sys = f"""你是自媒體內容風格分析師，用繁體中文（台灣用語）寫作。
+從使用者提供的講稿／文章範例提煉一張可重複套用的「風格卡」。
+category 只能是：{cats}。
+輸出：{{"name":"風格名稱（4-10字）","icon":"一個適合的 emoji","category":"分類","summary":"一句話風格定位","tone":"語氣與用詞習慣","opening":"常見開頭套路","structure":"內容展開結構","pacing":"節奏與斷句習慣","words":["常用詞1","常用詞2"],"avoid":["絕不用的說法1","絕不用的說法2"]}}"""
+    hint_line = f"# 指定風格名稱\n{name_hint.strip()}\n\n" if name_hint.strip() else ""
+    return sys, f"{hint_line}# 參考範本內容\n{sample_text[:15000]}"
+
+
+def analyze_insights(payload: dict) -> tuple[str, str]:
+    cats = "、".join(store.PREF_CATS)
+    sys = f"""你是自媒體成效復盤分析師，用繁體中文（台灣用語）寫作。
+只能根據輸入的真實數據提出觀察，絕對不可編造不存在的數字或集數。
+產出：
+1. headline：一句話總結目前的表現規律（25-50字）。
+2. suggestions：2 至 4 條可直接寫入「品味紀錄」的具體建議。每條含 category（只能是：{cats}）、rule（一句具體可檢查的做法）、evidence（引用輸入中的集數／平台數字依據）。
+輸出：{{"headline":"一句話總結","suggestions":[{{"category":"分類","rule":"建議規則","evidence":"數據依據"}}]}}"""
+    return sys, f"# 成效數據與既有規則\n{json.dumps(payload, ensure_ascii=False)}"

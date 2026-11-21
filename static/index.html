@@ -4,24 +4,42 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>內容工廠</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=2">
 </head>
 <body>
-<aside class="side">
-  <div class="brand">內容工廠<small>agent 做苦工，你做決定</small></div>
-  <nav>
-    <a href="#/review" data-nav="review">審核區 <span class="badge" id="badge-review"></span></a>
-    <a href="#/episodes" data-nav="episodes">集數</a>
-    <a href="#/new" data-nav="new">＋ 做一支新的</a>
-    <a href="#/radar" data-nav="radar">選題雷達</a>
-    <a href="#/prefs" data-nav="prefs">品味紀錄</a>
-    <a href="#/channel" data-nav="channel">頻道定位</a>
-    <a href="#/settings" data-nav="settings">系統設定</a>
-  </nav>
-  <div class="status" id="status"></div>
-</aside>
-<main id="main"></main>
+<div id="app" class="app layout-top">
+<script>
+try {
+  if (localStorage.getItem("cf_nav_layout") === "side") {
+    document.getElementById("app").className = "app layout-side";
+  }
+} catch {}
+</script>
+  <header class="shell-nav">
+    <a href="#/content" class="brand">
+      <span class="brand-title">內容工廠</span>
+      <small>agent 做苦工，你做決定</small>
+    </a>
+    <nav class="shell-links" aria-label="主導覽">
+      <a href="#/ideas" data-nav="ideas">靈感</a>
+      <a href="#/content" data-nav="content">內容 <span class="badge" id="badge-review"></span></a>
+      <a href="#/schedule" data-nav="schedule">排期</a>
+      <a href="#/insights" data-nav="insights">復盤</a>
+      <a href="#/style" data-nav="style">風格</a>
+    </nav>
+    <div class="shell-controls">
+      <div class="shell-status" id="status"></div>
+      <div class="shell-actions">
+        <button type="button" class="btn primary btn-sm" id="btn-new">＋ 新集數</button>
+        <button type="button" class="btn icon-btn" id="btn-layout" title="切換導覽列位置（頂部 / 左側）"></button>
+        <button type="button" class="btn icon-btn" id="btn-settings" title="系統設定">⚙</button>
+      </div>
+    </div>
+  </header>
+  <main id="main" class="shell-main"></main>
+</div>
+<div id="modal-root"></div>
 <div id="toast"></div>
-<script src="/static/app.js"></script>
+<script type="module" src="/static/app.js?v=2"></script>
 </body>
 </html>

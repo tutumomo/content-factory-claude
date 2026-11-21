@@ -7,6 +7,7 @@ import queue
 import re
 import shutil
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -43,10 +44,15 @@ def _worker() -> None:
                 run_episode(*args)
             elif kind == "radar":
                 run_radar(*args)
+            elif kind == "insights_analyze":
+                run_insights_analyze()
         except Exception as e:  # never kill the worker
             if kind == "episode":
                 store.update_episode(args[0], status="error", error=f"{type(e).__name__}: {e}")
                 store.log(args[0], "錯誤：" + traceback.format_exc()[-800:])
+            elif kind == "insights_analyze":
+                cur = store.get_insights_summary()
+                store.save_insights_summary({**cur, "analyzing": False, "error": f"{type(e).__name__}: {e}"})
         finally:
             _current.clear()
             _q.task_done()
@@ -318,11 +324,55 @@ def run_radar(seeds: str) -> None:
     sys, pr = prompts.radar(text)
     data = llm.complete_json("radar", sys, pr)
     items = store.get_radar()
-    import time as _t
+    now = time.time()
     for t in data.get("topics", []):
-        t["found"] = _t.time()
+        t["found"] = now
+        t["kind"] = "radar"
         items.insert(0, t)
-    store.save_radar(items[:60])
+    store.save_radar(items[:120])
+
+
+def run_insights_analyze() -> None:
+    eps = store.list_episodes()
+    ep_payload = []
+    for ep in eps:
+        ms = store.read_json(ep["id"], "metrics.json", [])
+        if not ms:
+            continue
+        style_card = store.get_style(ep.get("style_id"))
+        ep_payload.append({
+            "title": (ep.get("package_choice") or {}).get("title") or ep["topic"],
+            "format": ep.get("format"),
+            "direction": (ep.get("direction") or {}).get("angle", ""),
+            "style": style_card["name"] if style_card else "",
+            "metrics": ms,
+        })
+    if not ep_payload:
+        cur = store.get_insights_summary()
+        store.save_insights_summary({**cur, "analyzing": False, "error": "請先錄入至少一筆成效數據"})
+        return
+    active_rules = [p for p in store.get_prefs() if p.get("status", "active") == "active"]
+    payload = {"episodes": ep_payload, "active_rules": [{"category": r["category"], "rule": r["rule"]} for r in active_rules]}
+    sys, pr = prompts.analyze_insights(payload)
+    res = llm.complete_json("analyze_insights", sys, pr)
+    headline = str(res.get("headline") or "").strip()
+    store.save_insights_summary({
+        "headline": headline,
+        "updated": time.time(),
+        "analyzing": False,
+        "error": None,
+    })
+    for sug in (res.get("suggestions") or [])[:4]:
+        if not isinstance(sug, dict):
+            continue
+        rule = str(sug.get("rule") or "").strip()
+        if not rule:
+            continue
+        cat = str(sug.get("category") or "").strip()
+        if cat not in store.PREF_CATS:
+            cat = "選題"
+        evidence = str(sug.get("evidence") or "").strip()
+        store.add_pref(cat, rule, status="proposed", source="insights", evidence=evidence)
 
 
 # ---------- user decisions ----------
@@ -386,7 +436,7 @@ def _remember(eid: str, stage: str, reason: str) -> None:
     try:
         sys, pr = prompts.pref_rule(stage, reason)
         r = llm.complete_json("pref_rule", sys, pr)
-        store.add_pref(r.get("category") or stage, r.get("rule") or reason)
+        store.add_pref(r.get("category") or stage, r.get("rule") or reason, status="active", source="reject")
         store.log(eid, f"寫回品味紀錄：{r.get('rule') or reason}")
     except llm.LLMError:
-        store.add_pref(stage, reason)
+        store.add_pref(stage, reason, status="active", source="reject")

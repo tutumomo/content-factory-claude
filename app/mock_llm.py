@@ -50,4 +50,40 @@ def respond(task: str, prompt: str) -> str:
     if task == "pref_rule":
         m = re.search(r"# 使用者意見\n(.+)", prompt, re.S)
         return json.dumps({"category": "講稿語氣", "rule": (m.group(1).strip() if m else "")[:80]}, ensure_ascii=False)
+    if task == "extract_style":
+        m = re.search(r"# 指定風格名稱\n(.+)", prompt)
+        name = m.group(1).strip() if m else "示範提煉風格"
+        return json.dumps({
+            "name": name,
+            "icon": "🧪",
+            "category": "科技數碼",
+            "summary": "（示範模式提煉）直白切題、用具體實測場景取代抽象形容。",
+            "tone": "像同事分享實測心得，句尾乾脆。",
+            "opening": "先講遇到的真實卡關情境，再丟解法。",
+            "structure": "痛點場景 → 工具解法 → 實測限制與結論。",
+            "pacing": "短句推進，每 2 句給一個具體畫面或數字。",
+            "words": ["老實說", "實測下來", "重點只有一個"],
+            "avoid": ["在這個時代", "總而言之", "全方位賦能"],
+        }, ensure_ascii=False)
+    if task == "analyze_insights":
+        return json.dumps({
+            "headline": "（示範分析）實測痛點型短片互動密度較高，建議前 3 秒聚焦具體省時場景。",
+            "suggestions": [
+                {
+                    "category": "開頭與節奏",
+                    "rule": "短片前 3 秒直接丟出具體痛點情境，不鋪陳背景介紹。",
+                    "evidence": "示範模式：痛點型題目完播與收藏表現最佳。",
+                },
+                {
+                    "category": "標題",
+                    "rule": "標題優先使用「痛點對比」或「可立即省下的步驟」角度。",
+                    "evidence": "示範模式：疑問與實用角度點擊率高於純名詞介紹。",
+                },
+                {
+                    "category": "縮圖",
+                    "rule": "縮圖主標控制在 6 字以內，搭配對比鮮明的深色或淺色底。",
+                    "evidence": "示範模式：字數精簡版本在資訊流辨識度更佳。",
+                },
+            ],
+        }, ensure_ascii=False)
     return "{}"
