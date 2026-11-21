@@ -1,8 +1,8 @@
 """MiniMax-H3 text-to-video scene clips through ComfyUI's native H3 nodes.
 
 Graph follows the installed reference workflow (CG迷 MiniMax H3 文生视频): MiniMaxH3ImageToVideo with no
-frames = T2V, SamplerCustomAdvanced + res_multistep, VAEDecode -> CreateVideo -> SaveVideo. The clip's own
-audio is not decoded: narration, SFX and music are mixed later by the pipeline.
+frames = T2V, SamplerCustomAdvanced + res_multistep, VAEDecode + VAEDecodeAudio -> CreateVideo -> SaveVideo. The clip
+keeps H3's own ambient soundtrack; the pipeline mixes it under the narration (h3video.ambient_gain_db).
 """
 from __future__ import annotations
 
@@ -70,7 +70,9 @@ def graph(prompt: str, w: int, h: int, length: int, seed: int) -> dict:
         "9": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["5", 0], "guider": ["6", 0], "sampler": ["7", 0],
                                                                 "sigmas": ["8", 0], "latent_image": ["4", 1]}},
         "10": {"class_type": "VAEDecode", "inputs": {"samples": ["9", 0], "vae": ["3", 0]}},
-        "11": {"class_type": "CreateVideo", "inputs": {"images": ["10", 0], "fps": float(FPS)}},
+        "13": {"class_type": "VAELoader", "inputs": {"vae_name": c.get("audio_vae") or "minimax_h3_audio_vae_fp32.safetensors"}},
+        "14": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["9", 0], "vae": ["13", 0]}},
+        "11": {"class_type": "CreateVideo", "inputs": {"images": ["10", 0], "audio": ["14", 0], "fps": float(FPS)}},
         "12": {"class_type": "SaveVideo", "inputs": {"video": ["11", 0], "filename_prefix": "video/cf_h3",
                                                      "format": "auto", "format.codec": "auto"}},
     }
@@ -78,7 +80,7 @@ def graph(prompt: str, w: int, h: int, length: int, seed: int) -> dict:
 
 def generate(desc: str, size: tuple[int, int], seconds: float, out: Path, i: int = 0,
              seed: int | None = None) -> Path:
-    """Render one scene clip (mp4, no usable audio) and save it to `out`."""
+    """Render one scene clip (mp4 with H3 ambient audio) and save it to `out`."""
     c = cfg()
     secs = min(float(c.get("max_seconds") or 6), max(2.0, seconds))
     w, h = dims_for(size, float(c.get("megapixels") or 0.4))

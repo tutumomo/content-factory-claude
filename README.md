@@ -49,7 +49,7 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 - **音效**：每個畫面可指定一個標籤，從 `data/sfx` 音效庫挑；缺的用 MOSS-SoundEffect 在設定頁批次生成。
 - **背景音樂**：預設 YuE2 3B（audio.cpp）生成純音樂；設定頁可改 **Google Lyria 3**（Gemini API，`lyria-3-clip-preview` 固定 30 秒片段 $0.04/首、`lyria-3-pro-preview` 完整歌曲約 3 分鐘 $0.08/首；皆無免費額度，金鑰用環境變數名，音訊含 SynthID 浮水印，專案要有額度）。長度跟著成片（片段會 loop），講話時自動壓低（sidechain），結果依引擎／風格／長度快取在 `data/music`。講稿的 `music` 欄位可逐集指定風格。
 - **實拍素材**：設定頁「畫面來源」可選字卡、ComfyUI、實拍素材（Pexels／Pixabay）或混用。API key 只填環境變數名稱；搜尋依講稿的 `stock_query`，優先挑接近 1080×1920 的直式片段，下載快取在 `data/stock/`，出處與授權自動附在說明欄。實拍片段用 `scale+crop` 補滿畫框，不會變形。
-- **AI 影片畫面**：「畫面來源」可選 **ComfyUI MiniMax-H3 生影片**。每個畫面用講稿的 `visual` 描述寫成 H3 提示詞（單一長鏡頭、禁止文字與對白），以 `MiniMaxH3ImageToVideo`（無參考圖＝文生影片）＋`res_multistep` 取樣生成 2–15 秒、24 fps 的無聲影片，再由 ffmpeg 循環補滿旁白長度，字幕、音效與音樂照舊。frame 數依參考工作流公式取 17k+5；模型、步數、畫素、單段秒數與逾時都在設定頁「MiniMax-H3 影片」區塊調整。模型放在 gdrive，第一次載入最久；失敗的段落自動退回字卡。
+- **AI 影片畫面**：「畫面來源」可選 **ComfyUI MiniMax-H3 生影片**。每個畫面用講稿的 `visual` 描述寫成 H3 提示詞（單一長鏡頭、禁止文字與對白），以 `MiniMaxH3ImageToVideo`（無參考圖＝文生影片）＋`res_multistep` 取樣生成 2–15 秒、24 fps 的影片，並以 `VAEDecodeAudio`（`minimax_h3_audio_vae_fp32`）同時生成環境音；ffmpeg 循環補滿旁白長度，環境音依 `ambient_gain_db`（預設 -14 dB，≤ -60 靜音）墊在旁白下，再疊音效與音樂。frame 數依參考工作流公式取 17k+5；模型、步數、畫素、單段秒數與逾時都在設定頁「MiniMax-H3 影片」區塊調整。模型放在 gdrive，第一次載入最久；失敗的段落自動退回字卡。
 - **分鏡閘門**：預設開啟。講稿審完先進分鏡站產 `output/storyboard.json` 與縮圖，你按核准才開始配音與出片；退件會帶一句理由回講稿重排。
 - **畫面變化檢查**：`slideshow_risk_max`（預設 0.7）比對相鄰畫面的灰階差異，靜止比例超過門檻就在「畫面變化」一項標紅，提示這種成片像簡報輪播。
 - **雲端預算閘**：Lyria 這類付費 API 每筆在呼叫前先記帳（`data/cost/ledger.jsonl`）。低於單筆門檻直接放行，超過就讓集數停在「核准花費」等你按，累計超過月上限直接拒絕。核准與用量都是逐集記帳。

@@ -359,7 +359,8 @@ def st_assemble(ep: dict) -> bool:
             store.log(eid, f"{ch['detail']}；改用字卡畫面")
         else:
             store.log(eid, f"ComfyUI MiniMax-H3 生成影片：{len(scenes)} 段"
-                           f"（{hc.get('steps')} 步、單段最多 {hc.get('max_seconds')} 秒，影片本身不出聲）")
+                           f"（{hc.get('steps')} 步、單段最多 {hc.get('max_seconds')} 秒，"
+                           f"環境音 {hc.get('ambient_gain_db', -14)} dB 墊在旁白下）")
             for i, sc in enumerate(scenes):
                 desc = (sc.get("visual") or sc.get("headline") or "").strip()
                 secs = len(re.sub(r"\s", "", sc["narration"])) / 4.6 + 0.7
@@ -426,8 +427,10 @@ def st_assemble(ep: dict) -> bool:
             missing_sfx.add(tag)
             sc.pop("_sfx", None)
         if i in vids:
+            amb = h3video.cfg().get("ambient_gain_db", -14)
             clip_dur = media.scene_clip_video(vids[i], wav, assets / f"s{i:02d}.mp4", size,
-                                              sfx=fx, sfx_gain=sfx_gain)
+                                              sfx=fx, sfx_gain=sfx_gain,
+                                              bg_audio_gain=None if amb is None or float(amb) <= -60 else float(amb))
         elif i in clip_bgs:
             clip_dur = media.scene_clip_video(clip_bgs[i], wav, assets / f"s{i:02d}.mp4", size,
                                               sfx=fx, sfx_gain=sfx_gain)

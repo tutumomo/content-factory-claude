@@ -1,4 +1,4 @@
-import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261121f";
+import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261121g";
 
 export async function openSettingsModal() {
   const s = await api("/api/settings");
@@ -133,6 +133,8 @@ export async function openSettingsModal() {
           <div><label>UNET</label><input id="h-unet" value="${esc(s.h3video?.unet || "")}"></div>
           <div><label>CLIP</label><input id="h-clip" value="${esc(s.h3video?.clip || "")}"></div>
           <div><label>VAE（影片用，不是生圖那顆）</label><input id="h-vae" value="${esc(s.h3video?.vae || "")}"></div>
+          <div><label>音訊 VAE（H3 同時生環境音）</label><input id="h-audio_vae" value="${esc(s.h3video?.audio_vae || "")}"></div>
+          <div><label>環境音音量（相對旁白 dB；≤ -60 靜音）</label><input id="h-ambient_gain_db" type="number" min="-60" max="0" value="${s.h3video?.ambient_gain_db ?? -14}"></div>
           <div><label>取樣器</label><input id="h-sampler" value="${esc(s.h3video?.sampler || "res_multistep")}"></div>
           <div><label>步數</label><input id="h-steps" type="number" min="1" max="50" value="${s.h3video?.steps ?? 25}"></div>
           <div><label>單段最長秒數</label><input id="h-max_seconds" type="number" min="2" max="15" value="${s.h3video?.max_seconds ?? 6}"></div>
@@ -141,7 +143,7 @@ export async function openSettingsModal() {
         </div>
         <label>影片風格提示（英文，接在畫面描述前面）</label>
         <input id="h-style_hint" value="${esc(s.h3video?.style_hint || "")}">
-        <div class="muted" style="margin-top:6px">H3 每段 2–15 秒、24 fps；旁白比影片長時影片會循環補滿。影片自己的聲音不用，旁白／音效／音樂另外混。生每段都要重載 32B 文字編碼器，很吃時間，段數多就先少跑幾段試。</div>
+        <div class="muted" style="margin-top:6px">H3 每段 2–15 秒、24 fps；旁白比影片長時影片會循環補滿。H3 會同時生成環境音，墊在旁白下面（循環時一起循環），再疊音效與音樂。生每段都要重載 32B 文字編碼器，很吃時間，段數多就先少跑幾段試。</div>
         <h2 style="margin-top:18px">音效</h2>
         <label style="margin-top:0"><input type="checkbox" id="x-enabled" style="width:auto;margin-right:6px" ${s.sfx?.enabled !== false ? "checked" : ""}> 每個畫面開頭墊一個音效（講稿有指定才放）</label>
         <div class="grid-2">
@@ -242,8 +244,8 @@ export async function openSettingsModal() {
           for (const k of ["steps", "cfg", "timeout_s"]) s.visuals[k] = +$(`#v-${k}`, root).value;
           s.visuals.free_after = $("#v-free_after", root).checked;
           s.h3video = { ...(s.h3video || {}) };
-          for (const k of ["unet", "clip", "vae", "sampler", "style_hint"]) s.h3video[k] = $(`#h-${k}`, root).value;
-          for (const k of ["steps", "max_seconds", "megapixels", "timeout_s"]) s.h3video[k] = +$(`#h-${k}`, root).value;
+          for (const k of ["unet", "clip", "vae", "audio_vae", "sampler", "style_hint"]) s.h3video[k] = $(`#h-${k}`, root).value;
+          for (const k of ["steps", "max_seconds", "megapixels", "timeout_s", "ambient_gain_db"]) s.h3video[k] = +$(`#h-${k}`, root).value;
           s.h3video.enabled = $("#h-enabled", root).checked;
           s.sfx = { ...(s.sfx || {}) };
           for (const k of ["library_dir", "model_path"]) s.sfx[k] = $(`#x-${k}`, root).value;

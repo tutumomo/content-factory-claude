@@ -66,6 +66,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "unet": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
         "clip": "qwen3vl_32b_h3_ultra_uncensored_heretic_int8_convrot.safetensors",
         "vae": "minimax_h3_video_vae_fp16.safetensors",
+        "audio_vae": "minimax_h3_audio_vae_fp32.safetensors",  # H3 同時生環境音
+        "ambient_gain_db": -14,            # H3 環境音相對旁白的音量；≤ -60 = 靜音
         "sampler": "res_multistep",        # 參考工作流用的取樣器
         "steps": 25,
         "max_seconds": 6,                  # 單段最長秒數（H3 一次約 5–6 秒最自然）

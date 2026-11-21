@@ -180,6 +180,16 @@ def audio_duration(p: Path) -> float:
         return float(out.strip().splitlines()[-1])
 
 
+def has_audio(p: Path) -> bool:
+    """True when the media file has at least one audio stream."""
+    try:
+        out = run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+                   "-of", "csv=p=0", str(p)], timeout=60)
+    except Exception:
+        return False
+    return bool(out.strip())
+
+
 def concat_wavs(parts: list[Path], out: Path, gap: float = 0.18) -> Path:
     with wave.open(str(parts[0])) as w0:
         params = w0.getparams()
@@ -339,24 +349,40 @@ def scene_clip(img: Path, wav: Path, out: Path, pad: float = 0.35, sfx: Path | N
 
 
 def scene_clip_video(bg: Path, wav: Path, out: Path, size: tuple[int, int], pad: float = 0.35,
-                     sfx: Path | None = None, sfx_gain: float = -16.0, sfx_lead: float = 0.12) -> float:
-    """Narration over looping stock footage, cropped to the target frame."""
+                     sfx: Path | None = None, sfx_gain: float = -16.0, sfx_lead: float = 0.12,
+                     bg_audio_gain: float | None = None) -> float:
+    """Narration over looping footage, cropped to the target frame.
+
+    bg_audio_gain (dB) keeps the footage's own soundtrack (e.g. H3 ambience) under the narration;
+    None drops it. Footage without an audio stream is treated as silent.
+    """
     dur = wav_duration(wav) + pad
     W, H = size
-    parts = [f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps=30,setsar=1[v]"]
+    parts = [f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps=30,setsar=1[v]",
+             f"[1:a]apad=pad_dur={pad},aresample=48000[nar]"]
+    mix = ["[nar]"]
     if sfx:
         sd = audio_duration(sfx)
         eff = min(sd, dur - min(sfx_lead, 0.1))
         fout = min(0.8, max(0.25, eff * 0.35))
         fade_st = max(0.0, eff - fout)
         delay = int(min(sfx_lead, max(0.0, dur - 0.1)) * 1000)
-        parts += [f"[1:a]apad=pad_dur={pad},aresample=48000[nar]",
-                  f"[2:a]aresample=48000,volume={sfx_gain:g}dB,"
-                  f"afade=t=in:st=0:d=0.08,afade=t=out:st={fade_st:.2f}:d={fout:.2f},"
-                  f"adelay={delay}|{delay}[fx]",
-                  "[nar][fx]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[a]"]
+        parts.append(f"[2:a]aresample=48000,volume={sfx_gain:g}dB,"
+                     f"afade=t=in:st=0:d=0.08,afade=t=out:st={fade_st:.2f}:d={fout:.2f},"
+                     f"adelay={delay}|{delay}[fx]")
+        mix.append("[fx]")
+    if bg_audio_gain is not None and has_audio(bg):
+        fo = max(0.0, dur - 0.3)
+        # H3 ambience comes out very quiet (~-40 dB mean); level it to narration loudness first so the
+        # gain really is "relative to narration"
+        parts.append(f"[0:a]aresample=48000,aformat=channel_layouts=stereo,loudnorm=I=-16:TP=-1.5:LRA=11,"
+                     f"aresample=48000,volume={bg_audio_gain:g}dB,"
+                     f"afade=t=in:st=0:d=0.2,afade=t=out:st={fo:.2f}:d=0.3[amb]")
+        mix.append("[amb]")
+    if len(mix) > 1:
+        parts.append(f"{''.join(mix)}amix=inputs={len(mix)}:duration=first:normalize=0,alimiter=limit=0.95[a]")
     else:
-        parts += [f"[1:a]apad=pad_dur={pad},aresample=48000[a]"]
+        parts[1] = parts[1].replace("[nar]", "[a]")
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-stream_loop", "-1", "-i", str(bg), "-i", str(wav)]
     if sfx:
         cmd += ["-i", str(sfx)]
