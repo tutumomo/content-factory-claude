@@ -111,10 +111,10 @@ def _key(style: str, seconds: float, seed: int, model: str = "") -> str:
 
 
 def generate(seconds: float, style: str = "", seed: int | None = None, out: Path | None = None,
-             force: bool = False) -> Path:
+             force: bool = False, eid: str = "") -> Path:
     """Render an instrumental bed of `seconds` length (capped) and return the audio path."""
     if provider() == "lyria":
-        return lyria_generate(style, seconds, out=out, force=force)
+        return lyria_generate(style, seconds, out=out, force=force, eid=eid)
     c = cfg()
     style = (style or "").strip() or (c.get("style") or "").strip() or DEFAULT_STYLE
     seed = int(seed if seed is not None else (c.get("seed") or 1234))
@@ -174,7 +174,7 @@ def _find_audio(node):
 
 
 def lyria_generate(style: str = "", seconds: float = 30.0, out: Path | None = None,
-                   force: bool = False) -> Path:
+                   force: bool = False, eid: str = "") -> Path:
     """Instrumental bed from Google Lyria 3 (Gemini API). Cached per model+prompt."""
     c = cfg()
     key, key_name = lyria_key()
@@ -214,6 +214,11 @@ def lyria_generate(style: str = "", seconds: float = 30.0, out: Path | None = No
         path = path.with_suffix(".wav")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(raw)
+    try:
+        from . import cost
+        cost.record("lyria", 1, cost.price(model), eid, model)
+    except Exception:  # accounting must never fail the render
+        pass
     return path
 
 

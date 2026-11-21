@@ -78,6 +78,7 @@ export async function openSettingsModal() {
       </div>
       <div data-spane="pipeline" style="${activeTab === "pipeline" ? "" : "display:none"}">
         <label style="margin-top:0"><input type="checkbox" id="p-review_script" style="width:auto;margin-right:6px" ${s.pipeline.review_script ? "checked" : ""}> 講稿定稿前先給我看（初期建議開著；穩定後可關掉放手）</label>
+        <label style="margin-top:0"><input type="checkbox" id="p-review_storyboard" style="width:auto;margin-right:6px" ${s.pipeline.review_storyboard !== false ? "checked" : ""}> 配音與生圖前先看分鏡（縮圖＋旁白＋預估秒數，便宜又早攔錯）</label>
         <div class="grid-2">
           <div><label>審稿通過門檻（每個角色至少幾分）</label><input id="p-critique_threshold" type="number" min="1" max="10" value="${s.pipeline.critique_threshold}"></div>
           <div><label>最多修稿幾輪</label><input id="p-critique_max_rounds" type="number" min="1" max="6" value="${s.pipeline.critique_max_rounds}"></div>
@@ -85,14 +86,25 @@ export async function openSettingsModal() {
           <div><label>縮圖候選數</label><input id="p-thumbnail_count" type="number" min="2" max="8" value="${s.pipeline.thumbnail_count}"></div>
           <div><label>雷達每次至少幾條</label><input id="p-radar_min" type="number" min="3" max="12" value="${s.pipeline.radar_min}"></div>
           <div><label>雷達每次最多幾條</label><input id="p-radar_max" type="number" min="3" max="12" value="${s.pipeline.radar_max}"></div>
+          <div><label>畫面變化警告門檻（0–1，越高越寬鬆）</label><input id="p-slideshow_risk_max" type="number" min="0" max="1" step="0.05" value="${s.pipeline.slideshow_risk_max ?? 0.7}"></div>
+          <div><label>雲端花費月上限（美元）</label><input id="p-cost_cap" type="number" min="0" step="0.5" value="${s.cost?.monthly_cap_usd ?? 10}"></div>
+          <div><label>單筆花費核准門檻（美元，超過先問你）</label><input id="p-cost_gate" type="number" min="0" step="0.1" value="${s.cost?.per_call_approval_usd ?? 0.5}"></div>
         </div>
+        <div class="muted" style="margin-top:6px">本月已用：<span id="p-cost-spent">讀取中…</span>（Lyria 每首 $0.04／$0.08；帳本 data/cost/ledger.jsonl）</div>
       </div>
       <div data-spane="visual" style="${activeTab === "visual" ? "" : "display:none"}">
         <label>畫面來源</label>
         <select id="v-source">
           <option value="slides" ${(s.visuals?.source || "slides") === "slides" ? "selected" : ""}>設計字卡（Pillow，快、穩、不吃 GPU）</option>
-          <option value="comfy" ${s.visuals?.source === "comfy" ? "selected" : ""}>ComfyUI 生圖當底（Krea-2，文字疊在上面）</option>
+          <option value="comfy" ${s.visuals?.source === "comfy" ? "selected" : ""}>ComfyUI 生圖當底（文字疊在上面）</option>
+          <option value="stock" ${s.visuals?.source === "stock" ? "selected" : ""}>免費實拍素材（Pexels／Pixabay，真動態畫面）</option>
+          <option value="mix" ${s.visuals?.source === "mix" ? "selected" : ""}>混合：有素材用素材，其餘生圖／字卡</option>
         </select>
+        <div class="grid-2">
+          <div><label>Pexels 金鑰環境變數名稱（只填名稱，免費申請）</label><input id="v-pexels_key_env" value="${esc(s.visuals?.pexels_key_env || "PEXELS_API_KEY")}"></div>
+          <div><label>Pixabay 金鑰環境變數名稱</label><input id="v-pixabay_key_env" value="${esc(s.visuals?.pixabay_key_env || "PIXABAY_API_KEY")}"></div>
+        </div>
+        <div class="row" style="margin-top:4px"><button type="button" class="btn" id="v-stock-check">檢查素材來源</button><span class="muted" id="v-stock-out"></span></div>
         <label>ComfyUI 位址</label>
         <input id="v-comfy_url" value="${esc(s.visuals?.comfy_url || "http://127.0.0.1:8188")}">
         <label>圖像模型組合（自動偵測已安裝；套用會蓋掉 UNET／CLIP／VAE／步數／CFG）</label>
@@ -199,11 +211,16 @@ export async function openSettingsModal() {
             privacy: $("#y-privacy", root).value, category_id: $("#y-category_id", root).value,
             made_for_kids: $("#y-made_for_kids", root).checked };
           s.pipeline.review_script = $("#p-review_script", root).checked;
+          s.pipeline.review_storyboard = $("#p-review_storyboard", root).checked;
           for (const k of ["critique_threshold", "critique_max_rounds", "title_count", "thumbnail_count", "radar_min", "radar_max"]) {
             s.pipeline[k] = +$(`#p-${k}`, root).value;
           }
+          s.pipeline.slideshow_risk_max = +$("#p-slideshow_risk_max", root).value;
+          s.cost = { ...(s.cost || {}) };
+          s.cost.monthly_cap_usd = +$("#p-cost_cap", root).value;
+          s.cost.per_call_approval_usd = +$("#p-cost_gate", root).value;
           s.visuals = { ...(s.visuals || {}) };
-          for (const k of ["source", "comfy_url", "unet", "clip", "vae", "lora", "style_hint"]) {
+          for (const k of ["source", "comfy_url", "unet", "clip", "vae", "lora", "style_hint", "pexels_key_env", "pixabay_key_env"]) {
             s.visuals[k] = $(`#v-${k}`, root).value;
           }
           for (const k of ["steps", "cfg", "timeout_s"]) s.visuals[k] = +$(`#v-${k}`, root).value;
@@ -255,6 +272,10 @@ export async function openSettingsModal() {
         setupYouTubePane(root, s, collect);
         setupTtsModels(root, s);
         setupVisualPane(root, s, collect);
+        api("/api/cost").then((c) => {
+          const el = $("#p-cost-spent", root);
+          if (el) el.textContent = `$${(c.spent_usd ?? 0).toFixed(2)}／$${(c.monthly_cap_usd ?? 0).toFixed(2)}`;
+        }).catch(() => {});
       },
     });
   };
@@ -585,6 +606,43 @@ export function openStyleEditorModal(style, onSaved) {
   });
 }
 
+export function openVideoStyleModal(onSaved) {
+  openModal({
+    title: "從參考影片分析節奏",
+    bodyHtml: `<p class="sub" style="margin-bottom:12px">貼一支參考影片（YouTube／Shorts／Reels 連結或本機路徑）。用 ffmpeg 量切點、鏡頭長度與音量，再請 LLM 產出風格卡；只新增，不會自動套用。</p>
+      <label>參考影片網址或本機路徑</label><input id="rv-url" placeholder="https://www.youtube.com/watch?v=…">
+      <label>風格名稱（選填，留空讓 AI 命名）</label><input id="rv-name">
+      <div class="muted" id="rv-out" style="margin-top:8px"></div>`,
+    footHtml: `<button type="button" class="btn" id="rv-cancel">取消</button><button type="button" class="btn primary" id="rv-go">開始分析</button>`,
+    width: 560,
+    onMount: (root) => {
+      $("#rv-cancel", root).onclick = closeModal;
+      $("#rv-go", root).onclick = async () => {
+        const url = $("#rv-url", root).value.trim();
+        if (!url) return toast("請貼影片網址或路徑");
+        const btn = $("#rv-go", root);
+        btn.disabled = true;
+        btn.textContent = "分析中…";
+        $("#rv-out", root).textContent = "下載與量測中（長片可能要幾分鐘）…";
+        try {
+          const r = await api("/api/styles/from-video", { method: "POST", body: { url, name: $("#rv-name", root).value } });
+          const s = r.stats || {};
+          $("#rv-out", root).textContent =
+            `✓ 已建立風格「${r.style?.name || ""}」：${s.cuts} 個切點、平均鏡頭 ${s.avg_shot} 秒、每分鐘 ${s.cut_density_per_min} 刀`;
+          toast("已新增風格卡（未自動套用）");
+          if (onSaved) onSaved();
+          btn.disabled = false;
+          btn.textContent = "再分析一支";
+        } catch (e) {
+          $("#rv-out", root).textContent = "✗ " + e.message;
+          btn.disabled = false;
+          btn.textContent = "開始分析";
+        }
+      };
+    },
+  });
+}
+
 export function openExtractStyleModal(episodes, onSaved) {
   let tab = "text";
   const withScripts = episodes.filter((e) => ["critique", "assemble", "package", "review", "approved"].includes(e.stage));
@@ -683,6 +741,14 @@ async function setupVisualPane(root, s, collect) {
     const matched = (res.presets || []).find((x) => x.unet === cur);
     if (matched) { presetSel.value = matched.id; apply(); }
   }).catch(() => {});
+  $("#v-stock-check", root).onclick = async () => {
+    const out = $("#v-stock-out", root);
+    out.textContent = "檢查中…";
+    await api("/api/settings", { method: "PUT", body: collect() });
+    const st = await api("/api/stock").catch((e) => ({ detail: e.message }));
+    out.textContent = (st.providers?.length ? "✓ " : "✗ ") + (st.detail || "") +
+      (st.cached ? `・已快取 ${st.cached} 段` : "");
+  };
   $("#v-health", root).onclick = async () => {
     $("#v-health-out", root).textContent = "測試中…";
     await api("/api/settings", { method: "PUT", body: collect() });

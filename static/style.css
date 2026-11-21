@@ -364,6 +364,11 @@ video.vertical { width: auto; max-width: 100%; height: 70vh; display: block; mar
 .scene .hl { font-weight: 700; }
 .scene textarea { min-height: 60px; }
 .crit { font-size: 13px; }
+.sb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.sb-card { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #fff; }
+.sb-card img { width: 100%; display: block; aspect-ratio: 16/9; object-fit: cover; }
+.sb-meta { padding: 8px 10px; font-size: 13px; }
+.sb-narr { margin-top: 6px; color: #55575e; font-size: 12.5px; line-height: 1.5; }
 .crit table { width: 100%; border-collapse: collapse; }
 .crit td, .crit th { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 .score { font-weight: 900; font-size: 18px; }

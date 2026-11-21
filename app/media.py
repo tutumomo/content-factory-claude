@@ -338,6 +338,35 @@ def scene_clip(img: Path, wav: Path, out: Path, pad: float = 0.35, sfx: Path | N
     return dur
 
 
+def scene_clip_video(bg: Path, wav: Path, out: Path, size: tuple[int, int], pad: float = 0.35,
+                     sfx: Path | None = None, sfx_gain: float = -16.0, sfx_lead: float = 0.12) -> float:
+    """Narration over looping stock footage, cropped to the target frame."""
+    dur = wav_duration(wav) + pad
+    W, H = size
+    parts = [f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps=30,setsar=1[v]"]
+    if sfx:
+        sd = audio_duration(sfx)
+        eff = min(sd, dur - min(sfx_lead, 0.1))
+        fout = min(0.8, max(0.25, eff * 0.35))
+        fade_st = max(0.0, eff - fout)
+        delay = int(min(sfx_lead, max(0.0, dur - 0.1)) * 1000)
+        parts += [f"[1:a]apad=pad_dur={pad},aresample=48000[nar]",
+                  f"[2:a]aresample=48000,volume={sfx_gain:g}dB,"
+                  f"afade=t=in:st=0:d=0.08,afade=t=out:st={fade_st:.2f}:d={fout:.2f},"
+                  f"adelay={delay}|{delay}[fx]",
+                  "[nar][fx]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[a]"]
+    else:
+        parts += [f"[1:a]apad=pad_dur={pad},aresample=48000[a]"]
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-stream_loop", "-1", "-i", str(bg), "-i", str(wav)]
+    if sfx:
+        cmd += ["-i", str(sfx)]
+    cmd += ["-filter_complex", ";".join(parts), "-map", "[v]", "-map", "[a]", "-t", f"{dur:.3f}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-r", "30",
+            "-c:a", "aac", "-b:a", "192k", "-ac", "2", str(out)]
+    run(cmd)
+    return dur
+
+
 def concat_and_burn(clips: list[Path], ass: Path, out: Path, workdir: Path, loudnorm: bool = True) -> Path:
     lst = workdir / "concat.txt"
     lst.write_text("".join(f"file '{c.resolve()}'\n" for c in clips), "utf-8")
@@ -401,13 +430,40 @@ def frame(p: Path, t: float, out: Path) -> Path:
     return out
 
 
-def verify_video(p: Path, expect_size: tuple[int, int], expect_dur: float, workdir: Path) -> dict:
+def frame_diffs(p: Path, workdir: Path, step: float = 2.0) -> dict:
+    """How much the picture actually changes: share of frame pairs that look identical."""
+    from PIL import Image, ImageChops, ImageStat
+    frames = sorted(workdir.glob("risk_*.jpg"))
+    for f in frames:
+        f.unlink()
+    run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(p), "-vf", f"fps=1/{step:g}",
+         "-q:v", "4", str(workdir / "risk_%04d.jpg")])
+    frames = sorted(workdir.glob("risk_*.jpg"))
+    if len(frames) < 2:
+        return {"pairs": 0, "avg_diff": 0.0, "static_ratio": 0.0}
+    prev = Image.open(frames[0]).convert("L").resize((64, 64))
+    diffs = []
+    for f in frames[1:]:
+        cur = Image.open(f).convert("L").resize((64, 64))
+        diffs.append(ImageStat.Stat(ImageChops.difference(prev, cur)).mean[0])
+        prev = cur
+    static = sum(1 for d in diffs if d < 1.5)
+    out = {"pairs": len(diffs), "avg_diff": round(sum(diffs) / len(diffs), 2),
+           "static_ratio": round(static / len(diffs), 3)}
+    for f in frames:
+        f.unlink()
+    return out
+
+
+def verify_video(p: Path, expect_size: tuple[int, int], expect_dur: float, workdir: Path,
+                 slideshow_risk_max: float = 0.7) -> dict:
     info = probe(p)
     dur = float(info["format"]["duration"])
     v = next((s for s in info["streams"] if s["codec_type"] == "video"), {})
     a = next((s for s in info["streams"] if s["codec_type"] == "audio"), None)
     vol = volume(p)
     sil = silences(p)
+    risk = frame_diffs(p, workdir)
     frames = []
     for i, frac in enumerate((0.1, 0.5, 0.9)):
         frames.append(str(frame(p, dur * frac, workdir / f"check_{i}.jpg").relative_to(store.DATA)))
@@ -418,5 +474,7 @@ def verify_video(p: Path, expect_size: tuple[int, int], expect_dur: float, workd
         "音量": {"ok": vol["mean_db"] is not None and -30 < vol["mean_db"] < -10 and (vol["max_db"] or 0) <= -0.5,
                "value": f"平均 {vol['mean_db']} dB，峰值 {vol['max_db']} dB"},
         "長靜音段": {"ok": not sil, "value": "無" if not sil else "、".join(f"{s:.1f}s" for s in sil)},
+        "畫面變化": {"ok": risk["static_ratio"] <= slideshow_risk_max,
+                 "value": f"{risk['static_ratio'] * 100:.0f}% 幀幾乎無變化（上限 {slideshow_risk_max * 100:.0f}%），平均差 {risk['avg_diff']}"},
     }
     return {"checks": checks, "frames": frames, "duration": dur}

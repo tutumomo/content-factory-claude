@@ -13,14 +13,16 @@ from pathlib import Path
 
 import httpx
 
-from . import comfy, llm, media, music, prompts, render, sfx, store, video
+from . import comfy, cost, llm, media, music, prompts, render, sfx, stock, store, video
 
-STAGES = ["sources", "brief", "script", "critique", "assemble", "package", "review", "approved"]
+STAGES = ["sources", "brief", "script", "critique", "storyboard", "assemble", "package", "review", "approved"]
 STAGE_LABEL = {
     "sources": "蒐集資料", "brief": "方向簡報", "script": "寫講稿", "critique": "多模型互審",
-    "assemble": "配音／畫面／字幕", "package": "標題／縮圖／貼文", "review": "成片審核", "approved": "已核准",
+    "storyboard": "分鏡確認", "assemble": "配音／畫面／字幕", "package": "標題／縮圖／貼文",
+    "review": "成片審核", "approved": "已核准",
 }
-WAIT_LABEL = {"direction": "挑方向", "script": "看講稿", "package": "挑標題與縮圖", "approval": "看成片並核准"}
+WAIT_LABEL = {"direction": "挑方向", "script": "看講稿", "storyboard": "看分鏡", "cost": "核准花費",
+              "package": "挑標題與縮圖", "approval": "看成片並核准"}
 
 _q: "queue.Queue[tuple]" = queue.Queue()
 _current: dict = {}
@@ -145,6 +147,7 @@ def _validate_script(scr: dict) -> None:
         if s.get("style") not in prompts.STYLES:
             s["style"] = "clean"
         s["visual"] = str(s.get("visual") or "").strip()
+        s["stock_query"] = str(s.get("stock_query") or "").strip()[:80]
         s["emotion"] = str(s.get("emotion") or "").strip()[:8]
         s["sfx"] = sfx.normalize(str(s.get("sfx") or ""))
     m = scr.get("music")
@@ -233,6 +236,44 @@ def _render_remotion(eid: str, clips: list[Path], scenes: list[dict], durs: list
     return media.mux_audio(vid, track, out, t0)
 
 
+def st_storyboard(ep: dict) -> bool:
+    """Cheap preview of every scene before paying for TTS and renders."""
+    eid = ep["id"]
+    cfg = store.get_settings()["pipeline"]
+    if not cfg.get("review_storyboard", True) or ep.get("storyboard_approved"):
+        return True
+    scr = store.read_json(eid, "script.json")
+    d = store.ep_dir(eid)
+    sb = d / "output/storyboard"
+    sb.mkdir(parents=True, exist_ok=True)
+    size = size_for(ep)
+    thumb = (540, 960) if ep["format"] == "short" else (960, 540)
+    channel = store.get_channel()["name"]
+    total = len(scr["scenes"])
+    items, est_total = [], 0.0
+    for i, sc in enumerate(scr["scenes"]):
+        img = sb / f"sb{i:02d}.jpg"
+        try:
+            render.slide(sc, thumb, img, channel, i, total)
+        except Exception as e:  # a missing thumbnail must not block the gate
+            store.log(eid, f"分鏡縮圖 {i + 1} 失敗：{e}")
+        chars = len(re.sub(r"\s", "", sc["narration"]))
+        secs = round(chars / 4.6 + 0.7, 1)
+        est_total += secs
+        items.append({"index": i, "headline": sc.get("headline", ""), "narration": sc["narration"],
+                      "est_seconds": secs, "sfx": sc.get("sfx", ""), "visual": sc.get("visual", ""),
+                      "thumb": f"storyboard/sb{i:02d}.jpg" if img.exists() else ""})
+    store.write_json(eid, "output/storyboard.json",
+                     {"scenes": items, "est_total": round(est_total, 1), "size": list(size),
+                      "format": ep["format"], "created": time.time()})
+    ep = store.get_episode(eid)
+    ep["checks"]["storyboard"] = {"ok": True, "value": f"{total} 個畫面，預估 {est_total:.0f} 秒"}
+    store.save_episode(ep)
+    store.log(eid, f"分鏡就緒：{total} 個畫面，預估 {est_total:.0f} 秒")
+    wait(eid, "storyboard")
+    return False
+
+
 def st_assemble(ep: dict) -> bool:
     eid = ep["id"]
     d = store.ep_dir(eid)
@@ -250,15 +291,52 @@ def st_assemble(ep: dict) -> bool:
     if not h["ok"]:
         raise media.MediaError(h["detail"])
 
-    # 1) scene backgrounds (ComfyUI when asked and reachable; Pillow cards otherwise)
+    # 0) paid cloud music budget gate (checked before the expensive TTS pass)
+    mc = store.get_settings()["music"]
+    if mc.get("enabled", True) and music.provider() == "lyria":
+        usd = cost.price((mc.get("lyria_model") or "lyria-3-clip-preview").strip())
+        dec = cost.decide(usd)
+        if dec == "deny":
+            store.log(eid, f"本月雲端花費已達上限（已用 ${cost.month_sum():.2f}），本次不加音樂")
+            mc = {**mc, "enabled": False}
+        elif dec == "need_approval" and not cost.episode_approved(eid):
+            gate = float((store.get_settings().get("cost") or {}).get("per_call_approval_usd") or 0.5)
+            store.log(eid, f"Lyria 每首 ${usd:.2f} 超過核准門檻 ${gate:.2f}，等你核准")
+            wait(eid, "cost")
+            return False
+        else:
+            cost.consume(eid)
+
+    # 1) scene backgrounds (stock footage, ComfyUI, or Pillow cards)
     scenes = scr["scenes"]
     vis = store.get_settings()["visuals"]
+    src = (vis.get("source") or "slides").lower()
     bgs: dict[int, Path] = {}
-    if vis.get("source") == "comfy":
+    clip_bgs: dict[int, Path] = {}
+    stock_sources: list[dict] = []
+    if src in ("stock", "mix"):
+        st = stock.status()
+        if st["providers"]:
+            store.log(eid, f"找實拍素材：{len(scenes)} 段（{'、'.join(st['providers'])}）")
+            for i, sc in enumerate(scenes):
+                q = stock.scene_query(sc)
+                got = stock.fetch(q, vertical)
+                if got:
+                    clip_bgs[i] = got["path"]
+                    stock_sources.append(got)
+                else:
+                    store.log(eid, f"畫面 {i + 1} 找不到素材（{q or '無關鍵詞'}），改用字卡或生圖")
+            store.log(eid, f"實拍素材 {len(clip_bgs)}/{len(scenes)} 段")
+            stock.save_sources(assets, stock_sources)
+        else:
+            store.log(eid, "素材來源沒有金鑰，改用字卡／生圖：" + st["detail"])
+    if src in ("comfy", "mix"):
         ch = comfy.health()
         if ch["ok"]:
-            store.log(eid, f"ComfyUI 生畫面：{len(scenes)} 張（{vis.get('unet')}）")
-            for i, sc in enumerate(scenes):
+            todo = [i for i in range(len(scenes)) if i not in clip_bgs]
+            store.log(eid, f"ComfyUI 生畫面：{len(todo)} 張（{vis.get('unet')}）")
+            for i in todo:
+                sc = scenes[i]
                 desc = (sc.get("visual") or sc.get("headline") or "").strip()
                 prompt = f"{desc}, {vis.get('style_hint')}, absolutely no text, no letters, no watermark"
                 try:
@@ -294,7 +372,9 @@ def st_assemble(ep: dict) -> bool:
         sc["_aligned"] = bool(words)
         all_cues += [{**c, "start": c["start"] + t0, "end": c["end"] + t0} for c in cues]
         img = assets / f"s{i:02d}.jpg"
-        if i in bgs:
+        if i in clip_bgs:
+            sc["_visual"] = "stock"
+        elif i in bgs:
             render.scene_with_bg(sc, size, bgs[i], img, channel, i, n)
             sc["_visual"] = "comfy"
         else:
@@ -303,7 +383,9 @@ def st_assemble(ep: dict) -> bool:
         if engine == "remotion":
             # the React composition draws the text itself, so it needs a text-free plate
             rm = assets / f"p{i:02d}.jpg"
-            if i in bgs:
+            if i in clip_bgs:
+                media.frame(clip_bgs[i], 1.0, rm)  # Remotion gets a still from the footage
+            elif i in bgs:
                 shutil.copy2(bgs[i], rm)
             else:
                 render.plate(sc, size, rm, i)
@@ -316,7 +398,11 @@ def st_assemble(ep: dict) -> bool:
         elif tag:
             missing_sfx.add(tag)
             sc.pop("_sfx", None)
-        clip_dur = media.scene_clip(img, wav, assets / f"s{i:02d}.mp4", sfx=fx, sfx_gain=sfx_gain)
+        if i in clip_bgs:
+            clip_dur = media.scene_clip_video(clip_bgs[i], wav, assets / f"s{i:02d}.mp4", size,
+                                              sfx=fx, sfx_gain=sfx_gain)
+        else:
+            clip_dur = media.scene_clip(img, wav, assets / f"s{i:02d}.mp4", sfx=fx, sfx_gain=sfx_gain)
         clips.append(assets / f"s{i:02d}.mp4")
         durs.append(clip_dur)
         t0 += clip_dur
@@ -332,14 +418,13 @@ def st_assemble(ep: dict) -> bool:
     media.write_srt(all_cues, out / "subtitles.srt")
 
     # 3) background music (YuE2 or Lyria, cached per provider/style/length)
-    mc = store.get_settings()["music"]
     bgm, bgm_note = None, "已關閉"
     if mc.get("enabled", True):
         style = music.style_of(scr)
-        engine = "Lyria 3" if music.provider() == "lyria" else "YuE2"
-        store.log(eid, f"背景音樂：{engine} 生成 {t0:.0f} 秒（{style[:48]}）")
+        music_engine = "Lyria 3" if music.provider() == "lyria" else "YuE2"
+        store.log(eid, f"背景音樂：{music_engine} 生成 {t0:.0f} 秒（{style[:48]}）")
         try:
-            bgm = music.generate(t0, style)
+            bgm = music.generate(t0, style, eid=eid)
             bgm_note = f"{music.duration(bgm):.0f} 秒，{mc.get('gain_db', -20)} dB" + ("，自動閃避旁白" if mc.get("duck", True) else "")
             store.log(eid, f"背景音樂就緒：{bgm.name}")
         except music.MusicError as e:
@@ -361,12 +446,21 @@ def st_assemble(ep: dict) -> bool:
             final = _render_ffmpeg(clips, ass, out / "final.mp4", assets, bgm, t0, mc)
     else:
         final = _render_ffmpeg(clips, ass, out / "final.mp4", assets, bgm, t0, mc)
-    v = media.verify_video(final, size, t0, assets)
+    v = media.verify_video(final, size, t0, assets,
+                           slideshow_risk_max=float(store.get_settings()["pipeline"].get("slideshow_risk_max", 0.7)))
     aligned = sum(1 for s in scr["scenes"] if s.get("_aligned"))
     rate_warn = [i + 1 for i, s in enumerate(scr["scenes"]) if s.get("_rate_warning")]
     v["checks"]["字幕對齊"] = {"ok": aligned == n, "value": f"{aligned}/{n} 個畫面用強制對齊，其餘按字數估算"}
     v["checks"]["語速"] = {"ok": not rate_warn, "value": "正常" if not rate_warn else f"畫面 {rate_warn} 異常"}
-    v["checks"]["畫面來源"] = {"ok": True, "value": (f"ComfyUI 生圖 {len(bgs)}/{n} 張，其餘字卡" if bgs else "字卡")}
+    parts = []
+    if clip_bgs:
+        parts.append(f"實拍素材 {len(clip_bgs)} 段")
+    if bgs:
+        parts.append(f"ComfyUI 生圖 {len(bgs)} 張")
+    slides = n - len(clip_bgs) - len(bgs)
+    if slides:
+        parts.append(f"字卡 {slides} 張")
+    v["checks"]["畫面來源"] = {"ok": True, "value": ("、".join(parts) or "字卡")}
     v["checks"]["音效"] = {"ok": True, "value": (f"{used_sfx}/{n} 個畫面有音效" if sfx_on else "已關閉")}
     v["checks"]["背景音樂"] = {"ok": bool(bgm) or not mc.get("enabled", True), "value": bgm_note}
     v["checks"]["成片引擎"] = {"ok": True, "value": "Remotion 動畫" if final_note == "Remotion" else "ffmpeg 字幕"}
@@ -401,6 +495,14 @@ def st_package(ep: dict) -> bool:
                                  store.get_channel()["name"])
         cards.append({**c, "file": str(p.relative_to(store.DATA))})
     pk["carousel"] = cards
+    srcs_p = d / "assets" / "sources.json"
+    if srcs_p.exists():
+        try:
+            rows = json.loads(srcs_p.read_text("utf-8"))
+            if rows:
+                pk["description"] = (pk.get("description") or "").rstrip() + "\n\n實拍素材來源：\n" + stock.credits(rows)
+        except (ValueError, OSError):
+            pass
     store.write_json(eid, "package.json", pk)
     wait(eid, "package")
     return False
@@ -428,6 +530,18 @@ def st_approved(ep: dict) -> bool:
         shutil.copy(store.DATA / c["file"], pub / Path(c["file"]).name)
     meta = {"title": ch["title"], "description": pk.get("description", ""), "hashtags": pk.get("hashtags", []),
             "fb_post": pk.get("fb_post", ""), "schedule": ep.get("schedule"), "platforms": store.get_channel()["platforms"]}
+    # short-form package: a 9:16 copy plus platform captions (upload is still manual)
+    tags = [str(t).strip() for t in (pk.get("hashtags") or []) if str(t).strip()]
+    tag_line = " ".join(tags[:6])
+    caption = f"{ch['title']}\n\n{tag_line}".rstrip()
+    shorts = pub / "shorts"
+    shorts.mkdir(exist_ok=True)
+    if ep["format"] == "short":
+        shutil.copy(d / "output" / "final.mp4", shorts / "vertical_9x16.mp4")
+    (shorts / "caption_tiktok.txt").write_text(caption[:2100], "utf-8")
+    (shorts / "caption_instagram.txt").write_text(caption[:2100], "utf-8")
+    meta["shorts"] = {"vertical": ep["format"] == "short", "caption_tiktok": caption[:2100],
+                      "caption_instagram": caption[:2100]}
     (pub / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
     (pub / "description.txt").write_text(f"{ch['title']}\n\n{pk.get('description', '')}\n\n{' '.join(pk.get('hashtags', []))}", "utf-8")
     store.update_episode(eid, status="done", waiting_for=None)
@@ -436,6 +550,7 @@ def st_approved(ep: dict) -> bool:
 
 
 RUNNERS = {"sources": st_sources, "brief": st_brief, "script": st_script, "critique": st_critique,
+           "storyboard": st_storyboard,
            "assemble": st_assemble, "package": st_package, "review": st_review, "approved": st_approved}
 
 
@@ -528,11 +643,24 @@ def script_decision(eid: str, approve: bool, feedback: str, edited: dict | None)
         store.write_json(eid, "script.json", edited)
         store.log(eid, "使用者直接修改講稿")
     if approve:
-        store.update_episode(eid, script_approved=True, stage="assemble")
+        cfg = store.get_settings()["pipeline"]
+        nxt = "storyboard" if cfg.get("review_storyboard", True) else "assemble"
+        store.update_episode(eid, script_approved=True, stage=nxt, storyboard_approved=False)
         store.log(eid, "使用者核准講稿")
     else:
         _remember(eid, "講稿", feedback)
         store.update_episode(eid, script_approved=False, stage="critique", revise_feedback=feedback)
+    enqueue("episode", eid)
+
+
+def storyboard_decision(eid: str, approve: bool, notes: str = "") -> None:
+    if approve:
+        store.update_episode(eid, storyboard_approved=True, stage="assemble")
+        store.log(eid, "使用者核准分鏡")
+    else:
+        _remember(eid, "畫面風格", notes or "分鏡需要調整")
+        store.update_episode(eid, storyboard_approved=False, stage="critique", revise_feedback=notes or "")
+        store.log(eid, "分鏡退回，重新修稿")
     enqueue("episode", eid)
 
 

@@ -29,13 +29,14 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 | 選題雷達 | 讀你貼的連結／筆記，整理候選題目 | 挑一個「做這個」 |
 | 蒐集資料 | 抓參考連結內文 | — |
 | 方向簡報 | 3–4 個切入方向＋需求證清單 | **挑方向**、補觀點 |
-| 寫講稿 | 依方向寫、拆成畫面 | — |
+| 寫講稿 | 依方向寫、拆成畫面（每畫面附 `stock_query` 實拍搜尋詞） | — |
 | 多模型互審 | 事實查核／觀眾理解／節奏／AI 腔四個角色打分，未過門檻自動修（最多 3 輪） | 看講稿、可直接改字（可在設定關掉這個關卡） |
-| 配音／畫面／字幕 | audio.cpp Qwen3-TTS 配音、強制對齊做字幕、Pillow 字卡或 ComfyUI 生圖當底、每畫面墊音效、YuE2／Lyria 生成背景音樂、ffmpeg 合成＋音量正規化；也可改用 Remotion 渲染動畫版成片 | — |
-| 自動檢查 | 實測長度、解析度、音量、長靜音、字幕對齊、語速、畫面來源、音效、背景音樂、成片引擎 | — |
-| 包裝 | 標題候選、縮圖候選、說明欄、IG 輪播圖卡、FB 貼文 | **挑標題、挑縮圖**、排程時間 |
+| 分鏡 | 產出每畫面的旁白、字卡與縮圖預覽，估每段秒數 | **看分鏡**，核准或退件重排（設定可關） |
+| 配音／畫面／字幕 | audio.cpp Qwen3-TTS 配音、強制對齊做字幕、畫面三選一（Pexels／Pixabay 實拍、ComfyUI 生圖、Pillow 字卡）、每畫面墊音效、YuE2／Lyria 生成背景音樂、ffmpeg 合成＋音量正規化；也可改用 Remotion 渲染動畫版成片 | — |
+| 自動檢查 | 實測長度、解析度、音量、長靜音、字幕對齊、語速、畫面來源、**畫面變化（抓簡報式輪播）**、音效、背景音樂、成片引擎 | — |
+| 包裝 | 標題候選、縮圖候選、說明欄、IG 輪播圖卡、FB 貼文、shorts 發布包（TikTok／IG 說明文＋9:16 直式成片） | **挑標題、挑縮圖**、排程時間 |
 | 成片審核 | — | 看成片 → **核准**或**退件**（一句理由） |
-| 發布包 | 輸出到 `data/episodes/<id>/publish/` | 上傳到各平台 |
+| 發布包 | 輸出到 `data/episodes/<id>/publish/`（shorts 另存 `publish/shorts/`） | 上傳到各平台 |
 | 成效回收 | — | 填各平台數字 |
 
 退件理由會被抽象成一條規則寫進「品味紀錄」，之後每一步都會遵守（SOP 原則 3）。
@@ -47,12 +48,17 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 - **畫面**：預設 Pillow 字卡；可切 ComfyUI 生圖當底、文字疊在上面。設定頁「圖像模型組合」下拉自動偵測已安裝組合：Krea-2（NSFW 首選、最快，但寫中文字弱）、MiniMax-H3-Image（中文字、NSFW 都可以，6 步 turbo）、MOSS-Image（中文字、NSFW 都可以）、Qwen Image 2.1（中文字最強、NSFW 亦可以）。
 - **音效**：每個畫面可指定一個標籤，從 `data/sfx` 音效庫挑；缺的用 MOSS-SoundEffect 在設定頁批次生成。
 - **背景音樂**：預設 YuE2 3B（audio.cpp）生成純音樂；設定頁可改 **Google Lyria 3**（Gemini API，`lyria-3-clip-preview` 固定 30 秒片段 $0.04/首、`lyria-3-pro-preview` 完整歌曲約 3 分鐘 $0.08/首；皆無免費額度，金鑰用環境變數名，音訊含 SynthID 浮水印，專案要有額度）。長度跟著成片（片段會 loop），講話時自動壓低（sidechain），結果依引擎／風格／長度快取在 `data/music`。講稿的 `music` 欄位可逐集指定風格。
+- **實拍素材**：設定頁「畫面來源」可選字卡、ComfyUI、實拍素材（Pexels／Pixabay）或混用。API key 只填環境變數名稱；搜尋依講稿的 `stock_query`，優先挑接近 1080×1920 的直式片段，下載快取在 `data/stock/`，出處與授權自動附在說明欄。實拍片段用 `scale+crop` 補滿畫框，不會變形。
+- **分鏡閘門**：預設開啟。講稿審完先進分鏡站產 `output/storyboard.json` 與縮圖，你按核准才開始配音與出片；退件會帶一句理由回講稿重排。
+- **畫面變化檢查**：`slideshow_risk_max`（預設 0.7）比對相鄰畫面的灰階差異，靜止比例超過門檻就在「畫面變化」一項標紅，提示這種成片像簡報輪播。
+- **雲端預算閘**：Lyria 這類付費 API 每筆在呼叫前先記帳（`data/cost/ledger.jsonl`）。低於單筆門檻直接放行，超過就讓集數停在「核准花費」等你按，累計超過月上限直接拒絕。核准與用量都是逐集記帳。
+- **參考影片風格分析**：風格頁「從參考影片分析」貼 YouTube／Shorts／Reels 連結（或本機影片路徑），用 yt-dlp 抓下來後量剪點節奏、鏡頭長度分佈與畫面統計，再交給 LLM 寫成風格卡。只做大綱分析，不下載成片保存。
 - **成片引擎**：`ffmpeg`（燒字幕）或 `remotion`（React 動畫：Ken Burns、標題與重點逐條進場、浮動字幕條）。Remotion 音軌仍由 ffmpeg 準備後再合成，失敗會自動退回 ffmpeg。Remotion 專案在 `remotion/`，第一次用要先 `npm install`。
 - **GPU**：LM Studio、Strata、ComfyUI 共用同一塊記憶體，不要同時載入大模型。
 
 ## 沒做的事
 
-- **沒有自動上傳到 YouTube／IG／FB**：需要各平台 OAuth 與 API 審核。目前輸出發布包（影片、縮圖、字幕、說明欄、輪播圖卡、`metadata.json`），由你手動上傳或交給排程工具。
+- **沒有自動上傳到 YouTube／IG／FB**：需要各平台 OAuth 與 API 審核。目前輸出發布包（影片、縮圖、字幕、說明欄、輪播圖卡、shorts 直式成片與平台說明文、`metadata.json`），由你手動上傳或交給排程工具。TikTok／IG 直發列為第二階段。
 - 選題雷達不會自己爬平台熱門榜，需要你貼線索。
 - 畫面預設是設計過的文字卡片；勾 ComfyUI 才會生圖。
 
@@ -67,6 +73,9 @@ app/media.py     TTS、對齊、字幕、ffmpeg、實測檢查
 app/music.py     YuE2 背景音樂生成與混音（含 ducking）
 app/sfx.py       音效庫、標籤、MOSS-SoundEffect 批量生成
 app/comfy.py     ComfyUI（Krea-2）生圖
+app/stock.py     實拍素材（Pexels／Pixabay）搜尋、下載、快取、出處
+app/cost.py      雲端 API 記帳與預算閘（單筆門檻＋月上限）
+app/video_analysis.py  參考影片下載、剪點節奏與畫面統計
 app/video.py     Remotion 渲染：組 props、呼叫 remotion CLI
 app/render.py    畫面、縮圖、輪播圖卡
 remotion/        Remotion 專案（Episode 組合：動畫排版與字幕）

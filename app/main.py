@@ -11,7 +11,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import comfy, llm, media, music, pipeline, prompts, sfx, store, video, youtube
+from . import comfy, cost, llm, media, music, pipeline, prompts, sfx, stock, store, video, video_analysis, youtube
 
 app = FastAPI(title="內容工廠")
 STATIC = store.ROOT / "static"
@@ -114,6 +114,27 @@ def visuals_health():
 @app.get("/api/visuals/presets")
 def visuals_presets():
     return comfy.presets()
+
+
+@app.get("/api/stock")
+def stock_status():
+    return stock.status()
+
+
+@app.get("/api/cost")
+def cost_status():
+    return cost.status()
+
+
+@app.post("/api/episodes/{eid}/cost")
+def cost_approve(eid: str):
+    _need_wait(_ep(eid), "cost")
+    mc = store.get_settings()["music"]
+    usd = cost.price((mc.get("lyria_model") or "lyria-3-clip-preview").strip())
+    cost.approve(eid, usd)
+    store.log(eid, f"使用者核准雲端花費 ${usd:.2f}")
+    pipeline.enqueue("episode", eid)
+    return {"ok": True, "usd": usd}
 
 
 @app.get("/api/music")
@@ -272,6 +293,16 @@ def extract_style(body: dict = Body(...)):
 
 # ---------- radar & ideas ----------
 
+@app.post("/api/styles/from-video")
+def style_from_video(body: dict = Body(...)):
+    try:
+        return video_analysis.analyze(body.get("url") or "", body.get("name") or "")
+    except video_analysis.VideoAnalysisError as e:
+        raise HTTPException(400, str(e))
+    except llm.LLMError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/radar")
 def radar():
     return store.get_radar()
@@ -358,7 +389,8 @@ def create_episode(body: dict = Body(...)):
 def episode(eid: str):
     ep = _ep(eid)
     files = {}
-    for name in ("brief.json", "script.json", "critique.json", "package.json", "output/verify.json"):
+    for name in ("brief.json", "script.json", "critique.json", "package.json",
+                 "output/storyboard.json", "output/verify.json"):
         files[name.split("/")[-1].removesuffix(".json")] = store.read_json(eid, name)
     d = store.ep_dir(eid)
     ep["files"] = files
@@ -402,6 +434,27 @@ def direction(eid: str, body: dict = Body(...)):
 def script(eid: str, body: dict = Body(...)):
     _need_wait(_ep(eid), "script")
     pipeline.script_decision(eid, bool(body.get("approve")), body.get("feedback", ""), body.get("script"))
+    return {"ok": True}
+
+
+@app.get("/api/episodes/{eid}/storyboard")
+def storyboard(eid: str):
+    ep = _ep(eid)
+    p = store.ep_dir(eid) / "output" / "storyboard.json"
+    if not p.exists():
+        raise HTTPException(404, "還沒有分鏡，等這一集跑到分鏡階段")
+    return {**store.read_json(eid, "output/storyboard.json"),
+            "waiting": ep["status"] == "waiting" and ep["waiting_for"] == "storyboard"}
+
+
+@app.post("/api/episodes/{eid}/storyboard")
+def storyboard_decide(eid: str, body: dict = Body(...)):
+    _need_wait(_ep(eid), "storyboard")
+    approve = bool(body.get("approve"))
+    notes = (body.get("notes") or "").strip()
+    if not approve and not notes:
+        raise HTTPException(400, "退回請留一句原因，系統會記下來")
+    pipeline.storyboard_decision(eid, approve, notes)
     return {"ok": True}
 
 

@@ -58,11 +58,12 @@ def fmt_desc(ep: dict) -> str:
     return "橫式長片 3–8 分鐘（講稿約 900–2000 字），8–16 個畫面，開頭 15 秒內交代為什麼要看。"
 
 
-SCRIPT_SHAPE = """輸出：{"working_title":"暫定標題","music":"英文一句背景音樂風格","scenes":[{"narration":"這個畫面要念的講稿（口語、短句）","headline":"畫面大標（12 字內）","bullets":["畫面重點，最多 3 條，每條 18 字內"],"style":"bigtype|papercut|corkboard|clean","visual":"英文一句畫面描述","sfx":"音效標籤","emotion":"念這段的口氣"}]}
+SCRIPT_SHAPE = """輸出：{"working_title":"暫定標題","music":"英文一句背景音樂風格","scenes":[{"narration":"這個畫面要念的講稿（口語、短句）","headline":"畫面大標（12 字內）","bullets":["畫面重點，最多 3 條，每條 18 字內"],"style":"bigtype|papercut|corkboard|clean","visual":"英文一句畫面描述","stock_query":"英文 2-5 個字的實拍素材關鍵詞","sfx":"音效標籤","emotion":"念這段的口氣"}]}
 畫面風格可選：""" + "；".join(f"{k}={v}" for k, v in STYLES.items()) + """。
 music 是整支片子的背景音樂風格（純音樂、無人聲），例如 "warm lo-fi, soft piano, light drums"。只給風格，不要寫歌詞。
 每個畫面另外給三件事：
 - visual：英文一句具體畫面描述（主體、場景、光線、構圖），會拿去文字生圖。不要要求畫面出現任何文字、字幕、標籤。
+- stock_query：拿去找免費實拍素材的英文關鍵詞（2-5 個字，具體名詞與場景，例如 "server room", "typing keyboard"）；抽象概念就找具體替代畫面。
 - sfx：這個畫面開頭墊一個音效，只能從清單挑一個，真的不需要就給空字串：""" + "、".join(sfx.TAGS) + """。
 - emotion：念這段的口氣，一到四個字，例如 好奇／興奮／沉穩／提醒／驚訝。
 講稿要像真人說話：短句、口語、具體例子；不要 AI 腔、不要套話、不要過度排比。英文專有名詞保留原文。"""
@@ -136,6 +137,17 @@ category 只能是：{cats}。
 輸出：{{"name":"風格名稱（4-10字）","icon":"一個適合的 emoji","category":"分類","summary":"一句話風格定位","tone":"語氣與用詞習慣","opening":"常見開頭套路","structure":"內容展開結構","pacing":"節奏與斷句習慣","words":["常用詞1","常用詞2"],"avoid":["絕不用的說法1","絕不用的說法2"]}}"""
     hint_line = f"# 指定風格名稱\n{name_hint.strip()}\n\n" if name_hint.strip() else ""
     return sys, f"{hint_line}# 參考範本內容\n{sample_text[:15000]}"
+
+
+def style_from_video(stats_json: str, name_hint: str = "") -> tuple[str, str]:
+    cats = "、".join(store.STYLE_CATEGORIES)
+    sys = f"""你是自媒體影片節奏分析師，用繁體中文（台灣用語）寫作。
+使用者提供一支參考影片的客觀剪輯統計（切點、鏡頭長度、音量）。只能依這些數字推論節奏，不可編造畫面內容。
+把節奏翻成一張可套用的「風格卡」，pacing 必須寫出具體秒數與切點密度。
+category 只能是：{cats}。
+輸出：{{"name":"風格名稱（4-10字）","icon":"一個 emoji","category":"分類","summary":"一句話風格定位","tone":"語氣與用詞習慣","opening":"常見開頭套路","structure":"內容展開結構","pacing":"節奏（引用平均鏡頭秒數與每分鐘切點數）","words":["常用詞1","常用詞2"],"avoid":["絕不用的說法1","絕不用的說法2"]}}"""
+    hint_line = f"# 指定風格名稱\n{name_hint.strip()}\n\n" if name_hint.strip() else ""
+    return sys, f"{hint_line}# 參考影片剪輯統計\n{stats_json}"
 
 
 def analyze_insights(payload: dict) -> tuple[str, str]:

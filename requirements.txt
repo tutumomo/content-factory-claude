@@ -4,3 +4,4 @@ pillow>=13.0.0
 httpx>=0.28.1
 python-multipart>=0.0.34
 opencc-python-reimplemented>=0.1.7
+yt-dlp>=2026.10.26

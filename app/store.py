@@ -57,6 +57,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "timeout_s": 600,
         "free_after": True,                # 建完圖釋放 ComfyUI 模型，把 GPU 還給別的工作
         "style_hint": "cinematic editorial illustration, soft natural light, shallow depth of field, high detail",
+        "pexels_key_env": "PEXELS_API_KEY",   # 只存名稱；實拍素材（Pexels）
+        "pixabay_key_env": "PIXABAY_API_KEY", # 只存名稱；實拍素材（Pixabay）
     },
     "sfx": {
         "enabled": True,
@@ -79,6 +81,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "timeout_s": 3600,
         "cache_dir": "",                   # 空 = data/music
     },
+    "cost": {
+        "monthly_cap_usd": 10.0,           # 雲端付費呼叫月上限（Lyria／未來雲端生圖）
+        "per_call_approval_usd": 0.5,      # 單筆超過此金額要先核准
+        "prices": {                        # 每首歌單價；改價只改這裡
+            "lyria-3-clip-preview": 0.04,
+            "lyria-3-pro-preview": 0.08,
+        },
+    },
     "render": {
         "engine": "ffmpeg",                # ffmpeg = 直接燒字幕；remotion = React 動畫合成
         "fallback_ffmpeg": True,           # Remotion 失敗時自動退回 ffmpeg
@@ -86,12 +96,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "pipeline": {
         "review_script": True,             # gate: user reviews script before assembly
+        "review_storyboard": True,         # gate: cheap scene preview before TTS/render
         "critique_threshold": 8,
         "critique_max_rounds": 3,
         "title_count": 6,
         "thumbnail_count": 4,
         "radar_min": 4,                    # each radar scan returns radar_min..radar_max topics
         "radar_max": 8,
+        "slideshow_risk_max": 0.7,         # 幀對「幾乎無變化」比例上限；超過記警告（畫面變化檢查）
     },
     "ui": {
         "nav_layout": "top",               # top | side

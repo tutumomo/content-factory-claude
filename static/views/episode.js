@@ -44,6 +44,27 @@ function gateScript(scr, crit) {
       <button type="button" class="btn" id="scr-rev">照意見重修</button></div></div>`;
 }
 
+function gateStoryboard(sb, eid) {
+  if (!sb) return "";
+  return `<div class="card gate"><h2>看分鏡</h2>
+    <p class="muted">配音與生圖之前先看一遍畫面安排。共 ${sb.scenes.length} 個畫面，預估 ${Math.round(sb.est_total)} 秒。核可就開始配音與做畫面；退回請寫一句原因，agent 會先修稿。</p>
+    <div class="sb-grid">${sb.scenes.map((s) => `<div class="sb-card">
+      ${s.thumb ? `<img src="${fileUrl(`episodes/${eid}/output/${s.thumb}`)}">` : ""}
+      <div class="sb-meta"><b>${s.index + 1}. ${esc(s.headline || "（無標題）")}</b>
+        <div class="muted">約 ${s.est_seconds} 秒${s.sfx ? `・音效 ${esc(state.META.sfx_tags?.[s.sfx] || s.sfx)}` : ""}${s.visual ? `・${esc(s.visual)}` : ""}</div>
+        <div class="sb-narr">${esc(s.narration)}</div></div></div>`).join("")}</div>
+    <label>退回原因（要退回才填）</label><textarea id="sb-fb" placeholder="例如：第 2 個畫面資訊太多，拆成兩個"></textarea>
+    <div class="row" style="margin-top:12px"><button type="button" class="btn primary" id="sb-ok">核准分鏡，開始配音</button>
+      <button type="button" class="btn" id="sb-rev">退回重修</button></div></div>`;
+}
+
+function gateCost(ep) {
+  return `<div class="card gate"><h2>核准雲端花費</h2>
+    <p class="muted">這一集要用 Lyria 生成背景音樂，單筆金額超過設定的核准門檻。核准後會繼續配音與合成；不核准可改回 audio.cpp YuE2（免費）。</p>
+    <div class="row" style="margin-top:12px"><button type="button" class="btn primary" id="cost-ok">核准這一筆花費</button>
+      <a class="btn" href="#/content">先不做</a></div></div>`;
+}
+
 function gatePackage(pk, vertical, video) {
   if (!pk) return "";
   return `<div class="card gate"><h2>挑標題與縮圖</h2><p class="muted">這兩件事決定有沒有人點進來。挑你自己最想點的。</p>
@@ -141,6 +162,8 @@ export async function viewEpisode(main, id) {
 
   if (ep.status === "waiting" && ep.waiting_for === "direction") html += gateDirection(F.brief);
   if (ep.status === "waiting" && ep.waiting_for === "script") html += gateScript(F.script, F.critique);
+  if (ep.status === "waiting" && ep.waiting_for === "storyboard") html += gateStoryboard(F.storyboard, ep.id);
+  if (ep.status === "waiting" && ep.waiting_for === "cost") html += gateCost(ep);
   if (ep.status === "waiting" && ep.waiting_for === "package") html += gatePackage(F.package, vertical, ep.video);
   if (ep.status === "waiting" && ep.waiting_for === "approval") html += gateApproval(ep, F, vertical);
 
@@ -212,6 +235,13 @@ export async function viewEpisode(main, id) {
     if (!fb) return toast("請先寫修改意見");
     post("script", { approve: false, feedback: fb, script: collectScript() });
   });
+  $("#sb-ok", main) && ($("#sb-ok", main).onclick = () => post("storyboard", { approve: true }));
+  $("#sb-rev", main) && ($("#sb-rev", main).onclick = () => {
+    const n = $("#sb-fb", main).value.trim();
+    if (!n) return toast("請先寫退回原因");
+    post("storyboard", { approve: false, notes: n });
+  });
+  $("#cost-ok", main) && ($("#cost-ok", main).onclick = () => post("cost"));
   $("#pk-go", main) && ($("#pk-go", main).onclick = () => post("package", {
     title: +$(".choice.sel[data-title]", main).dataset.title,
     custom_title: $("#pk-custom", main).value,

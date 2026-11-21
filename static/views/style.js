@@ -1,5 +1,5 @@
 import { $, $$, api, esc, state, toast } from "../lib.js";
-import { openExtractStyleModal, openStyleEditorModal } from "../modals.js";
+import { openExtractStyleModal, openStyleEditorModal, openVideoStyleModal } from "../modals.js";
 
 let styleCatFilter = "全部";
 let prefCatFilter = "全部";
@@ -56,6 +56,7 @@ export async function viewStyle(main) {
       <div class="row" style="margin:22px 0 10px">
         <h2 style="margin:0" class="grow">風格卡（寫簡報、講稿與包裝時套用）</h2>
         <button type="button" class="btn sm" id="st-extract">✨ 從文字／講稿提煉</button>
+        <button type="button" class="btn sm" id="st-video">🎞 從參考影片分析</button>
         <button type="button" class="btn primary sm" id="st-new">＋ 新增風格卡</button>
       </div>
       <div class="filter-pills" style="margin-bottom:12px">
@@ -155,6 +156,7 @@ export async function viewStyle(main) {
     $$("[data-scat]", main).forEach((b) => { b.onclick = () => { styleCatFilter = b.dataset.scat; load(); }; });
     $("#st-new", main).onclick = () => openStyleEditorModal(null, load);
     $("#st-extract", main).onclick = () => openExtractStyleModal(eps, load);
+    $("#st-video", main).onclick = () => openVideoStyleModal(load);
 
     $$("[data-sact]", main).forEach((b) => {
       b.onclick = async () => {
