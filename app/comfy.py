@@ -1,4 +1,4 @@
-"""ComfyUI client for scene backgrounds (Krea-2 Turbo text-to-image), built as an API graph.
+"""ComfyUI client for scene backgrounds (Krea-2／MiniMax-H3-Image／MOSS-Image／Qwen Image 2.1).
 
 Falls back to Pillow cards when ComfyUI is down; the caller decides.
 """
@@ -11,6 +11,48 @@ from pathlib import Path
 import httpx
 
 from . import store
+
+# Per-family model combos (files from the ComfyUI loader enums on this box) + tuned
+# sampler settings taken from the installed reference workflows. 中文文字：Krea-2 弱，
+# H3／MOSS／Qwen 2.1 都能寫字；NSFW：四個都能。畫不動就退回 Pillow 字卡。
+PRESETS: dict[str, dict] = {
+    "krea2": {
+        "label": "Krea-2（kromaKrea2）",
+        "unet": "kromaKrea2_opd.safetensors",
+        "clip": "Huihui-Qwen3-VL-4B-Instruct-abliterated-fp8_scaled.safetensors",
+        "clip_type": "krea2",
+        "vae": "qwen_image_vae.safetensors",
+        "steps": 8, "cfg": 1.0, "sampler": "euler",
+        "note": "NSFW 首選、最快；寫中文字能力弱，畫面要中文字時選別的組合",
+    },
+    "h3": {
+        "label": "MiniMax-H3-Image",
+        "unet": "minimax_h3_image_pruned_int8_convrot.safetensors",
+        "clip": "qwen3vl_32b_h3_ultra_uncensored_heretic_int8_convrot.safetensors",
+        "clip_type": "minimax",
+        "vae": "minimax_h3_image_vae_fp16.safetensors",
+        "steps": 6, "cfg": 1.0, "sampler": "euler",
+        "note": "中文文字、NSFW 都可以；6 步 turbo，速度快",
+    },
+    "moss": {
+        "label": "MOSS-Image",
+        "unet": "kromoss_int8_convrot.safetensors",
+        "clip": "qwen3.5_9b_uncensored_int8_convrot.safetensors",
+        "clip_type": "moss_image",
+        "vae": "flux2-vae_small.safetensors",
+        "steps": 25, "cfg": 3.0, "sampler": "heun",
+        "note": "中文文字、NSFW 都可以；25 步較慢，配 dmd2 LoRA 可降到 8 步",
+    },
+    "qwen21": {
+        "label": "Qwen Image 2.1",
+        "unet": "qwen_image_2.1_int8_convrot.safetensors",
+        "clip": "qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors",
+        "clip_type": "qwen_image",
+        "vae": "qwen_image_2.1_vae_bf16.safetensors",
+        "steps": 25, "cfg": 1.0, "sampler": "dpmpp_2m_sde_gpu",
+        "note": "中文文字最強、NSFW 亦可以；25 步較慢",
+    },
+}
 
 
 class ComfyError(RuntimeError):
@@ -35,6 +77,27 @@ def health() -> dict:
         return {"ok": False, "detail": f"ComfyUI 連不上：{e}（請先執行 ./start_comfyui.sh）"}
 
 
+def presets() -> dict:
+    """Preset list plus whether each file shows up in ComfyUI's loader enums."""
+    enum: dict[str, set[str]] = {}
+    try:
+        for path, key in (("UNETLoader", "unet"), ("CLIPLoader", "clip"), ("VAELoader", "vae")):
+            r = httpx.get(base() + f"/object_info/{path}", timeout=20)
+            r.raise_for_status()
+            req = r.json()[path]["input"]["required"]
+            field = {"unet": "unet_name", "clip": "clip_name", "vae": "vae_name"}[key]
+            enum[key] = set(next(v for v in req[field] if isinstance(v, list)))
+    except (httpx.HTTPError, StopIteration, KeyError):
+        enum = {}
+    items = []
+    for pid, p in PRESETS.items():
+        miss = [f"{k}:{p[k]}" for k in ("unet", "clip", "vae") if p[k] not in enum.get(k, ())] if enum else []
+        if not enum:
+            miss = [f"{k}:?" for k in ("unet", "clip", "vae")]
+        items.append({**p, "id": pid, "installed": not miss, "missing": miss})
+    return {"presets": items, "detected": bool(enum)}
+
+
 def _graph(prompt: str, w: int, h: int, seed: int) -> dict:
     c = cfg()
     g = {
@@ -48,7 +111,7 @@ def _graph(prompt: str, w: int, h: int, seed: int) -> dict:
         "7": {"class_type": "KSampler", "inputs": {
             "model": ["1", 0], "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["6", 0],
             "seed": seed, "steps": int(c.get("steps") or 8), "cfg": float(c.get("cfg") or 1.0),
-            "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
+            "sampler_name": c.get("sampler") or "euler", "scheduler": "simple", "denoise": 1.0}},
         "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
         "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "cf_scene"}},
     }

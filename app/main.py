@@ -111,6 +111,11 @@ def visuals_health():
     return comfy.health()
 
 
+@app.get("/api/visuals/presets")
+def visuals_presets():
+    return comfy.presets()
+
+
 @app.get("/api/music")
 def music_status():
     return music.status()

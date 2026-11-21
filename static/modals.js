@@ -95,6 +95,9 @@ export async function openSettingsModal() {
         </select>
         <label>ComfyUI 位址</label>
         <input id="v-comfy_url" value="${esc(s.visuals?.comfy_url || "http://127.0.0.1:8188")}">
+        <label>圖像模型組合（自動偵測已安裝；套用會蓋掉 UNET／CLIP／VAE／步數／CFG）</label>
+        <select id="v-preset"><option value="">（維持下面的手動設定）</option></select>
+        <div class="muted" id="v-preset-note" style="margin-top:4px"></div>
         <div class="grid-2">
           <div><label>UNET</label><input id="v-unet" value="${esc(s.visuals?.unet || "")}"></div>
           <div><label>CLIP（type 固定 krea2）</label><input id="v-clip" value="${esc(s.visuals?.clip || "")}"></div>
@@ -142,7 +145,7 @@ export async function openSettingsModal() {
         </div>
         <div id="m-ly" style="${s.music?.provider === "lyria" ? "" : "display:none"}">
           <div class="grid-2" style="margin-top:8px">
-            <div><label>Lyria 模型</label><select id="m-lyria_model">${[["lyria-3-clip-preview", "Lyria 3 Clip（固定 30 秒，成片時 loop）"], ["lyria-3.5", "Lyria 3.5（完整編曲，約 2 分鐘）"]].map(([v, l]) => `<option value="${v}" ${v === (s.music?.lyria_model || "lyria-3-clip-preview") ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+            <div><label>Lyria 模型</label><select id="m-lyria_model">${[["lyria-3-clip-preview", "Lyria 3 Clip（固定 30 秒，成片時 loop，$0.04/首）"], ["lyria-3-pro-preview", "Lyria 3 Pro（完整歌曲約 3 分鐘，$0.08/首）"]].map(([v, l]) => `<option value="${v}" ${v === (s.music?.lyria_model || "lyria-3-clip-preview") ? "selected" : ""}>${l}</option>`).join("")}${![["lyria-3-clip-preview"], ["lyria-3-pro-preview"]].some(([v]) => v === s.music?.lyria_model) && s.music?.lyria_model ? `<option value="${esc(s.music.lyria_model)}" selected>${esc(s.music.lyria_model)}（舊版，建議改選 Clip 或 Pro）</option>` : ""}</select></div>
             <div><label>API 金鑰環境變數名稱</label><input id="m-lyria_key_env" value="${esc(s.music?.lyria_key_env || "GEMINI_API_KEY")}"></div>
           </div>
           <div class="muted" style="margin-top:4px">走 Gemini API（generativelanguage.googleapis.com）；金鑰需有額度、專案未達月上限。Lyria 音訊含 SynthID 浮水印。</div>
@@ -657,6 +660,29 @@ async function setupVisualPane(root, s, collect) {
     try { renderLib(await api("/api/sfx")); } catch (e) { lib.textContent = e.message; }
   };
   load();
+  const presetSel = $("#v-preset", root);
+  const presetNote = $("#v-preset-note", root);
+  api("/api/visuals/presets").then((res) => {
+    const cur = s.visuals?.unet || "";
+    for (const p of res.presets || []) {
+      presetSel.insertAdjacentHTML("beforeend",
+        `<option value="${esc(p.id)}">${esc(p.label)}${p.installed ? "" : "（未安裝）"}${(p.unet || "") === cur ? "・目前" : ""}</option>`);
+    }
+    const apply = () => {
+      const p = (res.presets || []).find((x) => x.id === presetSel.value);
+      if (!p) { presetNote.textContent = ""; return; }
+      $("#v-unet", root).value = p.unet;
+      $("#v-clip", root).value = p.clip;
+      $("#v-vae", root).value = p.vae;
+      $("#v-steps", root).value = p.steps;
+      $("#v-cfg", root).value = p.cfg;
+      s.visuals = { ...(s.visuals || {}), clip_type: p.clip_type, sampler: p.sampler };
+      presetNote.textContent = (p.installed ? "" : `✗ 檔案缺：${p.missing.join("、")}　`) + p.note;
+    };
+    presetSel.onchange = apply;
+    const matched = (res.presets || []).find((x) => x.unet === cur);
+    if (matched) { presetSel.value = matched.id; apply(); }
+  }).catch(() => {});
   $("#v-health", root).onclick = async () => {
     $("#v-health-out", root).textContent = "測試中…";
     await api("/api/settings", { method: "PUT", body: collect() });

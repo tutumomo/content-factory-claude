@@ -44,9 +44,9 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 
 - **LLM**：預設 `claude -p`（用你本機 Claude Code 的登入）。也可換成 OpenAI 相容端點（LM Studio :1234、Strata :8081），或「示範模式」只測流程。API key 只填環境變數名稱。
 - **配音**：audio.cpp `qwen3-tts-1.7b-customvoice`，聲音 `vivian`；字幕對齊 `qwen3-forced-aligner-0.6b`。設定頁的 TTS 模型改成下拉選單，清單自動讀取 audio.cpp 上已登記的語音模型（`tts`／`clon`／`vdes`）。**參考音色**下拉也從 audio.cpp 的 `/v1/audio/voices` 抓：內建聲音（vivian 等，只適用 Qwen3 CustomVoice）與伺服器 `voice_dir` 音色庫（搭配 clon 模型；qwen3 Base 沒參考文字時自動改用 speaker-embedding 模式）。audio.cpp 同時只載入一個模型，被別的程式佔用時會自動等待重試（最多 15 分鐘）。送進 TTS 的文字會先轉成簡體（OpenCC tw2sp，例如 軟體→软件），因為 audio.cpp 讀繁體字常讀錯；字幕仍用原文。逐段情緒預設關閉，避免同一支片聽起來像換人。
-- **畫面**：預設 Pillow 字卡；可切 ComfyUI（Krea-2）生底圖、文字疊在上面。
+- **畫面**：預設 Pillow 字卡；可切 ComfyUI 生圖當底、文字疊在上面。設定頁「圖像模型組合」下拉自動偵測已安裝組合：Krea-2（NSFW 首選、最快，但寫中文字弱）、MiniMax-H3-Image（中文字、NSFW 都可以，6 步 turbo）、MOSS-Image（中文字、NSFW 都可以）、Qwen Image 2.1（中文字最強、NSFW 亦可以）。
 - **音效**：每個畫面可指定一個標籤，從 `data/sfx` 音效庫挑；缺的用 MOSS-SoundEffect 在設定頁批次生成。
-- **背景音樂**：預設 YuE2 3B（audio.cpp）生成純音樂；設定頁可改 **Google Lyria 3**（Gemini API，`lyria-3-clip-preview` 固定 30 秒片段、`lyria-3.5` 完整編曲約 2 分鐘；金鑰用環境變數名，音訊含 SynthID 浮水印，專案要有額度）。長度跟著成片（片段會 loop），講話時自動壓低（sidechain），結果依引擎／風格／長度快取在 `data/music`。講稿的 `music` 欄位可逐集指定風格。
+- **背景音樂**：預設 YuE2 3B（audio.cpp）生成純音樂；設定頁可改 **Google Lyria 3**（Gemini API，`lyria-3-clip-preview` 固定 30 秒片段 $0.04/首、`lyria-3-pro-preview` 完整歌曲約 3 分鐘 $0.08/首；皆無免費額度，金鑰用環境變數名，音訊含 SynthID 浮水印，專案要有額度）。長度跟著成片（片段會 loop），講話時自動壓低（sidechain），結果依引擎／風格／長度快取在 `data/music`。講稿的 `music` 欄位可逐集指定風格。
 - **成片引擎**：`ffmpeg`（燒字幕）或 `remotion`（React 動畫：Ken Burns、標題與重點逐條進場、浮動字幕條）。Remotion 音軌仍由 ffmpeg 準備後再合成，失敗會自動退回 ffmpeg。Remotion 專案在 `remotion/`，第一次用要先 `npm install`。
 - **GPU**：LM Studio、Strata、ComfyUI 共用同一塊記憶體，不要同時載入大模型。
 

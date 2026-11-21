@@ -28,8 +28,8 @@ MAX_SECONDS = 354.0            # semantic_max_tokens cap 9000 → 360 s; stay un
 LYRIA_API = "https://generativelanguage.googleapis.com/v1beta/interactions"
 LYRIA_REVISION = "2026-05-20"
 LYRIA_MODELS = {
-    "lyria-3-clip-preview": "Lyria 3 Clip（固定 30 秒片段，成片時 loop）",
-    "lyria-3.5": "Lyria 3.5（完整編曲，約 2 分鐘，用提示控制長度）",
+    "lyria-3-clip-preview": "Lyria 3 Clip（固定 30 秒片段，成片時 loop，$0.04/首）",
+    "lyria-3-pro-preview": "Lyria 3 Pro（完整歌曲約 3 分鐘，$0.08/首）",
 }
 
 
@@ -189,7 +189,7 @@ def lyria_generate(style: str = "", seconds: float = 30.0, out: Path | None = No
     if "no vocals" not in low:
         prompt += ", no vocals"
     if model != "lyria-3-clip-preview":
-        prompt += f". Target length about {int(max(20, min(float(seconds), 170)))} seconds"
+        prompt += f", target length about {int(max(20, min(float(seconds), 170)))} seconds"
     prompt += "."
     tag = hashlib.sha1(f"lyria|{model}|{prompt}".encode()).hexdigest()[:16]
     path = out or (cache_dir() / f"bgm_lyria_{tag}.mp3")

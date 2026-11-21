@@ -53,6 +53,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "lora_strength": 0.8,
         "steps": 8,
         "cfg": 1.0,
+        "sampler": "euler",                # h3/moss/qwen21 preset 會換成對應最佳取樣器
         "timeout_s": 600,
         "free_after": True,                # 建完圖釋放 ComfyUI 模型，把 GPU 還給別的工作
         "style_hint": "cinematic editorial illustration, soft natural light, shallow depth of field, high detail",
@@ -66,7 +67,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "music": {
         "enabled": True,
         "provider": "audiocpp",            # audiocpp = YuE2；lyria = Google Lyria 3（Gemini API）
-        "lyria_model": "lyria-3-clip-preview",  # 或 lyria-3.5
+        "lyria_model": "lyria-3-clip-preview",  # 或 lyria-3-pro-preview
         "lyria_key_env": "GEMINI_API_KEY",  # 只存環境變數名稱，金鑰不進設定檔
         "base_url": "",                    # 空 = 跟 tts 同一個 audio.cpp 伺服器
         "model": "yue2",                   # audio.cpp 裡的 YuE2 3B 音樂模型
