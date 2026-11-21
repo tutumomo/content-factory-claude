@@ -1,5 +1,5 @@
-import { $, $$, api, compactNum, esc, fileUrl, fmtName, toast, when } from "../lib.js";
-import { openAddMetricModal, openImportCsvModal } from "../modals.js";
+import { $, $$, api, compactNum, esc, fileUrl, fmtName, toast, when } from "../lib.js?v=20261121e";
+import { openAddMetricModal, openImportCsvModal } from "../modals.js?v=20261121e";
 
 let fDays = 30;
 let fPlatform = "all";

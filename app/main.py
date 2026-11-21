@@ -732,7 +732,16 @@ def files(path: str):
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html")
+    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
 
-app.mount("/static", StaticFiles(directory=STATIC), name="static")
+class _RevalidatedStatic(StaticFiles):
+    # 沒有 Cache-Control 時瀏覽器會啟發式快取 ES module，舊版 import 會讓 lib.js 載成兩份、state.META 變 null。
+    # no-cache 仍可用 ETag 回 304，只是每次都先問伺服器。
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
+app.mount("/static", _RevalidatedStatic(directory=STATIC), name="static")
