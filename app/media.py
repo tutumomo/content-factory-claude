@@ -77,10 +77,24 @@ def split_for_tts(text: str, limit: int = 110) -> list[str]:
     return [c.strip() for c in out if c.strip()]
 
 
-def tts(text: str, out: Path) -> Path:
+def tts(text: str, out: Path, emotion: str = "") -> Path:
     cfg = store.get_settings()["tts"]
-    body = {"model": cfg["model"], "input": text, "voice": cfg["voice"] or None,
-            "options": {k: v for k, v in (("language", cfg["language"]), ("instruct", cfg["instruct"])) if v}}
+    opts = {k: v for k, v in (("language", cfg.get("language")), ("instruct", cfg.get("instruct"))) if v}
+    emo = (emotion or "").strip() or (cfg.get("emotion") or "")
+    if emo:
+        if cfg["model"].startswith("qwen3"):
+            # qwen3 takes a free-text instruct: fold the per-scene emotion into it
+            opts["instruct"] = "，".join(x for x in (opts.get("instruct"), f"語氣：{emo}") if x)
+        else:
+            opts["emotion"] = emo
+            opts["emotion_alpha"] = float(cfg.get("emotion_alpha") or 1.0)
+    body = {"model": cfg["model"], "input": text}
+    if cfg.get("voice") and cfg["model"].startswith("qwen3"):
+        body["voice"] = cfg["voice"]
+    if cfg.get("voice_ref"):
+        body["voice_ref"] = cfg["voice_ref"]
+    if opts:
+        body["options"] = opts
     try:
         r = _post_busy_retry(cfg["base_url"].rstrip("/") + "/v1/audio/speech", json=body, timeout=900)
     except httpx.HTTPError as e:
@@ -94,6 +108,15 @@ def tts(text: str, out: Path) -> Path:
 def wav_duration(p: Path) -> float:
     with wave.open(str(p)) as w:
         return w.getnframes() / w.getframerate()
+
+
+def audio_duration(p: Path) -> float:
+    """Duration of any audio file (wav read directly, others through ffprobe)."""
+    try:
+        return wav_duration(p)
+    except (wave.Error, EOFError):
+        out = run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(p)])
+        return float(out.strip().splitlines()[-1])
 
 
 def concat_wavs(parts: list[Path], out: Path, gap: float = 0.18) -> Path:
@@ -230,24 +253,67 @@ def write_srt(cues: list[dict], out: Path) -> Path:
     return out
 
 
-def scene_clip(img: Path, wav: Path, out: Path, pad: float = 0.35) -> float:
+def scene_clip(img: Path, wav: Path, out: Path, pad: float = 0.35, sfx: Path | None = None,
+               sfx_gain: float = -16.0, sfx_lead: float = 0.12) -> float:
     dur = wav_duration(wav) + pad
-    run(["ffmpeg", "-y", "-loglevel", "error", "-loop", "1", "-framerate", "30", "-i", str(img), "-i", str(wav),
-         "-filter_complex", f"[1:a]apad=pad_dur={pad},aresample=48000[a]", "-map", "0:v", "-map", "[a]",
-         "-t", f"{dur:.3f}", "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage", "-pix_fmt", "yuv420p",
-         "-r", "30", "-c:a", "aac", "-b:a", "192k", "-ac", "2", str(out)])
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-loop", "1", "-framerate", "30", "-i", str(img), "-i", str(wav)]
+    if sfx:
+        sd = audio_duration(sfx)
+        eff = min(sd, dur - min(sfx_lead, 0.1))
+        fout = min(0.8, max(0.25, eff * 0.35))
+        fade_st = max(0.0, eff - fout)
+        delay = int(min(sfx_lead, max(0.0, dur - 0.1)) * 1000)
+        graph = (f"[1:a]apad=pad_dur={pad},aresample=48000[nar];"
+                 f"[2:a]aresample=48000,volume={sfx_gain:g}dB,"
+                 f"afade=t=in:st=0:d=0.08,afade=t=out:st={fade_st:.2f}:d={fout:.2f},"
+                 f"adelay={delay}|{delay}[fx];"
+                 f"[nar][fx]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[a]")
+        cmd += ["-i", str(sfx), "-filter_complex", graph]
+    else:
+        cmd += ["-filter_complex", f"[1:a]apad=pad_dur={pad},aresample=48000[a]"]
+    cmd += ["-map", "0:v", "-map", "[a]", "-t", f"{dur:.3f}", "-c:v", "libx264", "-preset", "veryfast",
+            "-tune", "stillimage", "-pix_fmt", "yuv420p", "-r", "30", "-c:a", "aac", "-b:a", "192k", "-ac", "2", str(out)]
+    run(cmd)
     return dur
 
 
-def concat_and_burn(clips: list[Path], ass: Path, out: Path, workdir: Path) -> Path:
+def concat_and_burn(clips: list[Path], ass: Path, out: Path, workdir: Path, loudnorm: bool = True) -> Path:
     lst = workdir / "concat.txt"
     lst.write_text("".join(f"file '{c.resolve()}'\n" for c in clips), "utf-8")
     joined = workdir / "joined.mp4"
     run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(joined)])
     ass_arg = str(ass.resolve()).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-    run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(joined), "-vf", f"subtitles='{ass_arg}'",
-         "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(out)])
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(joined), "-vf", f"subtitles='{ass_arg}'"]
+    # with a music bed still to come, loudness is normalised after the mix instead
+    cmd += ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"] if loudnorm else []
+    run(cmd + ["-c:v", "libx264", "-preset", "medium", "-crf", "20",
+               "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(out)])
+    return out
+
+
+def join_clips(clips: list[Path], out: Path, workdir: Path) -> Path:
+    lst = workdir / "concat.txt"
+    lst.write_text("".join(f"file '{c.resolve()}'\n" for c in clips), "utf-8")
+    run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(out)])
+    return out
+
+
+def loudnorm_copy(video_in: Path, out: Path) -> Path:
+    """Normalise loudness without touching the picture (used before an external video render)."""
+    run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(video_in), "-c:v", "copy",
+         "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", str(out)])
+    return out
+
+
+def extract_audio(video_in: Path, out: Path) -> Path:
+    run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(video_in), "-vn", "-c:a", "aac", "-b:a", "192k", str(out)])
+    return out
+
+
+def mux_audio(video_in: Path, audio_in: Path, out: Path, total: float) -> Path:
+    run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(video_in), "-i", str(audio_in),
+         "-map", "0:v", "-map", "1:a", "-t", f"{total:.3f}", "-c:v", "copy", "-c:a", "copy",
+         "-movflags", "+faststart", str(out)])
     return out
 
 

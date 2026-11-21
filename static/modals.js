@@ -12,7 +12,10 @@ export async function openSettingsModal() {
       ["llm", "LLM 模型"],
       ["tts", "配音 audio.cpp"],
       ["pipeline", "流程參數"],
+      ["visual", "畫面與音效"],
+      ["youtube", "YouTube"],
     ];
+    const yt = s.youtube || {};
     const bodyHtml = `
       <div class="seg" style="margin-bottom:14px">
         ${tabs.map(([id, label]) => `<button type="button" data-stab="${id}" class="${activeTab === id ? "on" : ""}">${label}</button>`).join("")}
@@ -60,6 +63,12 @@ export async function openSettingsModal() {
         </div>
         <label>語氣指示</label>
         <input id="t-instruct" value="${esc(s.tts.instruct)}">
+        <label>參考音檔路徑（index-tts2.5、zonos3-mini 必填；qwen3 模型可留空）</label>
+        <input id="t-voice_ref" value="${esc(s.tts.voice_ref || "")}" placeholder="/home/altos/…/ref.wav">
+        <div class="grid-2">
+          <div><label>情緒示範文字（index-tts2.5 用）</label><input id="t-emotion" value="${esc(s.tts.emotion || "")}"></div>
+          <div><label>情緒強度 0–1</label><input id="t-emotion_alpha" type="number" min="0" max="1" step="0.1" value="${s.tts.emotion_alpha ?? 1}"></div>
+        </div>
         <label>字幕對齊模型 id（留空改用字數估算）</label>
         <input id="t-align_model" value="${esc(s.tts.align_model)}">
       </div>
@@ -70,7 +79,81 @@ export async function openSettingsModal() {
           <div><label>最多修稿幾輪</label><input id="p-critique_max_rounds" type="number" min="1" max="6" value="${s.pipeline.critique_max_rounds}"></div>
           <div><label>標題候選數</label><input id="p-title_count" type="number" min="2" max="12" value="${s.pipeline.title_count}"></div>
           <div><label>縮圖候選數</label><input id="p-thumbnail_count" type="number" min="2" max="8" value="${s.pipeline.thumbnail_count}"></div>
+          <div><label>雷達每次至少幾條</label><input id="p-radar_min" type="number" min="3" max="12" value="${s.pipeline.radar_min}"></div>
+          <div><label>雷達每次最多幾條</label><input id="p-radar_max" type="number" min="3" max="12" value="${s.pipeline.radar_max}"></div>
         </div>
+      </div>
+      <div data-spane="visual" style="${activeTab === "visual" ? "" : "display:none"}">
+        <label>畫面來源</label>
+        <select id="v-source">
+          <option value="slides" ${(s.visuals?.source || "slides") === "slides" ? "selected" : ""}>設計字卡（Pillow，快、穩、不吃 GPU）</option>
+          <option value="comfy" ${s.visuals?.source === "comfy" ? "selected" : ""}>ComfyUI 生圖當底（Krea-2，文字疊在上面）</option>
+        </select>
+        <label>ComfyUI 位址</label>
+        <input id="v-comfy_url" value="${esc(s.visuals?.comfy_url || "http://127.0.0.1:8188")}">
+        <div class="grid-2">
+          <div><label>UNET</label><input id="v-unet" value="${esc(s.visuals?.unet || "")}"></div>
+          <div><label>CLIP（type 固定 krea2）</label><input id="v-clip" value="${esc(s.visuals?.clip || "")}"></div>
+          <div><label>VAE</label><input id="v-vae" value="${esc(s.visuals?.vae || "")}"></div>
+          <div><label>LoRA（留空不用）</label><input id="v-lora" value="${esc(s.visuals?.lora || "")}"></div>
+          <div><label>步數</label><input id="v-steps" type="number" min="1" max="30" value="${s.visuals?.steps ?? 8}"></div>
+          <div><label>CFG</label><input id="v-cfg" type="number" min="1" max="10" step="0.1" value="${s.visuals?.cfg ?? 1}"></div>
+        </div>
+        <label>生圖風格提示（英文，接在每個畫面描述後面）</label>
+        <input id="v-style_hint" value="${esc(s.visuals?.style_hint || "")}">
+        <div class="grid-2">
+          <div><label>單張逾時（秒）</label><input id="v-timeout_s" type="number" min="60" max="1800" value="${s.visuals?.timeout_s ?? 600}"></div>
+          <div style="display:flex;align-items:flex-end"><label style="margin:0"><input type="checkbox" id="v-free_after" style="width:auto;margin-right:6px" ${s.visuals?.free_after !== false ? "checked" : ""}> 生完圖釋放 ComfyUI 模型（把 GPU 還給別的工作）</label></div>
+        </div>
+        <div class="row" style="margin-top:10px"><button type="button" class="btn" id="v-health">測試 ComfyUI 連線</button><span class="muted" id="v-health-out"></span></div>
+        <div class="warn" style="margin-top:10px">ComfyUI、LM Studio、Strata 共用同一塊 GPU 記憶體。生圖那一段時間不要把兩個大模型同時開著。</div>
+        <h2 style="margin-top:18px">音效</h2>
+        <label style="margin-top:0"><input type="checkbox" id="x-enabled" style="width:auto;margin-right:6px" ${s.sfx?.enabled !== false ? "checked" : ""}> 每個畫面開頭墊一個音效（講稿有指定才放）</label>
+        <div class="grid-2">
+          <div><label>音效音量（相對旁白，dB）</label><input id="x-gain_db" type="number" min="-40" max="0" value="${s.sfx?.gain_db ?? -16}"></div>
+          <div><label>音效庫資料夾（留空 = data/sfx）</label><input id="x-library_dir" value="${esc(s.sfx?.library_dir || "")}"></div>
+        </div>
+        <label>音效模型（留空 = 內建 MOSS-SoundEffect-v2）</label>
+        <input id="x-model_path" value="${esc(s.sfx?.model_path || "")}">
+        <div class="card" style="margin:12px 0 0" id="x-lib"><span class="muted">讀取音效庫…</span></div>
+        <div class="row" style="margin-top:10px">
+          <button type="button" class="btn primary" id="x-build">生成缺的音效（本機模型）</button>
+          <button type="button" class="btn" id="x-import">從資料夾匯入</button>
+          <span class="muted" id="x-out"></span>
+        </div>
+        <div class="muted" style="margin-top:8px">檔名規則：<code>標籤__備註.wav</code>，例如 <code>whoosh__1.wav</code>。沒有對應音效的畫面只留旁白，不會自動猜。</div>
+        <h2 style="margin-top:18px">背景音樂</h2>
+        <label style="margin-top:0"><input type="checkbox" id="m-enabled" style="width:auto;margin-right:6px" ${s.music?.enabled !== false ? "checked" : ""}> 成片墊一層 YuE2 生成的純音樂（無人聲）</label>
+        <div class="grid-2">
+          <div><label>音樂模型（audio.cpp 模型 id）</label><input id="m-model" value="${esc(s.music?.model || "yue2")}"></div>
+          <div><label>音樂音量（相對旁白，dB）</label><input id="m-gain_db" type="number" min="-40" max="0" value="${s.music?.gain_db ?? -20}"></div>
+        </div>
+        <label>預設風格（英文；留空 = 內建 lo-fi。講稿的 music 欄位優先）</label>
+        <input id="m-style" value="${esc(s.music?.style || "")}">
+        <div class="grid-2">
+          <div><label>seed</label><input id="m-seed" type="number" value="${s.music?.seed ?? 1234}"></div>
+          <div style="display:flex;align-items:flex-end"><label style="margin:0"><input type="checkbox" id="m-duck" style="width:auto;margin-right:6px" ${s.music?.duck !== false ? "checked" : ""}> 旁白講話時自動壓低音樂</label></div>
+        </div>
+        <div class="row" style="margin-top:10px"><button type="button" class="btn" id="m-preview">試聽 20 秒</button><span class="muted" id="m-out"></span></div>
+        <div id="m-player" style="margin-top:8px"></div>
+        <h2 style="margin-top:18px">成片引擎</h2>
+        <select id="r-engine">
+          <option value="ffmpeg" ${(s.render?.engine || "ffmpeg") === "ffmpeg" ? "selected" : ""}>ffmpeg（燒字幕，快、穩）</option>
+          <option value="remotion" ${s.render?.engine === "remotion" ? "selected" : ""}>Remotion（React 動態排版與轉場）</option>
+        </select>
+        <div class="muted" style="margin-top:6px">Remotion 模式用同一份講稿、畫面與時間軸渲染動畫版成片；失敗且勾了 fallback 時自動退回 ffmpeg。<span id="r-out"></span></div>
+        <label style="margin-top:8px"><input type="checkbox" id="r-fallback_ffmpeg" style="width:auto;margin-right:6px" ${s.render?.fallback_ffmpeg !== false ? "checked" : ""}> Remotion 失敗時自動退回 ffmpeg</label>
+      </div>
+      <div data-spane="youtube" style="${activeTab === "youtube" ? "" : "display:none"}">
+        <div class="card" style="margin:0 0 12px" id="yt-box"><span class="muted">讀取登入狀態…</span></div>
+        <label>Google OAuth 用戶端檔（Desktop 類型 client_secret_*.json）</label>
+        <select id="y-client_file"><option value="${esc(yt.client_file || "")}">${esc(yt.client_file || "自動偵測")}</option></select>
+        <div class="grid-2">
+          <div><label>上傳後的公開狀態</label><select id="y-privacy">${[["private", "私人（建議，先在 Studio 檢查）"], ["unlisted", "不公開"], ["public", "公開"]].map(([v, l]) => `<option value="${v}" ${v === (yt.privacy || "private") ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+          <div><label>影片類別</label><select id="y-category_id">${[["28", "科學與技術"], ["27", "教育"], ["25", "新聞與政治"], ["22", "人物與網誌"], ["24", "娛樂"]].map(([v, l]) => `<option value="${v}" ${v === String(yt.category_id || "28") ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+        </div>
+        <label style="margin-top:10px"><input type="checkbox" id="y-made_for_kids" style="width:auto;margin-right:6px" ${yt.made_for_kids ? "checked" : ""}> 這是為兒童打造的內容</label>
+        <div class="muted" style="margin-top:8px">有設排期的集數會以「私人 + 預定發布時間」上傳，時間到 YouTube 自動公開。</div>
       </div>`;
 
     openModal({
@@ -84,13 +167,35 @@ export async function openSettingsModal() {
           for (const k of ["provider", "claude_model", "openai_base_url", "openai_model", "openai_key_env"]) {
             s.llm[k] = $(`#s-${k}`, root).value;
           }
-          for (const k of ["base_url", "model", "voice", "instruct", "align_model"]) {
+          for (const k of ["base_url", "model", "voice", "instruct", "voice_ref", "emotion"]) {
             s.tts[k] = $(`#t-${k}`, root).value;
           }
+          s.tts.emotion_alpha = +$("#t-emotion_alpha", root).value;
+          s.youtube = { ...(s.youtube || {}), client_file: $("#y-client_file", root).value,
+            privacy: $("#y-privacy", root).value, category_id: $("#y-category_id", root).value,
+            made_for_kids: $("#y-made_for_kids", root).checked };
           s.pipeline.review_script = $("#p-review_script", root).checked;
-          for (const k of ["critique_threshold", "critique_max_rounds", "title_count", "thumbnail_count"]) {
+          for (const k of ["critique_threshold", "critique_max_rounds", "title_count", "thumbnail_count", "radar_min", "radar_max"]) {
             s.pipeline[k] = +$(`#p-${k}`, root).value;
           }
+          s.visuals = { ...(s.visuals || {}) };
+          for (const k of ["source", "comfy_url", "unet", "clip", "vae", "lora", "style_hint"]) {
+            s.visuals[k] = $(`#v-${k}`, root).value;
+          }
+          for (const k of ["steps", "cfg", "timeout_s"]) s.visuals[k] = +$(`#v-${k}`, root).value;
+          s.visuals.free_after = $("#v-free_after", root).checked;
+          s.sfx = { ...(s.sfx || {}) };
+          for (const k of ["library_dir", "model_path"]) s.sfx[k] = $(`#x-${k}`, root).value;
+          s.sfx.gain_db = +$("#x-gain_db", root).value;
+          s.sfx.enabled = $("#x-enabled", root).checked;
+          s.music = { ...(s.music || {}) };
+          for (const k of ["model", "style"]) s.music[k] = $(`#m-${k}`, root).value;
+          s.music.gain_db = +$("#m-gain_db", root).value;
+          s.music.seed = +$("#m-seed", root).value;
+          s.music.enabled = $("#m-enabled", root).checked;
+          s.music.duck = $("#m-duck", root).checked;
+          s.render = { ...(s.render || {}), engine: $("#r-engine", root).value,
+            fallback_ffmpeg: $("#r-fallback_ffmpeg", root).checked };
           return s;
         };
         $$("[data-stab]", root).forEach((b) => {
@@ -123,10 +228,69 @@ export async function openSettingsModal() {
           const h = await api("/api/health?llm_check=true");
           $("#s-test-out", root).textContent = (h.llm.ok ? "✓ " : "✗ ") + h.llm.detail;
         };
+        setupYouTubePane(root, s, collect);
+        setupVisualPane(root, s, collect);
       },
     });
   };
   draw();
+}
+
+/** One-click Google sign-in: opens the consent popup, resolves with /api/youtube/status when it closes. */
+export function loginGoogle() {
+  return new Promise((resolve) => {
+    const w = window.open("/api/youtube/login", "yt-login", "width=520,height=680");
+    if (!w) { toast("瀏覽器擋住了登入視窗，請允許彈出視窗"); api("/api/youtube/status").then(resolve); return; }
+    let finished = false;
+    const done = async () => {
+      if (finished) return;
+      finished = true;
+      window.removeEventListener("message", onMsg);
+      clearInterval(timer);
+      const st = await api("/api/youtube/status");
+      if (st.logged_in) toast("Google 登入完成");
+      resolve(st);
+    };
+    const onMsg = (e) => { if (e.origin === location.origin && e.data?.type === "youtube-login") done(); };
+    window.addEventListener("message", onMsg);
+    const timer = setInterval(() => { if (w.closed) done(); }, 1000);
+  });
+}
+
+async function setupYouTubePane(root, s, collect) {
+  const box = $("#yt-box", root);
+  const sel = $("#y-client_file", root);
+  api("/api/youtube/clients").then((files) => {
+    const cur = s.youtube?.client_file || "";
+    sel.innerHTML = `<option value="">自動偵測${files[0] ? `（${esc(files[0].project_id)}）` : ""}</option>` +
+      files.map((f) => `<option value="${esc(f.path)}" ${f.path === cur ? "selected" : ""}>${esc(f.project_id)}｜${esc(f.path.split("/").pop().slice(0, 40))}</option>`).join("") +
+      (cur && !files.some((f) => f.path === cur) ? `<option value="${esc(cur)}" selected>${esc(cur)}</option>` : "");
+  }).catch(() => {});
+
+  const render = (st) => {
+    if (st.logged_in) {
+      const ch = st.channel;
+      box.innerHTML = `<div class="row"><span class="grow">✓ 已登入 Google ${ch ? `・頻道 <b>${esc(ch.title)}</b>` : `・<span style="color:var(--bad)">此帳號沒有 YouTube 頻道</span>`}
+        <div class="muted">Cloud 專案：${esc(st.project_id || "")}</div>${st.channel_error ? `<div class="muted" style="color:var(--bad)">${esc(st.channel_error)}</div>` : ""}</span>
+        <button type="button" class="btn" id="yt-relogin">換帳號</button><button type="button" class="btn danger" id="yt-logout">登出</button></div>`;
+    } else {
+      box.innerHTML = `<div class="row"><span class="grow">尚未登入 Google 帳號
+        ${st.client?.ok ? "" : `<div class="muted" style="color:var(--bad)">${esc(st.client?.error || "")}</div>`}</span>
+        <button type="button" class="btn primary" id="yt-login" ${st.client?.ok ? "" : "disabled"}>用 Google 帳號登入</button></div>`;
+    }
+    const login = $("#yt-login", box) || $("#yt-relogin", box);
+    if (login) login.onclick = () => startLogin();
+    const out = $("#yt-logout", box);
+    if (out) out.onclick = async () => { render(await api("/api/youtube/logout", { method: "POST" })); toast("已登出 Google"); };
+  };
+
+  const startLogin = async () => {
+    await api("/api/settings", { method: "PUT", body: collect() }); // use the client file currently picked
+    box.innerHTML = `<span class="muted">請在跳出的 Google 視窗選帳號並同意授權…</span>`;
+    render(await loginGoogle());
+  };
+
+  try { render(await api("/api/youtube/status")); } catch (e) { box.textContent = e.message; }
 }
 
 export async function openNewEpisodeModal(prefill = {}) {
@@ -409,4 +573,64 @@ export function openExtractStyleModal(episodes, onSaved) {
       };
     },
   });
+}
+
+async function setupVisualPane(root, s, collect) {
+  const out = $("#x-out", root);
+  const lib = $("#x-lib", root);
+  const renderLib = (st) => {
+    const tags = (st.tags || []).map((t) => `<span class="pill" style="${t.count ? "" : "opacity:.45"}">${esc(t.label)} ${t.count}</span>`).join(" ");
+    const b = st.build || {};
+    lib.innerHTML = `<div class="row"><b class="grow">音效庫：${st.total} 個檔</b><span class="muted">${esc(st.dir)}</span></div>
+      <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">${tags}</div>
+      ${b.running ? `<div class="muted" style="margin-top:8px">生成中 ${b.done}/${b.total}（${esc(b.current)}）…</div>` : ""}
+      <div class="muted" style="margin-top:8px">模型：${st.model.ok ? "✓ 在" : "✗ 找不到"} <code>${esc(st.model.path)}</code>${st.model.cli ? "" : "・缺 audiocpp_cli"}</div>`;
+  };
+  const load = async () => {
+    try { renderLib(await api("/api/sfx")); } catch (e) { lib.textContent = e.message; }
+  };
+  load();
+  $("#v-health", root).onclick = async () => {
+    $("#v-health-out", root).textContent = "測試中…";
+    await api("/api/settings", { method: "PUT", body: collect() });
+    const h = await api("/api/visuals/health").catch((e) => ({ ok: false, detail: e.message }));
+    $("#v-health-out", root).textContent = (h.ok ? "✓ " : "✗ ") + h.detail;
+  };
+  $("#x-build", root).onclick = async () => {
+    await api("/api/settings", { method: "PUT", body: collect() });
+    const r = await api("/api/sfx/build", { method: "POST", body: {} }).catch((e) => ({ started: false, error: e.message }));
+    if (!r.started) return toast(r.error || "無法開始");
+    out.textContent = "開始生成，一個一個跑（第一次載模型約一分鐘）…";
+    const t = setInterval(async () => {
+      const st = await api("/api/sfx").catch(() => null);
+      if (!st) return;
+      renderLib(st);
+      if (!st.build.running) { clearInterval(t); out.textContent = "生成結束"; }
+    }, 4000);
+  };
+  $("#x-import", root).onclick = async () => {
+    const folder = prompt("要匯入的音效資料夾（絕對路徑）：");
+    if (!folder) return;
+    const r = await api("/api/sfx/import", { method: "POST", body: { folder } }).catch((e) => ({ error: e.message }));
+    if (r.error) return toast(r.error);
+    toast(`匯入 ${r.copied.length} 個`);
+    load();
+  };
+  const mout = $("#m-out", root);
+  api("/api/music").then((st) => {
+    mout.textContent = (st.ok ? "✓ " : "✗ ") + st.detail + (st.cached?.length ? `・已快取 ${st.cached.length} 首` : "");
+  }).catch((e) => (mout.textContent = e.message));
+  api("/api/render/remotion").then((st) => {
+    $("#r-out", root).textContent = (st.ok ? " ✓ 已安裝" : " ✗ " + st.detail);
+  }).catch(() => {});
+  $("#m-preview", root).onclick = async () => {
+    mout.textContent = "生成 20 秒試聽…（第一次載模型要一點時間）";
+    $("#m-player", root).innerHTML = "";
+    await api("/api/settings", { method: "PUT", body: collect() });
+    const r = await api("/api/music/preview", { method: "POST", body: { seconds: 20, style: $("#m-style", root).value } })
+      .catch((e) => ({ error: e.message }));
+    if (r.error) { mout.textContent = "✗ " + r.error; return; }
+    mout.textContent = `✓ ${r.duration} 秒，平均 ${r.mean_db} dB`;
+    $("#m-player", root).innerHTML = `<audio controls autoplay src="${r.url}" style="width:100%"></audio>`;
+  };
 }

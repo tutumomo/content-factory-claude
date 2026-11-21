@@ -1,4 +1,5 @@
 import { $, $$, api, esc, fileUrl, fmtName, fmtShortDate, state, statusPill, stepper, toast } from "../lib.js";
+import { loginGoogle } from "../modals.js";
 
 function gateDirection(brief) {
   if (!brief) return "";
@@ -26,10 +27,18 @@ function gateScript(scr, crit) {
   const chars = scr.scenes.reduce((n, s) => n + s.narration.length, 0);
   return `<div class="card gate"><h2>看講稿</h2><p class="muted">四個審稿角色已經先看過。你可以直接改字、核准，或寫一句意見讓 agent 重修（意見會寫進品味紀錄）。共 ${scr.scenes.length} 個畫面、${chars} 字，約 ${Math.round(chars / 4.5)} 秒。</p>
     ${critiqueTable(crit)}
+    <label>背景音樂風格（英文，純音樂；留空用系統設定的預設風格）</label>
+    <input id="scr-music" value="${esc(scr.music || "")}" placeholder="warm lo-fi, soft piano, light drums, no vocals">
     <h2>講稿</h2>${scr.scenes.map((s, i) => `<div class="scene"><div class="row"><span class="hl grow">${i + 1}. <input data-s="${i}" data-k="headline" value="${esc(s.headline)}" style="width:60%"></span>
       <select data-s="${i}" data-k="style" style="width:auto">${Object.entries(state.META.styles).map(([k, v]) => `<option value="${k}" ${k === s.style ? "selected" : ""}>${esc(v.split("：")[0])}</option>`).join("")}</select></div>
       <textarea data-s="${i}" data-k="narration">${esc(s.narration)}</textarea>
-      <input data-s="${i}" data-k="bullets" value="${esc((s.bullets || []).join("｜"))}" placeholder="畫面重點，用｜分隔"></div>`).join("")}
+      <input data-s="${i}" data-k="bullets" value="${esc((s.bullets || []).join("｜"))}" placeholder="畫面重點，用｜分隔">
+      <div class="row" style="margin-top:6px">
+        <input data-s="${i}" data-k="visual" value="${esc(s.visual || "")}" placeholder="生圖用畫面描述（英文，可留空）" class="grow">
+        <select data-s="${i}" data-k="sfx" style="width:auto"><option value="">（不墊音效）</option>
+          ${Object.entries(state.META.sfx_tags || {}).map(([k, v]) => `<option value="${k}" ${k === (s.sfx || "") ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>
+        <input data-s="${i}" data-k="emotion" value="${esc(s.emotion || "")}" placeholder="情緒" style="width:110px">
+      </div></div>`).join("")}
     <label>修改意見（要 agent 重修才填）</label><textarea id="scr-fb" placeholder="例如：開頭太慢，第一句就講結論"></textarea>
     <div class="row" style="margin-top:12px"><button type="button" class="btn primary" id="scr-ok">核准講稿，開始配音與做畫面</button>
       <button type="button" class="btn" id="scr-rev">照意見重修</button></div></div>`;
@@ -85,6 +94,25 @@ function metricsBlock(ep) {
     <input id="m-note" placeholder="備註" class="grow" style="width:auto"><button type="button" class="btn" id="m-add">記錄</button></div></div>`;
 }
 
+function youtubeBlock(ep) {
+  const y = ep.youtube || {};
+  const label = { queued: "排隊中", uploading: "上傳中", processing: "設定縮圖中", done: "已上傳", error: "上傳失敗" }[y.status] || "";
+  let html = `<div class="row" style="margin-top:12px"><b class="grow">YouTube ${label ? `・${label}` : ""}</b>`;
+  if (["queued", "uploading", "processing"].includes(y.status)) {
+    html += `<span class="muted">${Math.round((y.progress || 0) * 100)}%</span></div>
+      <div style="height:6px;background:var(--line,#ddd);border-radius:3px;margin-top:6px"><div style="height:6px;width:${Math.round((y.progress || 0) * 100)}%;background:var(--accent,#3b82f6);border-radius:3px"></div></div>`;
+    return html;
+  }
+  html += `<button type="button" class="btn ${y.status === "done" ? "" : "primary"}" id="yt-up">${y.status === "done" ? "再上傳一次" : "上傳到 YouTube"}</button></div>`;
+  if (y.status === "done") {
+    const vis = y.publish_at ? `排程 ${new Date(y.publish_at).toLocaleString("zh-TW", { hour12: false })} 公開` : { private: "私人", unlisted: "不公開", public: "公開" }[y.privacy] || "";
+    html += `<div class="muted">✓ <a href="${esc(y.url)}" target="_blank" rel="noopener">${esc(y.url)}</a>・${esc(vis)}・<a href="https://studio.youtube.com/video/${esc(y.video_id)}/edit" target="_blank" rel="noopener">在 YouTube Studio 編輯</a></div>`;
+    if (y.note) html += `<div class="warn" style="margin-top:6px">${esc(y.note)}</div>`;
+  }
+  if (y.status === "error") html += `<div class="muted" style="color:var(--bad)">${esc(y.error)}</div>`;
+  return html;
+}
+
 export async function viewEpisode(main, id) {
   const [ep, stylesRes] = await Promise.all([
     api(`/api/episodes/${encodeURIComponent(id)}`),
@@ -119,7 +147,7 @@ export async function viewEpisode(main, id) {
   if (ep.status === "done") {
     html += `<div class="card"><h2 style="margin-top:0">已核准</h2>
       <div class="muted">發布包：<code>${esc(ep.published_dir)}</code>（影片、縮圖、字幕、說明欄、輪播圖卡、metadata.json）${ep.schedule ? `・排程 ${esc(ep.schedule)}` : ""}</div>
-      <div class="muted">目前沒有串各平台的上傳 API，請用發布包手動上傳或交給你的排程工具。</div></div>`;
+      ${youtubeBlock(ep)}</div>`;
     html += videoBlock(ep, vertical) + packageSummary(F.package, ep) + metricsBlock(ep);
   }
   if (ep.direction && ep.waiting_for !== "direction") {
@@ -174,6 +202,8 @@ export async function viewEpisode(main, id) {
         ? el.value.split("｜").map((x) => x.trim()).filter(Boolean)
         : el.value;
     });
+    const m = $("#scr-music", main);
+    if (m) scr.music = m.value.trim();
     return scr;
   };
   $("#scr-ok", main) && ($("#scr-ok", main).onclick = () => post("script", { approve: true, script: collectScript() }));
@@ -208,12 +238,26 @@ export async function viewEpisode(main, id) {
     };
   });
 
-  const sig = `${ep.status}|${ep.stage}|${ep.waiting_for}|${(ep.log || []).length}`;
+  $("#yt-up", main) && ($("#yt-up", main).onclick = async () => {
+    const y = ep.youtube || {};
+    if (y.status === "done" && !confirm("這一集已經上傳過，確定要再上傳一支新影片嗎？")) return;
+    let st = await api("/api/youtube/status");
+    if (!st.logged_in) {
+      if (!st.client?.ok) { toast(st.client?.error || "找不到 Google OAuth 用戶端檔"); return; }
+      st = await loginGoogle();
+      if (!st.logged_in) return;
+    }
+    if (!st.channel && !confirm("這個 Google 帳號讀不到 YouTube 頻道，仍要嘗試上傳嗎？")) return;
+    await post("youtube");
+  });
+
+  const sigOf = (e) => `${e.status}|${e.stage}|${e.waiting_for}|${(e.log || []).length}|${e.youtube?.status}|${e.youtube?.progress}`;
+  const sig = sigOf(ep);
   clearInterval(state.pollTimer);
   state.pollTimer = setInterval(async () => {
     if (!location.hash.startsWith("#/ep/")) return clearInterval(state.pollTimer);
     const e2 = await api(`/api/episodes/${encodeURIComponent(id)}`).catch(() => null);
-    if (e2 && `${e2.status}|${e2.stage}|${e2.waiting_for}|${(e2.log || []).length}` !== sig) {
+    if (e2 && sigOf(e2) !== sig) {
       if (e2.status === "waiting" && ep.status === "waiting" && e2.waiting_for === ep.waiting_for) return;
       if (state.onRoute) state.onRoute();
     }

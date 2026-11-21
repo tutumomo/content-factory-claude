@@ -17,9 +17,11 @@ def respond(task: str, prompt: str) -> str:
     if task == "health":
         return "ok"
     if task == "radar":
+        m = re.search(r"# 數量\n(\d+)–(\d+)", prompt)
+        n = int(m.group(2)) if m else 5
         return json.dumps({"topics": [
             {"title": f"示範題目 {i}：本地 AI 工具新動態", "why": "示範模式產生", "source": "示範", "format": "short" if i % 2 else "long", "heat": "需求證"}
-            for i in range(1, 6)]}, ensure_ascii=False)
+            for i in range(1, n + 1)]}, ensure_ascii=False)
     if task == "brief":
         return json.dumps({"directions": [
             {"id": k, "angle": f"{t}：{a}", "audience": "想跟上 AI 新聞的上班族", "why": "示範模式產生",
@@ -29,6 +31,7 @@ def respond(task: str, prompt: str) -> str:
     if task in ("script", "revise"):
         n = 4 if short else 6
         styles = ["bigtype", "papercut", "corkboard", "clean"]
+        tags = ["whoosh", "ding", "pop", "click"]
         scenes = []
         for i in range(n):
             scenes.append({
@@ -36,8 +39,11 @@ def respond(task: str, prompt: str) -> str:
                 "headline": f"重點 {i + 1}",
                 "bullets": [f"示範要點 {i + 1}-1", f"示範要點 {i + 1}-2"],
                 "style": styles[i % 4],
+                "visual": "abstract technology illustration, soft studio light, clean background",
+                "sfx": tags[i % len(tags)],
+                "emotion": ["好奇", "沉穩", "興奮", "提醒"][i % 4],
             })
-        return json.dumps({"working_title": f"{t}（示範）", "scenes": scenes}, ensure_ascii=False)
+        return json.dumps({"working_title": f"{t}（示範）", "music": "warm lo-fi, soft piano, light drums, no vocals", "scenes": scenes}, ensure_ascii=False)
     if task.startswith("critique"):
         return json.dumps({"score": 8, "summary": "示範模式：自動通過", "issues": []}, ensure_ascii=False)
     if task == "package":

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from . import llm, media, prompts, render, store
+from . import comfy, llm, media, music, prompts, render, sfx, store, video
 
 STAGES = ["sources", "brief", "script", "critique", "assemble", "package", "review", "approved"]
 STAGE_LABEL = {
@@ -46,6 +46,9 @@ def _worker() -> None:
                 run_radar(*args)
             elif kind == "insights_analyze":
                 run_insights_analyze()
+            elif kind == "youtube_upload":
+                from . import youtube
+                youtube.upload_episode(*args)
         except Exception as e:  # never kill the worker
             if kind == "episode":
                 store.update_episode(args[0], status="error", error=f"{type(e).__name__}: {e}")
@@ -141,6 +144,14 @@ def _validate_script(scr: dict) -> None:
         s["bullets"] = [b for b in (s.get("bullets") or []) if isinstance(b, str)][:3]
         if s.get("style") not in prompts.STYLES:
             s["style"] = "clean"
+        s["visual"] = str(s.get("visual") or "").strip()
+        s["emotion"] = str(s.get("emotion") or "").strip()[:8]
+        s["sfx"] = sfx.normalize(str(s.get("sfx") or ""))
+    m = scr.get("music")
+    if isinstance(m, dict):
+        scr["music"] = str(m.get("style") or "").strip()
+    elif m is not None:
+        scr["music"] = str(m).strip()
     scr["scenes"] = [s for s in scr["scenes"] if s["narration"]]
     if not scr["scenes"]:
         raise llm.LLMError("講稿沒有可念的內容")
@@ -190,6 +201,38 @@ def st_critique(ep: dict) -> bool:
     return True
 
 
+def _render_ffmpeg(clips: list[Path], ass: Path, out: Path, assets: Path, bgm: Path | None,
+                   t0: float, mc: dict) -> Path:
+    """Static clips + burned subtitles; the music bed is mixed in after normalising, if any."""
+    if bgm:
+        plain = media.concat_and_burn(clips, ass, assets / "nosub.mp4", assets, loudnorm=False)
+        return music.mix(plain, bgm, out, t0, gain_db=float(mc.get("gain_db", -20)),
+                         duck=bool(mc.get("duck", True)))
+    return media.concat_and_burn(clips, ass, out, assets)
+
+
+def _render_remotion(eid: str, clips: list[Path], scenes: list[dict], durs: list[float],
+                     cues: list[dict], size: tuple[int, int], assets: Path, out: Path,
+                     bgm: Path | None, t0: float, mc: dict, channel: str,
+                     imgs: list[str] | None = None) -> Path:
+    """Animated composition: soundtrack is prepared first, the React render supplies the picture."""
+    chk = video.available()
+    if not chk["ok"]:
+        raise video.VideoError(chk["detail"])
+    store.log(eid, "Remotion：準備音軌")
+    joined = media.join_clips(clips, assets / "joined_nosub.mp4", assets)
+    if bgm:
+        mixed = music.mix(joined, bgm, assets / "mixed.mp4", t0, gain_db=float(mc.get("gain_db", -20)),
+                          duck=bool(mc.get("duck", True)))
+    else:
+        mixed = media.loudnorm_copy(joined, assets / "mixed.mp4")
+    track = media.extract_audio(mixed, assets / "track.m4a")
+    store.log(eid, f"Remotion：渲染 {len(scenes)} 個畫面的動畫")
+    props = video.build_props(scenes, cues, size, durs, channel=channel, imgs=imgs)
+    vid = video.render(assets, props, assets / "remotion.mp4")
+    return media.mux_audio(vid, track, out, t0)
+
+
 def st_assemble(ep: dict) -> bool:
     eid = ep["id"]
     d = store.ep_dir(eid)
@@ -201,24 +244,78 @@ def st_assemble(ep: dict) -> bool:
     size = size_for(ep)
     vertical = size[1] > size[0]
     channel = store.get_channel()["name"]
+    rc = store.get_settings()["render"]
+    engine = (rc.get("engine") or "ffmpeg").lower()
     h = media.tts_health()
     if not h["ok"]:
         raise media.MediaError(h["detail"])
-    clips, all_cues, t0, n = [], [], 0.0, len(scr["scenes"])
-    for i, sc in enumerate(scr["scenes"]):
-        store.log(eid, f"畫面 {i + 1}/{n}：配音中")
+
+    # 1) scene backgrounds (ComfyUI when asked and reachable; Pillow cards otherwise)
+    scenes = scr["scenes"]
+    vis = store.get_settings()["visuals"]
+    bgs: dict[int, Path] = {}
+    if vis.get("source") == "comfy":
+        ch = comfy.health()
+        if ch["ok"]:
+            store.log(eid, f"ComfyUI 生畫面：{len(scenes)} 張（{vis.get('unet')}）")
+            for i, sc in enumerate(scenes):
+                desc = (sc.get("visual") or sc.get("headline") or "").strip()
+                prompt = f"{desc}, {vis.get('style_hint')}, absolutely no text, no letters, no watermark"
+                try:
+                    bgs[i] = comfy.generate(prompt, size, assets / f"bg{i:02d}.jpg", seed=1000 + i)
+                except comfy.ComfyError as e:
+                    store.log(eid, f"畫面 {i + 1} 生圖失敗，改用字卡：{e}")
+            if vis.get("free_after", True):
+                comfy.free()
+                store.log(eid, "已請 ComfyUI 釋放模型記憶體")
+        else:
+            store.log(eid, f"{ch['detail']}；改用字卡畫面")
+
+    # 2) narration, subtitles, per-scene clips
+    sfxc = store.get_settings()["sfx"]
+    sfx_on = bool(sfxc.get("enabled", True))
+    sfx_gain = float(sfxc.get("gain_db", -16))
+    clips, all_cues, t0, n = [], [], 0.0, len(scenes)
+    durs: list[float] = []
+    rm_imgs: list[str] = []
+    used_sfx, missing_sfx = 0, set()
+    for i, sc in enumerate(scenes):
+        store.log(eid, f"畫面 {i + 1}/{n}：配音中" + (f"（{sc['emotion']}）" if sc.get("emotion") else ""))
         parts = []
         for j, chunk in enumerate(media.split_for_tts(sc["narration"])):
-            parts.append(media.tts(chunk, assets / f"s{i:02d}_{j:02d}.wav"))
+            parts.append(media.tts(chunk, assets / f"s{i:02d}_{j:02d}.wav", emotion=sc.get("emotion", "")))
         wav = media.concat_wavs(parts, assets / f"s{i:02d}.wav") if len(parts) > 1 else parts[0].rename(assets / f"s{i:02d}.wav")
         dur = media.wav_duration(wav)
         words = media.align(wav, sc["narration"])
         cues = media.cues_for_scene(sc["narration"], words, dur, 12 if vertical else 22)
         sc["_aligned"] = bool(words)
         all_cues += [{**c, "start": c["start"] + t0, "end": c["end"] + t0} for c in cues]
-        img = render.slide(sc, size, assets / f"s{i:02d}.jpg", channel, i, n)
-        clip_dur = media.scene_clip(img, wav, assets / f"s{i:02d}.mp4")
+        img = assets / f"s{i:02d}.jpg"
+        if i in bgs:
+            render.scene_with_bg(sc, size, bgs[i], img, channel, i, n)
+            sc["_visual"] = "comfy"
+        else:
+            render.slide(sc, size, img, channel, i, n)
+            sc["_visual"] = "slide"
+        if engine == "remotion":
+            # the React composition draws the text itself, so it needs a text-free plate
+            rm = assets / f"p{i:02d}.jpg"
+            if i in bgs:
+                shutil.copy2(bgs[i], rm)
+            else:
+                render.plate(sc, size, rm, i)
+            rm_imgs.append(rm.name)
+        tag = (sc.get("sfx") or "").strip().lower()
+        fx = sfx.pick(tag, f"{eid}-{i}") if (sfx_on and tag) else None
+        if fx:
+            used_sfx += 1
+            sc["_sfx"] = fx.name
+        elif tag:
+            missing_sfx.add(tag)
+            sc.pop("_sfx", None)
+        clip_dur = media.scene_clip(img, wav, assets / f"s{i:02d}.mp4", sfx=fx, sfx_gain=sfx_gain)
         clips.append(assets / f"s{i:02d}.mp4")
+        durs.append(clip_dur)
         t0 += clip_dur
         # per-step check: narration length vs. text length (catches truncated or runaway TTS)
         rate = len(re.sub(r"\s", "", sc["narration"])) / max(dur, 0.1)
@@ -226,15 +323,49 @@ def st_assemble(ep: dict) -> bool:
             store.log(eid, f"⚠ 畫面 {i + 1} 語速異常：{rate:.1f} 字/秒（可能漏念或拖長）")
             sc["_rate_warning"] = round(rate, 1)
     store.write_json(eid, "assets/scenes.json", scr)
+    if missing_sfx:
+        store.log(eid, "音效庫沒有這些標籤，那些畫面只留旁白：" + "、".join(sorted(missing_sfx)))
     ass = media.write_ass(all_cues, size, assets / "subs.ass")
     media.write_srt(all_cues, out / "subtitles.srt")
+
+    # 3) background music (YuE2 instrumental, cached per style/length/seed)
+    mc = store.get_settings()["music"]
+    bgm, bgm_note = None, "已關閉"
+    if mc.get("enabled", True):
+        style = music.style_of(scr)
+        store.log(eid, f"背景音樂：YuE2 生成 {t0:.0f} 秒（{style[:48]}）")
+        try:
+            bgm = music.generate(t0, style)
+            bgm_note = f"{music.duration(bgm):.0f} 秒，{mc.get('gain_db', -20)} dB" + ("，自動閃避旁白" if mc.get("duck", True) else "")
+            store.log(eid, f"背景音樂就緒：{bgm.name}")
+        except music.MusicError as e:
+            bgm_note = f"生成失敗，成片不加音樂：{e}"
+            store.log(eid, bgm_note)
+
     store.log(eid, "合成成片、燒字幕、音量正規化")
-    final = media.concat_and_burn(clips, ass, out / "final.mp4", assets)
+    final_note = "ffmpeg"
+    if engine == "remotion":
+        try:
+            final = _render_remotion(eid, clips, scr["scenes"], durs, all_cues, size, assets, out / "final.mp4",
+                                     bgm, t0, mc, channel, rm_imgs)
+            final_note = "Remotion"
+            store.log(eid, "Remotion 渲染完成")
+        except Exception as e:
+            if not rc.get("fallback_ffmpeg", True):
+                raise
+            store.log(eid, f"Remotion 失敗，退回 ffmpeg：{e}")
+            final = _render_ffmpeg(clips, ass, out / "final.mp4", assets, bgm, t0, mc)
+    else:
+        final = _render_ffmpeg(clips, ass, out / "final.mp4", assets, bgm, t0, mc)
     v = media.verify_video(final, size, t0, assets)
     aligned = sum(1 for s in scr["scenes"] if s.get("_aligned"))
     rate_warn = [i + 1 for i, s in enumerate(scr["scenes"]) if s.get("_rate_warning")]
     v["checks"]["字幕對齊"] = {"ok": aligned == n, "value": f"{aligned}/{n} 個畫面用強制對齊，其餘按字數估算"}
     v["checks"]["語速"] = {"ok": not rate_warn, "value": "正常" if not rate_warn else f"畫面 {rate_warn} 異常"}
+    v["checks"]["畫面來源"] = {"ok": True, "value": (f"ComfyUI 生圖 {len(bgs)}/{n} 張，其餘字卡" if bgs else "字卡")}
+    v["checks"]["音效"] = {"ok": True, "value": (f"{used_sfx}/{n} 個畫面有音效" if sfx_on else "已關閉")}
+    v["checks"]["背景音樂"] = {"ok": bool(bgm) or not mc.get("enabled", True), "value": bgm_note}
+    v["checks"]["成片引擎"] = {"ok": True, "value": "Remotion 動畫" if final_note == "Remotion" else "ffmpeg 字幕"}
     store.write_json(eid, "output/verify.json", v)
     ep = store.get_episode(eid)
     ep["checks"]["assemble"] = {"ok": all(c["ok"] for c in v["checks"].values()), "value": f"{v['duration']:.1f} 秒"}
@@ -321,11 +452,13 @@ def run_episode(eid: str) -> None:
 def run_radar(seeds: str) -> None:
     urls = re.findall(r"https?://\S+", seeds)
     text = seeds + "\n\n" + "\n\n".join(f"## {u}\n{fetch_text(u, 3000)}" for u in urls[:8])
-    sys, pr = prompts.radar(text)
+    rng = store.get_settings()["pipeline"]
+    lo, hi = rng["radar_min"], rng["radar_max"]
+    sys, pr = prompts.radar(text, lo, hi)
     data = llm.complete_json("radar", sys, pr)
     items = store.get_radar()
     now = time.time()
-    for t in data.get("topics", []):
+    for t in reversed([t for t in data.get("topics", []) if isinstance(t, dict)][:hi]):  # keep model's ranking on top
         t["found"] = now
         t["kind"] = "radar"
         items.insert(0, t)

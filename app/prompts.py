@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from . import store
+from . import sfx, store
 
 STYLES = {
     "bigtype": "大字直接砸下來：新聞快訊、數字震撼",
@@ -32,14 +32,14 @@ def base_system(style_id: str | None = None) -> str:
     )
 
 
-def radar(seeds: str) -> tuple[str, str]:
-    sys = base_system() + """
+def radar(seeds: str, lo: int = 4, hi: int = 8) -> tuple[str, str]:
+    sys = base_system() + f"""
 
 # 任務：選題雷達
 從使用者提供的線索（連結內容、筆記、熱門話題）整理候選題目。
-輸出：{"topics":[{"title":"題目","why":"為什麼適合本頻道","source":"來源或依據","format":"long|short","heat":"熱度依據"}]}
-給 5–8 個，依推薦程度排序。沒有依據的熱度不要編，寫「需求證」。"""
-    return sys, f"# 線索\n{seeds}"
+輸出：{{"topics":[{{"title":"題目","why":"為什麼適合本頻道","source":"來源或依據","format":"long|short","heat":"熱度依據"}}]}}
+給 {lo}–{hi} 個，線索夠好就給滿 {hi} 個，依推薦程度排序。沒有依據的熱度不要編，寫「需求證」。"""
+    return sys, f"# 線索\n{seeds}\n\n# 數量\n{lo}–{hi} 個"
 
 
 def brief(ep: dict, sources: str) -> tuple[str, str]:
@@ -58,8 +58,13 @@ def fmt_desc(ep: dict) -> str:
     return "橫式長片 3–8 分鐘（講稿約 900–2000 字），8–16 個畫面，開頭 15 秒內交代為什麼要看。"
 
 
-SCRIPT_SHAPE = """輸出：{"working_title":"暫定標題","scenes":[{"narration":"這個畫面要念的講稿（口語、短句）","headline":"畫面大標（12 字內）","bullets":["畫面重點，最多 3 條，每條 18 字內"],"style":"bigtype|papercut|corkboard|clean"}]}
+SCRIPT_SHAPE = """輸出：{"working_title":"暫定標題","music":"英文一句背景音樂風格","scenes":[{"narration":"這個畫面要念的講稿（口語、短句）","headline":"畫面大標（12 字內）","bullets":["畫面重點，最多 3 條，每條 18 字內"],"style":"bigtype|papercut|corkboard|clean","visual":"英文一句畫面描述","sfx":"音效標籤","emotion":"念這段的口氣"}]}
 畫面風格可選：""" + "；".join(f"{k}={v}" for k, v in STYLES.items()) + """。
+music 是整支片子的背景音樂風格（純音樂、無人聲），例如 "warm lo-fi, soft piano, light drums"。只給風格，不要寫歌詞。
+每個畫面另外給三件事：
+- visual：英文一句具體畫面描述（主體、場景、光線、構圖），會拿去文字生圖。不要要求畫面出現任何文字、字幕、標籤。
+- sfx：這個畫面開頭墊一個音效，只能從清單挑一個，真的不需要就給空字串：""" + "、".join(sfx.TAGS) + """。
+- emotion：念這段的口氣，一到四個字，例如 好奇／興奮／沉穩／提醒／驚訝。
 講稿要像真人說話：短句、口語、具體例子；不要 AI 腔、不要套話、不要過度排比。英文專有名詞保留原文。"""
 
 

@@ -34,8 +34,49 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "voice": "vivian",
         "language": "chinese",
         "instruct": "自然、清楚、有精神的科技節目主持人語氣",
+        "voice_ref": "",                  # 參考音檔路徑；index-tts2.5 / zonos3-mini 必填
+        "emotion": "",                    # index-tts2.5 的情緒示範文字
+        "emotion_alpha": 1.0,             # 0–1，情緒強度
         "align_model": "qwen3-forced-aligner-0.6b",
         "align_language": "Chinese",
+    },
+    "visuals": {
+        "source": "slides",                # slides = Pillow 字卡；comfy = ComfyUI 生圖當底
+        "comfy_url": "http://127.0.0.1:8188",
+        "unet": "kromaKrea2_opd.safetensors",
+        "clip": "Huihui-Qwen3-VL-4B-Instruct-abliterated-fp8_scaled.safetensors",
+        "clip_type": "krea2",
+        "vae": "qwen_image_vae.safetensors",
+        "lora": "",                        # 例：Krea 2/KREA2turboNSFW.safetensors
+        "lora_strength": 0.8,
+        "steps": 8,
+        "cfg": 1.0,
+        "timeout_s": 600,
+        "free_after": True,                # 建完圖釋放 ComfyUI 模型，把 GPU 還給別的工作
+        "style_hint": "cinematic editorial illustration, soft natural light, shallow depth of field, high detail",
+    },
+    "sfx": {
+        "enabled": True,
+        "gain_db": -16,                    # 音效相對旁白的音量
+        "library_dir": "",                 # 空 = data/sfx
+        "model_path": "",                  # 空 = 內建 MOSS-SoundEffect-v2 路徑
+    },
+    "music": {
+        "enabled": True,
+        "base_url": "",                    # 空 = 跟 tts 同一個 audio.cpp 伺服器
+        "model": "yue2",                   # audio.cpp 裡的 YuE2 3B 音樂模型
+        "style": "",                       # 空 = 內建 lo-fi 風格；講稿的 music 欄位優先
+        "seed": 1234,
+        "steps": 8,
+        "gain_db": -20,                    # 背景音樂相對旁白的音量
+        "duck": True,                      # 旁白講話時自動壓低音樂
+        "timeout_s": 3600,
+        "cache_dir": "",                   # 空 = data/music
+    },
+    "render": {
+        "engine": "ffmpeg",                # ffmpeg = 直接燒字幕；remotion = React 動畫合成
+        "fallback_ffmpeg": True,           # Remotion 失敗時自動退回 ffmpeg
+        "remotion_dir": "",                # 空 = app 旁邊的 remotion/
     },
     "pipeline": {
         "review_script": True,             # gate: user reviews script before assembly
@@ -43,9 +84,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "critique_max_rounds": 3,
         "title_count": 6,
         "thumbnail_count": 4,
+        "radar_min": 4,                    # each radar scan returns radar_min..radar_max topics
+        "radar_max": 8,
     },
     "ui": {
         "nav_layout": "top",               # top | side
+    },
+    "youtube": {
+        "client_file": "",                 # Google OAuth Desktop client_secret_*.json; empty = auto-detect
+        "privacy": "private",              # private | unlisted | public (scheduled uploads are always private + publishAt)
+        "category_id": "28",               # 28 = Science & Technology
+        "language": "zh-Hant",
+        "made_for_kids": False,
     },
 }
 
@@ -167,7 +217,23 @@ def get_settings() -> dict:
         merged = _merge(DEFAULT_SETTINGS, _read(DATA / "settings.json", {}))
         if merged["ui"].get("nav_layout") not in ("top", "side"):
             merged["ui"]["nav_layout"] = "top"
+        _fix_radar_range(merged["pipeline"])
         return merged
+
+
+def _clamp_topic_count(val: Any, default: int) -> int:
+    try:
+        return min(12, max(3, int(val)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _fix_radar_range(p: dict) -> None:
+    lo = _clamp_topic_count(p.get("radar_min"), 4)
+    hi = _clamp_topic_count(p.get("radar_max"), 8)
+    if lo > hi:
+        lo, hi = hi, lo
+    p["radar_min"], p["radar_max"] = lo, hi
 
 
 def save_settings(s: dict) -> dict:
@@ -175,6 +241,7 @@ def save_settings(s: dict) -> dict:
         merged = _merge(DEFAULT_SETTINGS, s)
         if merged["ui"].get("nav_layout") not in ("top", "side"):
             merged["ui"]["nav_layout"] = "top"
+        _fix_radar_range(merged["pipeline"])
         _write(DATA / "settings.json", merged)
         return merged
 

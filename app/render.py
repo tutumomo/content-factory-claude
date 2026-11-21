@@ -221,6 +221,101 @@ def slide(scene: dict, size: tuple[int, int], out: Path, channel: str = "", inde
     return out
 
 
+def plate(scene: dict, size: tuple[int, int], out: Path, index: int = 0) -> Path:
+    """Text-free background in the same style as `slide`, for renderers that animate the text themselves."""
+    W, H = size
+    style = scene.get("style") or "clean"
+    rng = _rng(scene.get("headline", "") + str(index))
+    if style == "bigtype":
+        bg, accent, _ = PALETTES[index % len(PALETTES)]
+        img = Image.new("RGB", size, bg)
+        ImageDraw.Draw(img).rectangle([0, 0, int(W * 0.03), H], fill=accent)
+    elif style == "papercut":
+        paper = [(250, 228, 196), (196, 228, 214), (214, 206, 240), (248, 206, 206)]
+        img = Image.new("RGB", size, (252, 248, 238))
+        d = ImageDraw.Draw(img)
+        for _ in range(8):
+            c = rng.choice(paper)
+            x, y = rng.randint(-200, W), rng.randint(-200, H)
+            r = rng.randint(int(W * 0.1), int(W * 0.28))
+            d.polygon([(x + rng.randint(-r, r), y + rng.randint(-r, r)) for _ in range(6)], fill=c)
+    elif style == "corkboard":
+        img = Image.new("RGB", size, (176, 132, 88))
+        d = ImageDraw.Draw(img)
+        for _ in range(int(W * H / 900)):
+            d.point((rng.randint(0, W), rng.randint(0, H)), fill=rng.choice([(150, 108, 70), (196, 152, 106), (164, 120, 80)]))
+        img = img.filter(ImageFilter.GaussianBlur(0.8))
+    else:  # clean
+        img = Image.new("RGB", size, (246, 247, 249))
+        ImageDraw.Draw(img).rectangle([0, 0, W, int(H * 0.012)], fill=(37, 99, 235))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    img.save(out, quality=92)
+    return out
+
+
+def scene_with_bg(scene: dict, size: tuple[int, int], bg: Path, out: Path, channel: str = "",
+                  index: int = 0, total: int = 0) -> Path:
+    """Generated background + headline/bullets overlay. Text stays readable, subtitles keep their zone."""
+    W, H = size
+    vertical = H > W
+    img = Image.open(bg).convert("RGB")
+    scale = max(W / img.width, H / img.height)
+    img = img.resize((max(W, int(img.width * scale + 0.5)), max(H, int(img.height * scale + 0.5))), Image.LANCZOS)
+    left = (img.width - W) // 2
+    top_crop = int((img.height - H) * (0.45 if vertical else 0.4))
+    img = img.crop((left, top_crop, left + W, top_crop + H))
+
+    # top and bottom scrims: headline legible, subtitles always readable
+    scrim = Image.new("L", (1, H), 0)
+    for y in range(H):
+        r = y / H
+        if r < 0.55:
+            v = int(200 * (1 - r / 0.55) ** 1.2)
+        elif r > 0.66:
+            v = int(210 * ((r - 0.66) / 0.34) ** 0.9)
+        else:
+            v = 0
+        scrim.putpixel((0, y), v)
+    dark = Image.new("RGB", size, (8, 10, 16))
+    img = Image.composite(dark, img, scrim.resize(size))
+
+    d = ImageDraw.Draw(img)
+    margin = int(W * 0.07)
+    accent = PALETTES[index % len(PALETTES)][1]
+    d.rectangle([margin, int(H * 0.08), margin + int(W * 0.012), int(H * 0.08) + int(H * 0.16)], fill=accent)
+
+    head = scene.get("headline") or ""
+    fh, hl = fit_lines(d, head, int(W * (0.085 if vertical else 0.055)), 34,
+                       W - 2 * margin - int(W * 0.03), 3, "Black")
+    y = int(H * 0.08)
+    for ln in hl:
+        d.text((margin + int(W * 0.03), y), ln, font=fh, fill=(255, 255, 255),
+               stroke_width=max(3, fh.size // 14), stroke_fill=(0, 0, 0))
+        y += int(fh.size * 1.16)
+
+    fb = font(int(W * (0.043 if vertical else 0.026)), "Bold")
+    y += int(fb.size * 0.5)
+    bx = margin + int(W * 0.03)
+    for b in [b for b in (scene.get("bullets") or []) if b][:3]:
+        lines = wrap(d, b, fb, W - bx - margin - int(fb.size * 1.6))[:2]
+        d.ellipse([bx, y + int(fb.size * 0.36), bx + int(fb.size * 0.36), y + int(fb.size * 0.72)], fill=accent)
+        for ln in lines:
+            d.text((bx + int(fb.size * 0.9), y), ln, font=fb, fill=(245, 245, 245),
+                   stroke_width=max(2, fb.size // 16), stroke_fill=(0, 0, 0))
+            y += int(fb.size * 1.35)
+        y += int(fb.size * 0.2)
+
+    if channel:
+        fc = font(int(W * (0.03 if vertical else 0.018)), "Bold")
+        d.text((W - margin, int(H * 0.03)), channel, font=fc, fill=(230, 230, 230), anchor="ra")
+    if total:
+        fc = font(int(W * (0.025 if vertical else 0.015)), "Regular")
+        d.text((margin, int(H * 0.03)), f"{index + 1}/{total}", font=fc, fill=(220, 220, 220))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    img.save(out, quality=92)
+    return out
+
+
 def thumbnail(main: str, sub: str, theme: str, variant: int, out: Path, vertical: bool = False) -> Path:
     W, H = (1080, 1920) if vertical else (1280, 720)
     rng = _rng(main + str(variant))

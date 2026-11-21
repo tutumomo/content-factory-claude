@@ -2,15 +2,16 @@
 from __future__ import annotations
 
 import csv
+import html
 import io
 import shutil
 from pathlib import Path
 
-from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import llm, media, pipeline, prompts, store
+from . import comfy, llm, media, music, pipeline, prompts, sfx, store, video, youtube
 
 app = FastAPI(title="內容工廠")
 STATIC = store.ROOT / "static"
@@ -24,6 +25,8 @@ def _startup() -> None:
     if cur.get("analyzing"):
         store.save_insights_summary({**cur, "analyzing": False, "error": "上次分析被伺服器重啟中斷，請重新分析"})
     for ep in store.list_episodes():  # resume work interrupted by a restart
+        if (ep.get("youtube") or {}).get("status") in ("queued", "uploading"):
+            store.update_episode(ep["id"], youtube={**ep["youtube"], "status": "error", "error": "上傳被伺服器重啟中斷，請重新上傳"})
         if ep["status"] in ("queued", "running"):
             store.log(ep["id"], "伺服器重啟，重新排入佇列")
             pipeline.enqueue("episode", ep["id"])
@@ -51,6 +54,7 @@ def meta():
         "critics": {k: v[0] for k, v in prompts.CRITICS.items()},
         "pref_cats": store.PREF_CATS,
         "style_categories": store.STYLE_CATEGORIES,
+        "sfx_tags": sfx.vocab(),
     }
 
 
@@ -70,6 +74,66 @@ def get_settings():
 @app.put("/api/settings")
 def put_settings(s: dict = Body(...)):
     return store.save_settings(s)
+
+
+# ---------- visuals & sound effects ----------
+
+@app.get("/api/sfx")
+def sfx_status():
+    return {**sfx.status(), "build": dict(sfx.BUILD)}
+
+
+@app.post("/api/sfx/build")
+def sfx_build(body: dict = Body(default={})):
+    tags = [t for t in (body.get("tags") or []) if t]
+    try:
+        return sfx.build_async(tags or None, force=bool(body.get("force")))
+    except sfx.SfxError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/sfx/import")
+def sfx_import(body: dict = Body(...)):
+    try:
+        return sfx.import_files(body.get("folder") or "", body.get("tag") or "")
+    except sfx.SfxError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/visuals/health")
+def visuals_health():
+    return comfy.health()
+
+
+@app.get("/api/music")
+def music_status():
+    return music.status()
+
+
+@app.get("/api/render/remotion")
+def remotion_status():
+    return video.available()
+
+
+@app.post("/api/music/preview")
+def music_preview(body: dict = Body(default={})):
+    """Short instrumental bed for auditioning a style before a full assemble."""
+    secs = float(body.get("seconds") or 20)
+    try:
+        p = music.generate(secs, (body.get("style") or "").strip(), seed=body.get("seed"),
+                           force=bool(body.get("force")))
+    except music.MusicError as e:
+        raise HTTPException(400, str(e))
+    return {"file": p.name, "path": str(p), "url": f"/files/{p.relative_to(store.DATA).as_posix()}",
+            **music.probe_wav(p)}
+
+
+@app.post("/api/music/open")
+def music_open(body: dict = Body(default={})):
+    p = Path(body.get("path") or "")
+    if not p.is_file():
+        raise HTTPException(400, "找不到音檔")
+    return {"url": f"/files/{p.relative_to(store.DATA).as_posix()}"}
 
 
 @app.get("/api/channel")
@@ -530,6 +594,66 @@ def insights_import_csv(body: dict = Body(...)):
     for eid, rows in per_ep.items():
         store.write_json(eid, "metrics.json", rows)
     return {"imported": imported, "skipped": skipped}
+
+
+# ---------- YouTube ----------
+
+_CB_PAGE = """<!doctype html><meta charset="utf-8"><title>內容工廠・Google 登入</title>
+<body style="font-family:system-ui,sans-serif;padding:40px;text-align:center">
+<h2>{title}</h2><p>{msg}</p><p style="color:#888">這個視窗會自動關閉。</p>
+<script>try{{window.opener&&window.opener.postMessage({{type:"youtube-login",ok:{ok}}},"*")}}catch(e){{}}
+setTimeout(()=>window.close(),{delay});</script></body>"""
+
+
+@app.get("/api/youtube/status")
+def youtube_status():
+    return youtube.status()
+
+
+@app.get("/api/youtube/clients")
+def youtube_clients():
+    return youtube.find_client_files()
+
+
+@app.get("/api/youtube/login")
+def youtube_login(request: Request):
+    try:
+        url = youtube.begin_login(request.url.port or 8770)
+    except youtube.YouTubeError as e:
+        return HTMLResponse(_CB_PAGE.format(title="無法開始登入", msg=html.escape(str(e)), ok="false", delay=15000), 400)
+    return RedirectResponse(url)
+
+
+@app.get("/api/youtube/callback")
+def youtube_callback(state: str = "", code: str = "", error: str = ""):
+    if error:
+        return HTMLResponse(_CB_PAGE.format(title="登入已取消", msg=html.escape(error), ok="false", delay=4000))
+    try:
+        tok = youtube.finish_login(state, code)
+    except youtube.YouTubeError as e:
+        return HTMLResponse(_CB_PAGE.format(title="登入失敗", msg=html.escape(str(e)), ok="false", delay=15000), 400)
+    ch = (tok.get("channel") or {}).get("title") or "（此帳號尚未建立 YouTube 頻道）"
+    return HTMLResponse(_CB_PAGE.format(title="登入成功", msg="頻道：" + html.escape(ch), ok="true", delay=1500))
+
+
+@app.post("/api/youtube/logout")
+def youtube_logout():
+    youtube.logout()
+    return youtube.status()
+
+
+@app.post("/api/episodes/{eid}/youtube")
+def youtube_upload(eid: str):
+    ep = _ep(eid)
+    if ep["status"] != "done":
+        raise HTTPException(409, "成片核准後才能上傳")
+    if (ep.get("youtube") or {}).get("status") in ("queued", "uploading"):
+        raise HTTPException(409, "這一集已在上傳中")
+    if not youtube.status()["logged_in"]:
+        raise HTTPException(401, "還沒登入 Google 帳號")
+    store.update_episode(eid, youtube={"status": "queued", "progress": 0.0})
+    pipeline.enqueue("youtube_upload", eid)
+    return store.get_episode(eid)
 
 
 # ---------- files & SPA ----------
