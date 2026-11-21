@@ -329,7 +329,7 @@ def run_radar(seeds: str) -> None:
         t["found"] = now
         t["kind"] = "radar"
         items.insert(0, t)
-    store.save_radar(items[:120])
+    store.save_radar(items)
 
 
 def run_insights_analyze() -> None:

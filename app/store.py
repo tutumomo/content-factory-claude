@@ -375,13 +375,21 @@ def _norm_idea(item: dict, idx: int = 0) -> dict | None:
     }
 
 
+IDEA_LIMIT = 300      # 使用者自己記的靈感：超過才從最舊的開始丟
+RADAR_LIMIT = 60      # 雷達掃回來的題目：只留最新的
+
+
 def _norm_idea_list(items: list[dict]) -> list[dict]:
-    out = []
+    kept = []
     for idx, item in enumerate(items):
         norm = _norm_idea(item, idx)
         if norm:
-            out.append(norm)
-    return out[:120]
+            kept.append(norm)
+    manual = [x for x in kept if x["kind"] != "radar"]
+    radar = [x for x in kept if x["kind"] == "radar"]
+    radar = sorted(radar, key=lambda x: x["found"], reverse=True)[:RADAR_LIMIT]
+    manual = sorted(manual, key=lambda x: x["found"], reverse=True)[:IDEA_LIMIT]
+    return sorted(manual + radar, key=lambda x: x["found"], reverse=True)
 
 
 def get_radar() -> list[dict]:
@@ -668,6 +676,12 @@ def update_episode(eid: str, **kw) -> dict:
 def update_schedule(eid: str, schedule: str | None) -> dict:
     with _lock:
         clean = (schedule or "").strip() or None
+        if clean:
+            clean = clean.replace(" ", "T")
+            try:
+                datetime.fromisoformat(clean)
+            except ValueError as e:
+                raise ValueError("排期時間格式要像 2026-11-25T20:00") from e
         ep = update_episode(eid, schedule=clean)
         meta_path = ep_dir(eid) / "publish" / "metadata.json"
         if meta_path.exists():

@@ -20,6 +20,9 @@ store.DATA.mkdir(parents=True, exist_ok=True)
 @app.on_event("startup")
 def _startup() -> None:
     pipeline.start_worker()
+    cur = store.get_insights_summary()  # a restart in the middle of an analysis leaves this flag set
+    if cur.get("analyzing"):
+        store.save_insights_summary({**cur, "analyzing": False, "error": "上次分析被伺服器重啟中斷，請重新分析"})
     for ep in store.list_episodes():  # resume work interrupted by a restart
         if ep["status"] in ("queued", "running"):
             store.log(ep["id"], "伺服器重啟，重新排入佇列")
@@ -302,7 +305,10 @@ def delete_episode(eid: str):
 @app.patch("/api/episodes/{eid}/schedule")
 def set_schedule(eid: str, body: dict = Body(...)):
     _ep(eid)
-    return store.update_schedule(eid, body.get("schedule"))
+    try:
+        return store.update_schedule(eid, body.get("schedule"))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 def _need_wait(ep: dict, what: str) -> None:
@@ -428,24 +434,53 @@ def _csv_val(norm_row: dict[str, str], field: str) -> str:
     return ""
 
 
-def _match_episode(query: str, eps: list[dict]) -> dict | None:
+def _match_titles(ep: dict) -> list[str]:
+    return [t for t in (
+        ((ep.get("package_choice") or {}).get("title") or "").strip().lower(),
+        (ep.get("topic") or "").strip().lower(),
+    ) if t]
+
+
+def _match_episode(query: str, eps: list[dict]) -> tuple[dict | None, str]:
+    """Return (episode, reason). Reason explains why nothing matched."""
     q = query.strip().lower()
     if not q:
-        return None
+        return None, "沒有填集數"
     for ep in eps:
         if ep["id"].lower() == q:
-            return ep
+            return ep, ""
     for ep in eps:
-        t1 = ((ep.get("package_choice") or {}).get("title") or "").strip().lower()
-        t2 = (ep.get("topic") or "").strip().lower()
-        if q in (t1, t2):
-            return ep
+        if q in _match_titles(ep):
+            return ep, ""
+    if len(q) < 4:
+        return None, "名稱太短，請填集數 id 或完整標題"
+    need = max(4, (len(q) + 1) // 2)  # at least half of the text has to overlap, never a 3-char hit
+    scored = []
     for ep in eps:
-        t1 = ((ep.get("package_choice") or {}).get("title") or "").strip().lower()
-        t2 = (ep.get("topic") or "").strip().lower()
-        if q in t1 or q in t2 or (t2 and t2 in q):
-            return ep
-    return None
+        best = 0
+        for t in _match_titles(ep):
+            short, long_ = (q, t) if len(q) <= len(t) else (t, q)
+            if len(short) >= need and short in long_:
+                best = max(best, len(short))
+        if best:
+            scored.append((best, ep))
+    if not scored:
+        return None, "找不到對應集數"
+    scored.sort(key=lambda x: x[0], reverse=True)
+    if len(scored) > 1 and scored[1][0] >= scored[0][0] - 2:
+        return None, "對到多集，請改填集數 id"
+    return scored[0][1], ""
+
+
+def _metric_row(platform: str, date: str, views: str, watch_time: str, followers: str,
+                likes: str, saves: str, comments: str, note: str) -> dict:
+    return {"platform": platform, "date": date, "views": views, "watch_time": watch_time,
+            "followers": followers, "likes": likes, "saves": saves, "comments": comments, "note": note}
+
+
+def _metric_sig(m: dict) -> tuple:
+    return tuple(str(m.get(k) or "").strip() for k in
+                 ("platform", "date", "views", "watch_time", "followers", "likes", "saves", "comments", "note"))
 
 
 @app.post("/api/insights/import-csv")
@@ -460,29 +495,37 @@ def insights_import_csv(body: dict = Body(...)):
     imported = 0
     skipped: list[str] = []
     per_ep: dict[str, list[dict]] = {}
+    seen: dict[str, set[tuple]] = {}
     for row_no, row in enumerate(reader, 2):
         norm = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items() if k is not None}
         if not any(norm.values()):
             continue
         target_q = _csv_val(norm, "episode")
-        ep = _match_episode(target_q, eps)
+        ep, why = _match_episode(target_q, eps)
         if not ep:
-            skipped.append(f"第 {row_no} 行找不到對應集數：{target_q or '（空）'}")
+            skipped.append(f"第 {row_no} 行{why}：{target_q or '（空）'}")
             continue
         eid = ep["id"]
         if eid not in per_ep:
             per_ep[eid] = store.read_json(eid, "metrics.json", [])
-        per_ep[eid].append({
-            "platform": _csv_val(norm, "platform") or "YouTube",
-            "date": _csv_val(norm, "date"),
-            "views": _csv_val(norm, "views"),
-            "watch_time": _csv_val(norm, "watch_time"),
-            "followers": _csv_val(norm, "followers"),
-            "likes": _csv_val(norm, "likes"),
-            "saves": _csv_val(norm, "saves"),
-            "comments": _csv_val(norm, "comments"),
-            "note": _csv_val(norm, "note"),
-        })
+            seen[eid] = {_metric_sig(m) for m in per_ep[eid] if isinstance(m, dict)}
+        entry = _metric_row(
+            _csv_val(norm, "platform") or "YouTube",
+            _csv_val(norm, "date"),
+            _csv_val(norm, "views"),
+            _csv_val(norm, "watch_time"),
+            _csv_val(norm, "followers"),
+            _csv_val(norm, "likes"),
+            _csv_val(norm, "saves"),
+            _csv_val(norm, "comments"),
+            _csv_val(norm, "note"),
+        )
+        sig = _metric_sig(entry)
+        if sig in seen[eid]:
+            skipped.append(f"第 {row_no} 行重複（這集已有同樣數據），略過")
+            continue
+        seen[eid].add(sig)
+        per_ep[eid].append(entry)
         imported += 1
     for eid, rows in per_ep.items():
         store.write_json(eid, "metrics.json", rows)
