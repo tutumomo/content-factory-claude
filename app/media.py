@@ -55,13 +55,19 @@ def tts_health() -> dict:
 
 
 VOICE_TASKS = {"tts", "clon", "vdes"}  # audio.cpp task tokens that produce narration
+BUILTIN_VOICES = ("vivian", "serena", "uncle_fu", "dylan", "eric", "ryan", "aiden", "ono_anna", "sohee")
 
 
 def list_models(base_url: str | None = None) -> dict:
-    """Every model the audio.cpp server has registered, split into voice-capable and the rest."""
+    """Every model the audio.cpp server has registered, split into voice-capable and the rest.
+
+    `voices` is the server-side reference library (voice_dir WAVs + presets), which is what
+    the settings page offers as 參考音色; `builtin` are the model's own speaker names.
+    """
     cfg = store.get_settings()["tts"]
     base = (base_url or cfg["base_url"]).rstrip("/")
-    out = {"base_url": base, "models": [], "other": [], "current": cfg["model"], "ok": False, "detail": ""}
+    out = {"base_url": base, "models": [], "other": [], "current": cfg["model"],
+           "voices": [], "builtin": list(BUILTIN_VOICES), "ok": False, "detail": ""}
     try:
         r = httpx.get(base + "/v1/models", timeout=5)
         r.raise_for_status()
@@ -75,6 +81,12 @@ def list_models(base_url: str | None = None) -> dict:
         (out["models"] if item["task"] in VOICE_TASKS else out["other"]).append(item)
     out["ok"] = bool(out["models"])
     out["detail"] = f"{len(out['models'])} 個語音模型" if out["ok"] else "伺服器上沒有語音模型"
+    try:
+        vr = httpx.get(base + "/v1/audio/voices", params={"model": cfg["model"]}, timeout=5)
+        if vr.status_code == 200:
+            out["voices"] = [v for v in vr.json().get("voices", []) if v not in BUILTIN_VOICES]
+    except httpx.HTTPError:
+        pass
     return out
 
 
@@ -132,8 +144,14 @@ def tts(text: str, out: Path, emotion: str = "") -> Path:
             opts["emotion"] = emo
             opts["emotion_alpha"] = float(cfg.get("emotion_alpha") or 1.0)
     body = {"model": cfg["model"], "input": text}
-    if cfg.get("voice") and cfg["model"].startswith("qwen3"):
-        body["voice"] = cfg["voice"]
+    voice = (cfg.get("voice") or "").strip()
+    library_voice = bool(voice) and voice not in BUILTIN_VOICES
+    if voice and (cfg["model"].startswith("qwen3") or library_voice):
+        body["voice"] = voice
+    if library_voice and cfg["model"].startswith("qwen3"):
+        # voice_dir recordings in this library carry no transcript, so ask Qwen3 for the
+        # speaker-embedding clone instead of ICL (which would demand reference_text).
+        opts["x_vector_only_mode"] = True
     if cfg.get("voice_ref"):
         body["voice_ref"] = cfg["voice_ref"]
     if opts:

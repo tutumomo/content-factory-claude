@@ -59,12 +59,13 @@ export async function openSettingsModal() {
         <input id="t-base_url" value="${esc(s.tts.base_url)}">
         <div class="grid-2">
           <div><label>TTS 模型 id</label><select id="t-model"><option value="${esc(s.tts.model)}" selected>${esc(s.tts.model)}</option></select></div>
-          <div><label>聲音</label><select id="t-voice">${["vivian", "serena", "uncle_fu", "dylan", "eric", "ryan", "aiden", "ono_anna", "sohee"].map((v) => `<option ${v === s.tts.voice ? "selected" : ""}>${v}</option>`).join("")}</select></div>
+          <div><label>參考音色</label><select id="t-voice"><option value="${esc(s.tts.voice || "")}" selected>${esc(s.tts.voice || "（模型預設）")}</option></select></div>
         </div>
+        <div class="muted" style="margin-top:4px">內建聲音（vivian…）只適用 Qwen3 CustomVoice；參考音色庫來自 audio.cpp 的 voice_dir，要搭配 clon 模型（qwen3 Base、IndexTTS2.5 等）。留空＝模型預設。</div>
         <div class="row" style="margin-top:4px"><button type="button" class="btn" id="t-models-refresh">重新讀取模型清單</button><span class="muted" id="t-models-out"></span><span class="muted">清單來自 audio.cpp 已下載的語音模型</span></div>
         <label>語氣指示</label>
         <input id="t-instruct" value="${esc(s.tts.instruct)}">
-        <label>參考音檔路徑（index-tts2.5、zonos3-mini 必填；qwen3 模型可留空）</label>
+        <label>參考音檔路徑（單一檔案，優先於上方參考音色；index-tts2.5、zonos3-mini 必填；qwen3 模型可留空）</label>
         <input id="t-voice_ref" value="${esc(s.tts.voice_ref || "")}" placeholder="/home/altos/…/ref.wav">
         <div class="grid-2">
           <div><label>情緒示範文字（index-tts2.5 用）</label><input id="t-emotion" value="${esc(s.tts.emotion || "")}"></div>
@@ -281,7 +282,10 @@ async function setupTtsModels(root, s) {
         sel.insertAdjacentHTML("afterbegin", `<option value="${esc(keep)}" selected>${esc(keep)}（伺服器上沒有這個 id）</option>`);
       }
       if (!rows.length) sel.innerHTML = `<option value="${esc(keep)}" selected>${esc(keep)}</option>`;
-      out.textContent = res.ok ? `已讀到 ${rows.length} 個語音模型` : (res.detail || "伺服器上沒有語音模型");
+      fillVoices(root, s, res);
+      out.textContent = res.ok
+        ? `已讀到 ${rows.length} 個語音模型、${(res.voices || []).length} 個參考音色`
+        : (res.detail || "伺服器上沒有語音模型");
     } catch (e) {
       sel.innerHTML = `<option value="${esc(keep)}" selected>${esc(keep)}</option>`;
       out.textContent = `讀不到模型清單：${e.message}（保留原本的 id）`;
@@ -290,6 +294,19 @@ async function setupTtsModels(root, s) {
 
   $("#t-models-refresh", root).onclick = load;
   await load();
+}
+
+function fillVoices(root, s, res) {
+  const vsel = $("#t-voice", root);
+  if (!vsel) return;
+  const cur = vsel.value || s.tts?.voice || "";
+  const opt = (v) => `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(v)}</option>`;
+  vsel.innerHTML = `<option value="" ${cur ? "" : "selected"}>（模型預設）</option>`
+    + `<optgroup label="內建聲音（Qwen3 CustomVoice）">${(res.builtin || []).map(opt).join("")}</optgroup>`
+    + ((res.voices || []).length ? `<optgroup label="參考音色庫">${res.voices.map(opt).join("")}</optgroup>` : "");
+  if (cur && ![...vsel.options].some((o) => o.value === cur)) {
+    vsel.insertAdjacentHTML("beforeend", `<optgroup label="目前設定">${opt(cur)}</optgroup>`);
+  }
 }
 
 async function setupYouTubePane(root, s, collect) {
