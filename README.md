@@ -26,8 +26,8 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 
 | 階段 | agent 做 | 你做 |
 |---|---|---|
-| 選題雷達 | 讀你貼的連結／筆記，整理候選題目 | 挑一個「做這個」 |
-| 蒐集資料 | 抓參考連結內文 | — |
+| 選題雷達 | 讀你貼的連結／筆記，抽候選 → 預篩 → 0–100 注意力評分 → 同事件聚類 → 依熱度排序（每則附一句依據） | 挑一個「做這個」 |
+| 蒐集資料 | 抓參考連結內文，並核對材料是否支撐題目 | 來源不足時**補連結／補一手資訊**，或明確選擇繼續 |
 | 方向簡報 | 3–4 個切入方向＋需求證清單 | **挑方向**、補觀點 |
 | 寫講稿 | 依方向寫、拆成畫面（每畫面附 `stock_query` 實拍搜尋詞） | — |
 | 多模型互審 | 事實查核／觀眾理解／節奏／AI 腔四個角色打分，未過門檻自動修（最多 3 輪） | 看講稿、可直接改字（可在設定關掉這個關卡） |
@@ -50,6 +50,9 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 - **背景音樂**：預設 YuE2 3B（audio.cpp）生成純音樂；設定頁可改 **Google Lyria 3**（Gemini API，`lyria-3-clip-preview` 固定 30 秒片段 $0.04/首、`lyria-3-pro-preview` 完整歌曲約 3 分鐘 $0.08/首；皆無免費額度，金鑰用環境變數名，音訊含 SynthID 浮水印，專案要有額度），或 **Openverse 授權曲庫**（免註冊免金鑰，聚合 Jamendo／Freesound 的 CC 音樂；預設只抓 CC0，也可放寬到 CC BY 並自動標註；匿名額度 20 次/分、200 次/日）。長度跟著成片（片段會 loop），講話時自動壓低（sidechain），結果依引擎／風格／長度快取在 `data/music`。講稿的 `music` 欄位可逐集指定風格。
 - **實拍素材**：設定頁「畫面來源」可選字卡、ComfyUI、實拍素材（Pexels／Pixabay）或混用。API key 只填環境變數名稱；搜尋依講稿的 `stock_query`，優先挑接近 1080×1920 的直式片段，下載快取在 `data/stock/`，出處與授權自動附在說明欄。實拍片段用 `scale+crop` 補滿畫框，不會變形。
 - **AI 影片畫面**：「畫面來源」可選 **ComfyUI MiniMax-H3 生影片**。每個畫面用講稿的 `visual` 描述寫成 H3 提示詞（單一長鏡頭、禁止文字與對白），以 `MiniMaxH3ImageToVideo`（無參考圖＝文生影片）生成 2–15 秒、24 fps 的影片，並以 `VAEDecodeAudio` 同時生成環境音。預設配方是 **Pika H3 Flex**：`pika_h3_flex_fl2va_v1` LoRA ＋ `lcm` 取樣器 ＋ 官方六段 sigma 節點（`ManualSigmas`），6 步出片；設定頁「配方」可切回原生 25 步。**LoRA 走 MiniMax-H3-Turbo 的轉接器**：原生 `LoraLoaderModelOnly` 在這個 int8 基底每步約 13.5–17 秒（6 步 502 秒），Turbo 轉接器溫機時 6 步 130 秒、冷啟動 523 秒；同期原生 25 步冷啟動 622 秒；它的節點要求 LoRA 鍵名不含 `diffusion_model.` 前綴，所以用 `MiniMax H3/pika_h3_flex_fl2va_v1_noprefix.safetensors`（由原檔改名產生）。UNET、影片 VAE、音訊 VAE 另存本機 SSD 副本（檔名結尾 `_ssd`）：原檔在 gdrive，光是載入就要 150–380 秒。ffmpeg 循環補滿旁白長度，環境音依 `ambient_gain_db`（預設 -14 dB，≤ -60 靜音）墊在旁白下，再疊音效與音樂。frame 數依官方公式取 17k+5；模型、LoRA、sigma、畫素、單段秒數與逾時都在設定頁「MiniMax-H3 影片」區塊調整。失敗的段落自動退回字卡。
+- **選題雷達**：把貼進來的連結／文字拆成候選，先做寬召回預篩（`PASS` 進評分、`BLOCK` 丟掉、`UNKNOWN` 留在清單標「待補」），再依事件份量、資訊增量、證據強度、共振面、可用性五軸算 0–100 注意力分數，最後把同一件事的多篇報導併成一組，依分數排序。每則都留一句給你看的評分依據；分數與聚類可在設定頁個別關掉，回到舊的一次掃描。
+- **來源求證**：抓完連結後比對題目與筆記，列出材料沒有支持的主張（`gaps`）。沒有可讀的一手來源、筆記也不足時，預設停在「補來源」閘門，不會再回報假的 `ok`；你可以補連結重抓、補一手資訊，或按「來源不足也繼續」讓講稿標註需求證。`source_gate` 可關掉，只標示不擋。
+- **標題與說明欄**：套自足標題規則（不點開也知道主體與動作、保留原文類型、不把舊發布寫成今天推出）與答案前置摘要規則（第一句就是可引用的結論），並保留模型／產品／版本號原文。標題候選會附上長度、只有版本號或只有 teaser 的檢查結果。
 - **分鏡閘門**：預設開啟。講稿審完先進分鏡站產 `output/storyboard.json` 與縮圖，你按核准才開始配音與出片；退件會帶一句理由回講稿重排。
 - **畫面變化檢查**：`slideshow_risk_max`（預設 0.7）比對相鄰畫面的灰階差異，靜止比例超過門檻就在「畫面變化」一項標紅，提示這種成片像簡報輪播。
 - **雲端預算閘**：Lyria 這類付費 API 每筆在呼叫前先記帳（`data/cost/ledger.jsonl`）。低於單筆門檻直接放行，超過就讓集數停在「核准花費」等你按，累計超過月上限直接拒絕。核准與用量都是逐集記帳。
@@ -61,7 +64,7 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 ## 沒做的事
 
 - **沒有自動上傳到 YouTube／IG／FB**：需要各平台 OAuth 與 API 審核。目前輸出發布包（影片、縮圖、字幕、說明欄、輪播圖卡、shorts 直式成片與平台說明文、`metadata.json`），由你手動上傳或交給排程工具。TikTok／IG 直發列為第二階段。
-- 選題雷達不會自己爬平台熱門榜，需要你貼線索。
+- 選題雷達不會自己爬平台熱門榜，需要你貼線索；它會替你預篩、評分與聚類，但不會自己去找新題目。
 - 畫面預設是設計過的文字卡片；勾 ComfyUI 才會生圖。
 
 ## 檔案
@@ -69,7 +72,8 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 ```
 app/main.py      API 與路由
 app/pipeline.py  SOP 各階段、背景 worker、你的決策
-app/prompts.py   各任務提示詞（JSON 輸出）
+app/prompts.py   各任務提示詞（JSON 輸出；含改寫自 AIHOT 的編輯規則）
+app/editorial.py 選題預篩、注意力評分、同事件聚類、來源求證與標題檢查
 app/llm.py       Claude CLI / OpenAI 相容 / 示範模式
 app/media.py     TTS、對齊、字幕、ffmpeg、實測檢查
 app/music.py     YuE2 背景音樂生成與混音（含 ducking）
@@ -85,3 +89,7 @@ remotion/        Remotion 專案（Episode 組合：動畫排版與字幕）
 static/          網頁介面
 data/            頻道定位、設定、品味紀錄、雷達、每一集的檔案
 ```
+
+## 致謝
+
+- 選題預篩、事件注意力評分、同事件聚類、防幻覺／自足標題／答案前置摘要等提示詞方法論，改寫自 [KKKKhazix/AIHOT](https://github.com/KKKKhazix/AIHOT)（MIT 授權）。本專案只移植 `industry/prompts/` 的文字方法論並改寫成繁體中文、接上自己的設定與流程，沒有使用它的網站、資料庫、爬蟲或信源名單。授權全文與逐項改動見 [`THIRD_PARTY.md`](THIRD_PARTY.md)。

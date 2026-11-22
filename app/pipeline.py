@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from . import comfy, cost, h3video, llm, media, music, prompts, render, sfx, stock, stock_audio, store, video
+from . import comfy, cost, editorial, h3video, llm, media, music, prompts, render, sfx, stock, stock_audio, store, video
 
 STAGES = ["sources", "brief", "script", "critique", "storyboard", "assemble", "package", "review", "approved"]
 STAGE_LABEL = {
@@ -21,7 +21,7 @@ STAGE_LABEL = {
     "storyboard": "分鏡確認", "assemble": "配音／畫面／字幕", "package": "標題／縮圖／貼文",
     "review": "成片審核", "approved": "已核准",
 }
-WAIT_LABEL = {"direction": "挑方向", "script": "看講稿", "storyboard": "看分鏡", "cost": "核准花費",
+WAIT_LABEL = {"sources": "補來源", "direction": "挑方向", "script": "看講稿", "storyboard": "看分鏡", "cost": "核准花費",
               "package": "挑標題與縮圖", "approval": "看成片並核准"}
 
 _q: "queue.Queue[tuple]" = queue.Queue()
@@ -105,22 +105,50 @@ def wait(eid: str, what: str) -> None:
 # ---------- stages ----------
 
 def st_sources(ep: dict) -> bool:
+    """Fetch the links, then check whether there is enough first-hand material.
+
+    With `source_gate` on, an episode without a readable source (and without
+    substantial notes) stops here instead of silently writing from nothing.
+    """
     eid = ep["id"]
-    parts = [f"# 題目\n{ep['topic']}\n", f"# 使用者筆記\n{ep.get('notes') or '（無）'}\n"]
+    cfg = store.get_settings()["pipeline"]
+    parts = [
+        prompts.SAFETY_BOUNDARY,
+        f"# 題目\n{ep['topic']}\n",
+        f"# 使用者筆記\n{ep.get('notes') or '（無）'}\n",
+    ]
+    fetched = []
     for u in ep.get("source_urls", []):
         store.log(eid, f"抓取 {u}")
-        parts.append(f"## 來源：{u}\n{fetch_text(u)}\n")
+        txt = fetch_text(u)
+        failed = "抓取失敗" in txt
+        fetched.append({"url": u, "text": "" if failed else txt, "failed": failed})
+        parts.append(f"## 來源：{u}\n{txt}\n")
+    if not ep.get("source_urls"):
+        parts.append("（沒有提供連結）\n")
     store.write_text(eid, "sources.md", "\n".join(parts))
-    n_ok = sum(1 for p in parts[2:] if "抓取失敗" not in p)
-    store.update_episode(eid, checks={**ep.get("checks", {}), "sources": {"ok": True, "value": f"{n_ok}/{len(ep.get('source_urls', []))} 個來源可讀"}})
+    verdict = editorial.source_verdict(ep, fetched, cfg)
+    store.update_episode(eid, checks={**ep.get("checks", {}), "sources": verdict})
+    if verdict["ok"]:
+        store.log(eid, f"來源足夠：{verdict['value']}")
+    else:
+        store.log(eid, f"來源不足：{verdict['value']}；需求證：{'；'.join(verdict.get('gaps') or [])[:200]}")
+        if cfg.get("source_gate", True) and not ep.get("sources_accepted"):
+            wait(eid, "sources")
+            return False
     return True
+
+
+def _source_state(ep: dict) -> dict | None:
+    state = (ep.get("checks") or {}).get("sources")
+    return state if isinstance(state, dict) else None
 
 
 def st_brief(ep: dict) -> bool:
     eid = ep["id"]
     if ep.get("direction"):
         return True
-    sys, pr = prompts.brief(ep, sources_text(eid))
+    sys, pr = prompts.brief(ep, sources_text(eid), _source_state(ep))
     data = llm.complete_json("brief", sys, pr)
     store.write_json(eid, "brief.json", data)
     wait(eid, "direction")
@@ -129,7 +157,7 @@ def st_brief(ep: dict) -> bool:
 
 def st_script(ep: dict) -> bool:
     eid = ep["id"]
-    sys, pr = prompts.script(ep, ep["direction"], sources_text(eid))
+    sys, pr = prompts.script(ep, ep["direction"], sources_text(eid), _source_state(ep))
     scr = llm.complete_json("script", sys, pr)
     _validate_script(scr)
     store.write_json(eid, "script.json", scr)
@@ -534,6 +562,9 @@ def st_package(ep: dict) -> bool:
     scr = store.read_json(eid, "script.json")
     sys, pr = prompts.package(ep, scr, cfg["title_count"], cfg["thumbnail_count"])
     pk = llm.complete_json("package", sys, pr)
+    for t in pk.get("titles") or []:
+        if isinstance(t, dict):
+            t["warnings"] = editorial.title_lint(t.get("text", ""))
     d = store.ep_dir(eid)
     shutil.rmtree(d / "thumbs", ignore_errors=True)
     shutil.rmtree(d / "carousel", ignore_errors=True)
@@ -635,11 +666,19 @@ def run_radar(seeds: str) -> None:
     text = seeds + "\n\n" + "\n\n".join(f"## {u}\n{fetch_text(u, 3000)}" for u in urls[:8])
     rng = store.get_settings()["pipeline"]
     lo, hi = rng["radar_min"], rng["radar_max"]
-    sys, pr = prompts.radar(text, lo, hi)
-    data = llm.complete_json("radar", sys, pr)
+    rows = None
+    if rng.get("radar_scoring", True):
+        try:
+            rows = editorial.radar_scored(text, lo, hi, rng)
+        except llm.LLMError:
+            rows = None
+    if rows is None:  # scoring off, or the scorer failed: keep the old single-pass radar
+        sys, pr = prompts.radar(text, lo, hi)
+        data = llm.complete_json("radar", sys, pr)
+        rows = [t for t in data.get("topics", []) if isinstance(t, dict)][:hi]
     items = store.get_radar()
     now = time.time()
-    for t in reversed([t for t in data.get("topics", []) if isinstance(t, dict)][:hi]):  # keep model's ranking on top
+    for t in reversed(rows):  # keep the ranking with the best on top
         t["found"] = now
         t["kind"] = "radar"
         items.insert(0, t)
@@ -696,6 +735,24 @@ def choose_direction(eid: str, direction_id: str, notes: str) -> None:
     d = next(x for x in brief["directions"] if x["id"] == direction_id)
     store.update_episode(eid, direction=d, direction_notes=notes, stage="script")
     store.log(eid, f"使用者選方向 {direction_id}")
+    enqueue("episode", eid)
+
+
+def sources_decision(eid: str, notes: str, new_urls: list[str], proceed: bool) -> None:
+    """Owner answers the source gate: add material (refetch) or proceed with a warning."""
+    ep = store.get_episode(eid)
+    notes = (notes or "").strip()
+    urls = [u.strip() for u in new_urls if str(u).strip().startswith("http")]
+    merged = list(dict.fromkeys(list(ep.get("source_urls") or []) + urls))
+    patch = {"source_urls": merged, "stage": "sources"}
+    if notes:
+        old = (ep.get("notes") or "").strip()
+        patch["notes"] = (old + "\n" + notes).strip() if old else notes
+    # New links must be fetched again; "proceed" only skips the gate it was shown for.
+    patch["sources_accepted"] = bool(proceed) and not urls
+    store.update_episode(eid, **patch)
+    store.log(eid, "使用者補了來源，重新求證" if urls else
+              ("使用者選擇在來源不足下繼續" if proceed else "使用者補了備註，重新求證"))
     enqueue("episode", eid)
 
 

@@ -128,6 +128,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "thumbnail_count": 4,
         "radar_min": 4,                    # each radar scan returns radar_min..radar_max topics
         "radar_max": 8,
+        "radar_prefilter": True,           # wide-recall PASS/BLOCK/UNKNOWN prefilter
+        "radar_scoring": True,             # 0–100 event-attention score + same-event grouping
+        "radar_grouping": True,
+        "radar_candidates_max": 12,        # candidates extracted from one scan
+        "source_audit": True,              # LLM checks whether the fetched material supports the topic
+        "source_gate": True,               # stop for the owner when no first-hand source is readable
+        "source_min_readable": 1,
         "slideshow_risk_max": 0.7,         # 幀對「幾乎無變化」比例上限；超過記警告（畫面變化檢查）
     },
     "ui": {
@@ -482,6 +489,42 @@ def _norm_idea(item: dict, idx: int = 0) -> dict | None:
         "notes": notes,
         "tags": tags,
         "episode_id": item.get("episode_id") or None,
+        **_norm_idea_radar(item),
+    }
+
+
+def _norm_idea_radar(item: dict) -> dict:
+    """Radar-only fields; old ideas saved before this existed get neutral defaults."""
+    score = item.get("attention_score")
+    try:
+        score = max(0, min(100, int(round(float(score))))) if score is not None else None
+    except (TypeError, ValueError):
+        score = None
+    group = str(item.get("group") or "").strip()
+    members = []
+    for m in item.get("members") or []:
+        if not isinstance(m, dict):
+            continue
+        members.append({
+            "title": str(m.get("title") or "").strip(),
+            "source": str(m.get("source") or "").strip(),
+            "url": str(m.get("url") or "").strip(),
+            "attention_score": m.get("attention_score") if isinstance(m.get("attention_score"), int) else None,
+            "prefilter": str(m.get("prefilter") or "").strip(),
+            "relation": str(m.get("relation") or "").strip(),
+        })
+    try:
+        group_size = max(1, int(item.get("group_size") or len(members) or 1))
+    except (TypeError, ValueError):
+        group_size = max(1, len(members))
+    return {
+        "attention_score": score,
+        "score_reason": str(item.get("score_reason") or "").strip(),
+        "prefilter": str(item.get("prefilter") or "").strip(),
+        "needs_more": bool(item.get("needs_more")),
+        "group": group,
+        "group_size": group_size,
+        "members": members,
     }
 
 

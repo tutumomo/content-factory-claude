@@ -434,6 +434,13 @@ def _need_wait(ep: dict, what: str) -> None:
         raise HTTPException(409, f"這一集目前不是在等「{pipeline.WAIT_LABEL[what]}」")
 
 
+@app.post("/api/episodes/{eid}/sources")
+def sources(eid: str, body: dict = Body(...)):
+    _need_wait(_ep(eid), "sources")
+    pipeline.sources_decision(eid, body.get("notes", ""), body.get("source_urls") or [], bool(body.get("proceed")))
+    return {"ok": True}
+
+
 @app.post("/api/episodes/{eid}/direction")
 def direction(eid: str, body: dict = Body(...)):
     _need_wait(_ep(eid), "direction")
