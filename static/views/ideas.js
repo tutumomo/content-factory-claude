@@ -1,5 +1,5 @@
-import { $, $$, api, esc, fmtName, statusPill, toast, when } from "../lib.js?v=20261122e";
-import { openNewEpisodeModal } from "../modals.js?v=20261122e";
+import { $, $$, api, esc, fmtName, statusPill, toast, when } from "../lib.js?v=20261122f";
+import { openNewEpisodeModal } from "../modals.js?v=20261122f";
 
 const KIND_LABEL = { radar: "雷達", note: "筆記", link: "連結", quote: "金句" };
 
@@ -127,8 +127,7 @@ export async function viewIdeas(main) {
   };
 
   main.innerHTML = `
-    <div class="page-head">
-      <div><h1>靈感</h1><p class="sub">隨手記下想法、連結或金句，或把多個線索丟給 AI 雷達掃描，點一下就能開拍。</p></div>
+    <div class="page-head">      <div><h1>靈感</h1><p class="sub">隨手記下想法、連結或金句，或把多個線索丟給 AI 雷達掃描，點一下就能開拍。</p></div>
     </div>
     <div class="ideas-top">
       <div class="card" style="margin-bottom:0">
@@ -157,13 +156,14 @@ export async function viewIdeas(main) {
       <div class="card" style="margin-bottom:0">
         <div class="row" style="margin-bottom:8px">
           <b class="grow">AI 雷達掃描</b>
-          <span class="muted" id="radar-state"></span>
+          <span class="muted" id="radar-state">尚未掃描</span>
         </div>
         <textarea id="r-seeds" rows="3" placeholder="貼上多行線索（對標帳號熱門片連結、官方公告、社群討論筆記）…"></textarea>
         <div class="row" style="margin-top:10px">
-          <span class="muted grow">掃描在背景跑，好了自動整理成下方候選卡。</span>
+          <span class="muted grow">掃描在背景跑，好了自動整理成下方候選卡。貼具體文章網址最穩；首頁若由 JS 產生會抓不到正文，失敗時會顯示原因。</span>
           <button type="button" class="btn" id="r-go">開始掃描</button>
         </div>
+        <div class="muted" id="radar-note" style="margin-top:8px;white-space:pre-wrap"></div>
       </div>
     </div>
 
@@ -183,6 +183,36 @@ export async function viewIdeas(main) {
     </div>
     <div id="idea-view"></div>
   `;
+
+  const drawRadarState = (s = {}) => {
+    const el = $("#radar-state", main);
+    const note = $("#radar-note", main);
+    if (!el) return;
+    const when = s.finished
+      ? new Date(s.finished * 1000).toLocaleTimeString("zh-TW", { hour12: false }).slice(0, 5)
+      : "";
+    el.textContent = s.status === "running"
+      ? "掃描中…"
+      : s.status === "ok"
+        ? `上次掃描 ${when}：新增 ${s.added || 0} 張`
+        : s.status === "empty"
+          ? `上次掃描 ${when}：沒有新卡片`
+          : s.status === "error"
+            ? `上次掃描 ${when}：失敗`
+            : "尚未掃描";
+    if (!note) return;
+    note.className = ["error", "empty"].includes(s.status) ? "warn" : "muted";
+    note.textContent = s.status === "running"
+      ? "抓取與評分在背景跑，完成會自動更新。"
+      : (s.message || "");
+    note.title = s.error || "";
+  };
+  const refreshRadarState = async () => {
+    const s = await api("/api/radar/state").catch(() => null);
+    if (s) drawRadarState(s);
+    return s;
+  };
+  refreshRadarState();
 
   $$("[data-qtab]", main).forEach((b) => {
     b.onclick = () => {
@@ -237,23 +267,19 @@ export async function viewIdeas(main) {
     try {
       await api("/api/radar/scan", { method: "POST", body: { seeds: $("#r-seeds", main).value } });
       $("#r-seeds", main).value = "";
-      $("#radar-state", main).textContent = "掃描中…";
+      drawRadarState({ status: "running", message: "正在抓取線索與整理候選…" });
       toast("已送入背景雷達掃描");
-      let sawRadar = false;
       clearInterval(radarTimer);
       radarTimer = setInterval(async () => {
         if (!location.hash.startsWith("#/ideas")) return clearInterval(radarTimer);
-        const h = await api("/api/health").catch(() => null);
-        if (!h) return;
-        const busyRadar = h.worker?.current?.kind === "radar";
-        if (busyRadar) sawRadar = true;
-        if (!busyRadar && (sawRadar || h.worker?.queued === 0)) {
-          clearInterval(radarTimer);
-          viewIdeas(main);
-        }
+        const s = await api("/api/radar/state").catch(() => null);
+        if (!s || s.status === "running") return;
+        clearInterval(radarTimer);
+        viewIdeas(main);
       }, 2000);
     } catch (e) {
       toast(e.message);
+      refreshRadarState();
     }
   };
 

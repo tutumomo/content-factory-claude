@@ -67,9 +67,16 @@ def _worker() -> None:
             if kind == "episode":
                 store.update_episode(args[0], status="error", error=f"{type(e).__name__}: {e}")
                 store.log(args[0], "錯誤：" + traceback.format_exc()[-800:])
+            elif kind == "radar":
+                msg = f"{type(e).__name__}: {e}"
+                tb = traceback.format_exc()[-800:]
+                _save_radar_state("error", f"雷達掃描失敗：{msg}", error=f"{msg}\n{tb}")
             elif kind == "insights_analyze":
                 cur = store.get_insights_summary()
                 store.save_insights_summary({**cur, "analyzing": False, "error": f"{type(e).__name__}: {e}"})
+            elif kind == "youtube_upload":
+                store.log(args[0], f"YouTube 上傳任務失敗：{type(e).__name__}: {e}\n"
+                                    + traceback.format_exc()[-500:])
         finally:
             _current.clear()
             _q.task_done()
@@ -81,18 +88,73 @@ def start_worker() -> None:
 
 # ---------- helpers ----------
 
-def fetch_text(url: str, limit: int = 6000) -> str:
-    try:
-        r = httpx.get(url, timeout=20, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0 content-factory"})
-        r.raise_for_status()
-    except httpx.HTTPError as e:
-        return f"（抓取失敗：{e}）"
-    t = r.text
-    t = re.sub(r"(?is)<(script|style|noscript|svg|nav|footer|header)[^>]*>.*?</\1>", " ", t)
+FETCH_MIN_CHARS = 200
+FETCH_UAS = (
+    "content-factory/1.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36",
+)
+CHALLENGE_MARKERS = (
+    "eo_bot_ssid", "edgeone", "captcha", "cf-chl", "challenge-platform",
+    "just a moment", "人機驗證", "安全驗證", "請完成驗證",
+)
+
+
+def _clean_html(raw: str, limit: int) -> tuple[str, str]:
+    """Return (title, readable text) from an HTML document."""
+    t = re.sub(r"(?is)<(script|style|noscript|svg|nav|footer|header)[^>]*>.*?</\1>", " ", raw)
     title = re.search(r"(?is)<title[^>]*>(.*?)</title>", t)
     t = re.sub(r"(?s)<[^>]+>", " ", t)
     t = html.unescape(re.sub(r"\s+", " ", t)).strip()
-    return (f"標題：{html.unescape(title.group(1).strip())}\n" if title else "") + t[:limit]
+    return (html.unescape(title.group(1).strip()) if title else ""), t[:limit]
+
+
+def _content_problem(raw: str, text: str) -> str:
+    n = len(text.strip())
+    if n < FETCH_MIN_CHARS:
+        low = raw.lower()
+        if any(marker in low for marker in CHALLENGE_MARKERS):
+            return "網頁回傳反爬／驗證挑戰（EdgeOne 或 Cloudflare），沒有正文"
+        if len(raw) > 5000:
+            return (f"這個網址的內容主要由 JS 產生，清洗後只剩 {n} 字；"
+                    "請貼具體文章網址，或把重點貼進線索欄")
+        return f"抓到的正文太少（清洗後 {n} 字）"
+    return ""
+
+
+def fetch_page(url: str, limit: int = 6000, attempts: int = 2) -> dict:
+    """Fetch a page and say clearly whether usable text came back.
+
+    Tries the plain client UA first, then a browser UA after a short pause. A tiny
+    or challenge page is a failure, not "success with no content", so callers can
+    stop instead of sending an empty prompt to the model.
+    """
+    last = {"ok": False, "url": url, "text": "", "reason": "未抓取", "attempts": 0, "bytes": 0}
+    for i, ua in enumerate(FETCH_UAS[:max(1, attempts)]):
+        if i:
+            time.sleep(0.8)
+        try:
+            r = httpx.get(url, timeout=20, follow_redirects=True, headers={"User-Agent": ua})
+            r.raise_for_status()
+        except httpx.HTTPError as e:
+            last = {"ok": False, "url": url, "text": "", "attempts": i + 1, "bytes": 0,
+                    "reason": f"HTTP 失敗（{type(e).__name__}: {e}）"}
+            continue
+        title, text = _clean_html(r.text, limit)
+        problem = _content_problem(r.text, text)
+        if problem:
+            last = {"ok": False, "url": url, "text": "", "attempts": i + 1,
+                    "bytes": len(r.content), "reason": problem}
+            continue
+        body = (f"標題：{title}\n" if title else "") + text
+        return {"ok": True, "url": url, "text": body, "reason": "", "attempts": i + 1,
+                "bytes": len(r.content)}
+    return last
+
+
+def fetch_text(url: str, limit: int = 6000) -> str:
+    res = fetch_page(url, limit)
+    return res["text"] if res["ok"] else f"（抓取失敗：{res['reason']}）"
 
 
 def sources_text(eid: str) -> str:
@@ -722,21 +784,64 @@ def run_episode(eid: str) -> None:
         stage = STAGES[i + 1]
 
 
+def _save_radar_state(status: str, message: str, *, started: float | None = None,
+                      added: int = 0, failed: list[dict] | None = None,
+                      error: str | None = None) -> None:
+    store.save_radar_state({
+        "status": status,
+        "message": message,
+        "started": started,
+        "finished": time.time() if status != "running" else None,
+        "added": added,
+        "failed_urls": failed or [],
+        "error": error,
+    })
+
+
 def run_radar(seeds: str) -> None:
+    started = time.time()
+    _save_radar_state("running", "正在抓取線索與整理候選…", started=started)
     urls = re.findall(r"https?://\S+", seeds)
-    text = seeds + "\n\n" + "\n\n".join(f"## {u}\n{fetch_text(u, 3000)}" for u in urls[:8])
+    seed_text = re.sub(r"https?://\S+", " ", seeds).strip()
+    fetched = []
+    for u in urls[:8]:
+        res = fetch_page(u, 3000)
+        res["url"] = u
+        fetched.append(res)
+    failed = [{"url": f["url"], "reason": f["reason"]} for f in fetched if not f["ok"]]
+    if urls and not any(f["ok"] for f in fetched) and len(seed_text) < 10:
+        detail = "；".join(f"{f['url']}（{f['reason']}）" for f in failed[:3])
+        msg = f"抓不到任何連結內容：{detail}。"
+        if "具體文章網址" not in detail:
+            msg += "請改貼具體文章網址，或把重點貼進線索欄。"
+        _save_radar_state("error", msg, started=started, failed=failed, error=msg)
+        return
+    blocks = [seeds]
+    for f in fetched:
+        blocks.append(f"## {f['url']}\n" + (f["text"] if f["ok"] else f"（抓取失敗：{f['reason']}）"))
+    text = "\n\n".join(blocks)
     rng = store.get_settings()["pipeline"]
     lo, hi = rng["radar_min"], rng["radar_max"]
     rows = None
-    if rng.get("radar_scoring", True):
-        try:
+    try:
+        if rng.get("radar_scoring", True):
             rows = editorial.radar_scored(text, lo, hi, rng)
-        except llm.LLMError:
-            rows = None
-    if rows is None:  # scoring off, or the scorer failed: keep the old single-pass radar
-        sys, pr = prompts.radar(text, lo, hi)
-        data = llm.complete_json("radar", sys, pr)
-        rows = [t for t in data.get("topics", []) if isinstance(t, dict)][:hi]
+        if rows is None:  # scoring off: keep the old single-pass radar
+            sys, pr = prompts.radar(text, lo, hi)
+            data = llm.complete_json("radar", sys, pr)
+            rows = [t for t in data.get("topics", []) if isinstance(t, dict)][:hi]
+    except llm.LLMError as e:
+        msg = f"模型呼叫失敗（{type(e).__name__}）：{e}"
+        _save_radar_state("error", msg, started=started, failed=failed, error=msg)
+        return
+    if not rows:
+        msg = "掃描完成，但模型沒有抽出候選。"
+        if failed:
+            msg += f"另有 {len(failed)} 個連結抓不到。"
+            if "具體文章網址" not in " ".join(f["reason"] for f in failed):
+                msg += "請改貼具體文章網址，或把重點貼進線索欄。"
+        _save_radar_state("empty", msg, started=started, failed=failed)
+        return
     items = store.get_radar()
     now = time.time()
     for t in reversed(rows):  # keep the ranking with the best on top
@@ -744,6 +849,10 @@ def run_radar(seeds: str) -> None:
         t["kind"] = "radar"
         items.insert(0, t)
     store.save_radar(items)
+    msg = f"新增 {len(rows)} 張候選卡。"
+    if failed:
+        msg += f"另有 {len(failed)} 個連結抓不到，已用其他線索完成掃描。"
+    _save_radar_state("ok", msg, started=started, added=len(rows), failed=failed)
 
 
 def run_insights_analyze() -> None:
