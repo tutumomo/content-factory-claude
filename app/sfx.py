@@ -13,7 +13,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import store
+from . import stock_audio, store
 
 AUDIO_EXT = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
 
@@ -114,7 +114,30 @@ def status() -> dict:
         "total": sum(len(v) for v in idx.values()),
         "tags": [{"tag": k, "label": v[0], "count": len(idx.get(k, []))} for k, v in TAGS.items()],
         "model": {"path": str(model), "ok": model.exists(), "cli": bool(shutil.which("audiocpp_cli"))},
+        "stock": stock_audio.status(),
     }
+
+
+def stock_fill(tags: list[str] | None = None, force: bool = False) -> dict:
+    """Fill missing tags from Freesound (CC0) instead of the local generation model."""
+    have = index()
+    todo = [t for t in (tags or list(TAGS)) if t in TAGS]
+    filled, skipped, errors = [], [], []
+    for t in todo:
+        if not force and have.get(t):
+            skipped.append(t)
+            continue
+        try:
+            got = stock_audio.fetch_sfx(t, lib_dir())
+        except Exception as e:  # network/API problems must not kill the batch
+            errors.append({"tag": t, "error": str(e)})
+            continue
+        if got:
+            filled.append({"tag": t, "file": got["path"].name, "license": got["license"],
+                           "author": got["author"], "page": got["page"]})
+        else:
+            errors.append({"tag": t, "error": "Freesound 找不到合適的 CC0 音效"})
+    return {"filled": filled, "skipped": skipped, "errors": errors, "status": status()}
 
 
 def import_files(folder: str, tag: str = "") -> dict:
@@ -180,6 +203,15 @@ def build(tags: list[str] | None = None, force: bool = False, per_tag: int = 1) 
                     try:
                         made.append(str(generate(t)))
                     except Exception as e:  # keep going; report at the end
+                        got = None
+                        if bool(cfg().get("stock_fallback", True)):
+                            try:
+                                got = stock_audio.fetch_sfx(t, lib_dir())
+                            except Exception:
+                                got = None
+                        if got:
+                            made.append(str(got["path"]))
+                            continue
                         errors.append({"tag": t, "error": str(e)})
                         ok = False
                         break

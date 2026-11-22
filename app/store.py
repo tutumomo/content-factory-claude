@@ -86,12 +86,16 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "gain_db": -16,                    # 音效相對旁白的音量
         "library_dir": "",                 # 空 = data/sfx
         "model_path": "",                  # 空 = 內建 MOSS-SoundEffect-v2 路徑
+        "freesound_key_env": "FREESOUND_API_KEY",   # 只存名稱；Freesound 免費音效
+        "freesound_license": "cc0",        # cc0 = 免標註；by = CC BY（成片說明自動標註）
+        "stock_fallback": True,            # 本機模型生成失敗時，改抓 Freesound
     },
     "music": {
         "enabled": True,
-        "provider": "audiocpp",            # audiocpp = YuE2；lyria = Google Lyria 3（Gemini API）
+        "provider": "audiocpp",            # audiocpp = YuE2；lyria = Google Lyria 3；openverse = Openverse 授權曲庫（免金鑰）
         "lyria_model": "lyria-3-clip-preview",  # 或 lyria-3-pro-preview
         "lyria_key_env": "GEMINI_API_KEY",  # 只存環境變數名稱，金鑰不進設定檔
+        "openverse_license": "cc0",        # cc0 = 免標註；by = CC BY（成片說明自動標註）
         "base_url": "",                    # 空 = 跟 tts 同一個 audio.cpp 伺服器
         "model": "yue2",                   # audio.cpp 裡的 YuE2 3B 音樂模型
         "style": "",                       # 空 = 內建 lo-fi 風格；講稿的 music 欄位優先

@@ -1,4 +1,4 @@
-import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261121h";
+import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261122b";
 
 export async function openSettingsModal() {
   const s = await api("/api/settings");
@@ -164,9 +164,18 @@ export async function openSettingsModal() {
         </div>
         <label>音效模型（留空 = 內建 MOSS-SoundEffect-v2）</label>
         <input id="x-model_path" value="${esc(s.sfx?.model_path || "")}">
+        <div class="grid-2">
+          <div><label>Freesound 金鑰環境變數名稱（只填名稱，免費申請）</label><input id="x-freesound_key_env" value="${esc(s.sfx?.freesound_key_env || "FREESOUND_API_KEY")}"></div>
+          <div><label>Freesound 授權</label><select id="x-freesound_license">
+            <option value="cc0" ${(s.sfx?.freesound_license || "cc0") === "cc0" ? "selected" : ""}>CC0（免標註，可商用）</option>
+            <option value="by" ${s.sfx?.freesound_license === "by" ? "selected" : ""}>CC BY（成片說明自動標註作者）</option>
+          </select></div>
+        </div>
+        <label style="margin-top:6px"><input type="checkbox" id="x-stock_fallback" style="width:auto;margin-right:6px" ${s.sfx?.stock_fallback !== false ? "checked" : ""}> 本機模型生成失敗時，改從 Freesound 抓</label>
         <div class="card" style="margin:12px 0 0" id="x-lib"><span class="muted">讀取音效庫…</span></div>
         <div class="row" style="margin-top:10px">
           <button type="button" class="btn primary" id="x-build">生成缺的音效（本機模型）</button>
+          <button type="button" class="btn" id="x-stock">從 Freesound 補音效</button>
           <button type="button" class="btn" id="x-import">從資料夾匯入</button>
           <span class="muted" id="x-out"></span>
         </div>
@@ -177,8 +186,9 @@ export async function openSettingsModal() {
         <select id="m-provider">
           <option value="audiocpp" ${(s.music?.provider || "audiocpp") === "audiocpp" ? "selected" : ""}>audio.cpp YuE2 3B（本機 GPU）</option>
           <option value="lyria" ${s.music?.provider === "lyria" ? "selected" : ""}>Google Lyria 3（Gemini API，雲端）</option>
+          <option value="openverse" ${s.music?.provider === "openverse" ? "selected" : ""}>Openverse 授權曲庫（CC0／CC BY，免金鑰）</option>
         </select>
-        <div id="m-ac" style="${s.music?.provider === "lyria" ? "display:none" : ""}">
+        <div id="m-ac" style="${["lyria", "openverse"].includes(s.music?.provider) ? "display:none" : ""}">
           <div class="grid-2" style="margin-top:8px">
             <div><label>音樂模型（自動讀取 audio.cpp 已安裝的音樂生成模型）</label><select id="m-model"><option value="${esc(s.music?.model || "yue2")}" selected>${esc(s.music?.model || "yue2")}</option></select></div>
             <div><label>seed</label><input id="m-seed" type="number" value="${s.music?.seed ?? 1234}"></div>
@@ -191,6 +201,15 @@ export async function openSettingsModal() {
             <div><label>API 金鑰環境變數名稱</label><input id="m-lyria_key_env" value="${esc(s.music?.lyria_key_env || "GEMINI_API_KEY")}"></div>
           </div>
           <div class="muted" style="margin-top:4px">走 Gemini API（generativelanguage.googleapis.com）；金鑰需有額度、專案未達月上限。Lyria 音訊含 SynthID 浮水印。</div>
+        </div>
+        <div id="m-ov" style="${s.music?.provider === "openverse" ? "" : "display:none"}">
+          <div class="grid-2" style="margin-top:8px">
+            <div><label>授權</label><select id="m-openverse_license">
+              <option value="cc0" ${(s.music?.openverse_license || "cc0") === "cc0" ? "selected" : ""}>CC0（免標註，可商用）</option>
+              <option value="by" ${s.music?.openverse_license === "by" ? "selected" : ""}>CC BY（成片說明自動標註作者）</option>
+            </select></div>
+          </div>
+          <div class="muted" style="margin-top:4px">Openverse（api.openverse.org）聚合 Jamendo、Freesound 等 CC 曲庫，免註冊、免金鑰；匿名額度 20 次/分、200 次/日，結果會快取。優先挑 Jamendo 來源的無人聲曲目，依「預設風格」關鍵字搜尋，長度不夠會循環補滿。</div>
         </div>
         <label>預設風格（英文；留空 = 內建 lo-fi。講稿的 music 欄位優先）</label>
         <input id="m-style" value="${esc(s.music?.style || "")}">
@@ -261,11 +280,12 @@ export async function openSettingsModal() {
           s.h3video.enabled = $("#h-enabled", root).checked;
           s.h3video.lora_merge = $("#h-lora_merge", root).checked;
           s.sfx = { ...(s.sfx || {}) };
-          for (const k of ["library_dir", "model_path"]) s.sfx[k] = $(`#x-${k}`, root).value;
+          for (const k of ["library_dir", "model_path", "freesound_key_env", "freesound_license"]) s.sfx[k] = $(`#x-${k}`, root).value;
           s.sfx.gain_db = +$("#x-gain_db", root).value;
           s.sfx.enabled = $("#x-enabled", root).checked;
+          s.sfx.stock_fallback = $("#x-stock_fallback", root).checked;
           s.music = { ...(s.music || {}) };
-          for (const k of ["provider", "model", "style", "lyria_model", "lyria_key_env"]) s.music[k] = $(`#m-${k}`, root).value;
+          for (const k of ["provider", "model", "style", "lyria_model", "lyria_key_env", "openverse_license"]) s.music[k] = $(`#m-${k}`, root).value;
           s.music.gain_db = +$("#m-gain_db", root).value;
           s.music.seed = +$("#m-seed", root).value;
           s.music.enabled = $("#m-enabled", root).checked;
@@ -747,7 +767,8 @@ async function setupVisualPane(root, s, collect) {
     lib.innerHTML = `<div class="row"><b class="grow">音效庫：${st.total} 個檔</b><span class="muted">${esc(st.dir)}</span></div>
       <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">${tags}</div>
       ${b.running ? `<div class="muted" style="margin-top:8px">生成中 ${b.done}/${b.total}（${esc(b.current)}）…</div>` : ""}
-      <div class="muted" style="margin-top:8px">模型：${st.model.ok ? "✓ 在" : "✗ 找不到"} <code>${esc(st.model.path)}</code>${st.model.cli ? "" : "・缺 audiocpp_cli"}</div>`;
+      <div class="muted" style="margin-top:8px">模型：${st.model.ok ? "✓ 在" : "✗ 找不到"} <code>${esc(st.model.path)}</code>${st.model.cli ? "" : "・缺 audiocpp_cli"}</div>
+      ${st.stock ? `<div class="muted" style="margin-top:4px">Freesound：${st.stock.keys_set?.freesound ? "✓ 已設金鑰" : "✗ " + esc(st.stock.detail)}</div>` : ""}`;
   };
   const load = async () => {
     try { renderLib(await api("/api/sfx")); } catch (e) { lib.textContent = e.message; }
@@ -803,6 +824,17 @@ async function setupVisualPane(root, s, collect) {
       if (!st.build.running) { clearInterval(t); out.textContent = "生成結束"; }
     }, 4000);
   };
+  $("#x-stock", root).onclick = async () => {
+    out.textContent = "從 Freesound 補缺的音效…";
+    await api("/api/settings", { method: "PUT", body: collect() });
+    const r = await api("/api/sfx/stock", { method: "POST", body: {} }).catch((e) => ({ error: e.message }));
+    if (r.error) { out.textContent = "✗ " + r.error; return; }
+    renderLib(r.status);
+    const err = (r.errors || []).map((x) => x.tag).join("、");
+    toast(`補了 ${r.filled.length} 個音效`);
+    out.textContent = `✓ 補了 ${r.filled.length} 個` + (err ? `・沒找到：${err}` : "") +
+      (r.filled.length ? "" : `・${r.status?.stock?.detail || ""}`);
+  };
   $("#x-import", root).onclick = async () => {
     const folder = prompt("要匯入的音效資料夾（絕對路徑）：");
     if (!folder) return;
@@ -815,9 +847,10 @@ async function setupVisualPane(root, s, collect) {
   const musicModel = $("#m-model", root);
   const musicModelsOut = $("#m-models-out", root);
   const syncMusicPane = () => {
-    const lyria = $("#m-provider", root).value === "lyria";
-    $("#m-ac", root).style.display = lyria ? "none" : "";
-    $("#m-ly", root).style.display = lyria ? "" : "none";
+    const p = $("#m-provider", root).value;
+    $("#m-ac", root).style.display = p === "audiocpp" ? "" : "none";
+    $("#m-ly", root).style.display = p === "lyria" ? "" : "none";
+    $("#m-ov", root).style.display = p === "openverse" ? "" : "none";
   };
   const loadMusicModels = async () => {
     const keep = musicModel.value || s.music?.model || "";

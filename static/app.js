@@ -1,12 +1,12 @@
-// v=20261121h busts the browser module cache after UI changes
-import { $, $$, api, applyNavLayout, esc, getNavLayout, state } from "./lib.js?v=20261121h";
-import { openNewEpisodeModal, openSettingsModal } from "./modals.js?v=20261121h";
-import { viewContent } from "./views/content.js?v=20261121h";
-import { viewEpisode } from "./views/episode.js?v=20261121h";
-import { viewIdeas } from "./views/ideas.js?v=20261121h";
-import { viewInsights } from "./views/insights.js?v=20261121h";
-import { viewSchedule } from "./views/schedule.js?v=20261121h";
-import { viewStyle } from "./views/style.js?v=20261121h";
+// v=20261122b busts the browser module cache after UI changes
+import { $, $$, api, applyNavLayout, esc, getNavLayout, state } from "./lib.js?v=20261122b";
+import { openNewEpisodeModal, openSettingsModal } from "./modals.js?v=20261122b";
+import { viewContent } from "./views/content.js?v=20261122b";
+import { viewEpisode } from "./views/episode.js?v=20261122b";
+import { viewIdeas } from "./views/ideas.js?v=20261122b";
+import { viewInsights } from "./views/insights.js?v=20261122b";
+import { viewSchedule } from "./views/schedule.js?v=20261122b";
+import { viewStyle } from "./views/style.js?v=20261122b";
 
 const main = $("#main");
 

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import httpx
 
-from . import store
+from . import stock_audio, store
 
 DEFAULT_STYLE = ("instrumental background music, warm lo-fi, soft piano, light brushed drums, "
                  "subtle upright bass, mellow and unobtrusive, no vocals")
@@ -115,6 +115,8 @@ def generate(seconds: float, style: str = "", seed: int | None = None, out: Path
     """Render an instrumental bed of `seconds` length (capped) and return the audio path."""
     if provider() == "lyria":
         return lyria_generate(style, seconds, out=out, force=force, eid=eid)
+    if provider() == "openverse":
+        return openverse_generate(style, seconds, out=out, force=force)
     c = cfg()
     style = (style or "").strip() or (c.get("style") or "").strip() or DEFAULT_STYLE
     seed = int(seed if seed is not None else (c.get("seed") or 1234))
@@ -222,6 +224,36 @@ def lyria_generate(style: str = "", seconds: float = 30.0, out: Path | None = No
     return path
 
 
+def openverse_generate(style: str = "", seconds: float = 30.0, out: Path | None = None,
+                       force: bool = False) -> Path:
+    """Instrumental track from Openverse (CC0 by default, CC BY with credits), cached on disk."""
+    style = (style or "").strip() or (cfg().get("style") or "").strip() or DEFAULT_STYLE
+    want = max(8.0, float(seconds))
+    if out and out.exists() and out.stat().st_size > 50000 and not force:
+        return out
+    got = stock_audio.fetch_music(style, want, cache_dir())
+    if not got:
+        raise MusicError("Openverse 找不到可用的授權音樂（可放寬授權或換風格）")
+    path = Path(got["path"])
+    if out and Path(out) != path:
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, out)
+        src = path.with_suffix(path.suffix + ".json")
+        if src.exists():
+            shutil.copy2(src, Path(out).with_suffix(Path(out).suffix + ".json"))
+        path = Path(out)
+    return path
+
+
+def attribution(p: Path) -> dict:
+    """License/credit record saved next to a downloaded track, or {} for generated audio."""
+    side = Path(p).with_suffix(Path(p).suffix + ".json")
+    try:
+        return json.loads(side.read_text("utf-8")) if side.exists() else {}
+    except (ValueError, OSError):
+        return {}
+
+
 def duration(p: Path) -> float:
     out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
                           "-of", "default=nw=1:nk=1", str(p)], capture_output=True, text=True)
@@ -234,6 +266,12 @@ def duration(p: Path) -> float:
 def status() -> dict:
     c = cfg()
     cached = sorted(p.name for p in cache_dir().glob("bgm_*.*"))
+    if provider() == "openverse":
+        return {"enabled": bool(c.get("enabled", True)), "provider": "openverse",
+                "style": style_of(), "cache": str(cache_dir()),
+                "license": (c.get("openverse_license") or "cc0"),
+                "ok": True, "models": [], "cached": cached,
+                "detail": "就緒（免金鑰；Openverse 匿名額度 20 次/分、200 次/日）"}
     if provider() == "lyria":
         key, key_name = lyria_key()
         model = (c.get("lyria_model") or "lyria-3-clip-preview").strip()

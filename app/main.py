@@ -11,7 +11,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import comfy, cost, llm, media, music, pipeline, prompts, sfx, stock, store, video, video_analysis, youtube
+from . import comfy, cost, llm, media, music, pipeline, prompts, sfx, stock, stock_audio, store, video, video_analysis, youtube
 
 app = FastAPI(title="內容工廠")
 STATIC = store.ROOT / "static"
@@ -104,6 +104,17 @@ def sfx_import(body: dict = Body(...)):
         return sfx.import_files(body.get("folder") or "", body.get("tag") or "")
     except sfx.SfxError as e:
         raise HTTPException(400, str(e))
+
+
+@app.post("/api/sfx/stock")
+def sfx_stock(body: dict = Body(default={})):
+    tags = [t for t in (body.get("tags") or []) if t]
+    return sfx.stock_fill(tags or None, force=bool(body.get("force")))
+
+
+@app.get("/api/stock/audio")
+def stock_audio_status():
+    return stock_audio.status()
 
 
 @app.get("/api/visuals/health")

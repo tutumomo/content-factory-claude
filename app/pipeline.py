@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from . import comfy, cost, h3video, llm, media, music, prompts, render, sfx, stock, store, video
+from . import comfy, cost, h3video, llm, media, music, prompts, render, sfx, stock, stock_audio, store, video
 
 STAGES = ["sources", "brief", "script", "critique", "storyboard", "assemble", "package", "review", "approved"]
 STAGE_LABEL = {
@@ -454,7 +454,7 @@ def st_assemble(ep: dict) -> bool:
     bgm, bgm_note = None, "已關閉"
     if mc.get("enabled", True):
         style = music.style_of(scr)
-        music_engine = "Lyria 3" if music.provider() == "lyria" else "YuE2"
+        music_engine = {"lyria": "Lyria 3", "openverse": "Openverse"}.get(music.provider(), "YuE2")
         store.log(eid, f"背景音樂：{music_engine} 生成 {t0:.0f} 秒（{style[:48]}）")
         try:
             bgm = music.generate(t0, style, eid=eid)
@@ -463,6 +463,25 @@ def st_assemble(ep: dict) -> bool:
         except music.MusicError as e:
             bgm_note = f"生成失敗，成片不加音樂：{e}"
             store.log(eid, bgm_note)
+
+    # 4) keep license/attribution for downloaded audio (Freesound / Jamendo are often CC BY)
+    audio_rows: list[dict] = []
+    for sc in scr.get("scenes") or []:
+        name = sc.get("_sfx")
+        if not name:
+            continue
+        side = sfx.lib_dir() / f"{name}.json"
+        if side.exists():
+            try:
+                audio_rows.append(json.loads(side.read_text("utf-8")))
+            except (ValueError, OSError):
+                pass
+    if bgm:
+        meta = music.attribution(bgm)
+        if meta:
+            audio_rows.append(meta)
+    if audio_rows:
+        store.write_json(eid, "assets/audio_credits.json", audio_rows)
 
     store.log(eid, "合成成片、燒字幕、音量正規化")
     final_note = "ffmpeg"
@@ -536,6 +555,14 @@ def st_package(ep: dict) -> bool:
             rows = json.loads(srcs_p.read_text("utf-8"))
             if rows:
                 pk["description"] = (pk.get("description") or "").rstrip() + "\n\n實拍素材來源：\n" + stock.credits(rows)
+        except (ValueError, OSError):
+            pass
+    creds_p = d / "assets" / "audio_credits.json"
+    if creds_p.exists():
+        try:
+            txt = stock_audio.credits(json.loads(creds_p.read_text("utf-8")))
+            if txt:
+                pk["description"] = (pk.get("description") or "").rstrip() + "\n\n音樂與音效來源：\n" + txt
         except (ValueError, OSError):
             pass
     store.write_json(eid, "package.json", pk)
