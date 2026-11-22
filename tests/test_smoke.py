@@ -12,6 +12,27 @@ from app import store
 
 from .conftest import run_to_done, set_settings, wait_for
 
+
+@pytest.fixture(autouse=True)
+def _fake_services(fakes):
+    """Patch network/GPU services for each smoke test; undone afterwards so other modules see the real code."""
+    yield
+
+
+def _new_episode(c, topic: str = "為什麼貓咪喜歡鑽紙箱") -> str:
+    r = c.post("/api/episodes", json={"topic": topic, "format": "short"})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def _pass_sources(c, eid: str) -> dict:
+    """The source gate comes first for a topic with no links; proceed without sources."""
+    ep = wait_for(c, eid)
+    if ep.get("waiting_for") == "sources":
+        assert c.post(f"/api/episodes/{eid}/sources", json={"proceed": True}).status_code == 200
+        ep = wait_for(c, eid)
+    return ep
+
 # every visual source, both engines, all three music providers
 MATRIX = [
     ("slides", "ffmpeg", "audiocpp"),
@@ -49,7 +70,7 @@ def test_episode_runs_to_approved(client, source, engine, provider):
     ep, gates = run_to_done(client, eid)
 
     assert ep["status"] == "done"
-    assert gates == ["direction", "script", "storyboard"] + (["cost"] if provider == "lyria" else []) \
+    assert gates == ["sources", "direction", "script", "storyboard"] + (["cost"] if provider == "lyria" else []) \
         + ["package", "approval"]
 
     d = store.ep_dir(eid)
@@ -72,7 +93,7 @@ def test_episode_runs_to_approved(client, source, engine, provider):
 def test_gate_double_click_runs_once(client):
     set_settings(client, llm={"provider": "mock"})
     eid = _new_episode(client, "台灣夜市小吃的由來")
-    ep = wait_for(client, eid)
+    ep = _pass_sources(client, eid)
     assert ep["waiting_for"] == "direction"
     did = ep["files"]["brief"]["directions"][0]["id"]
 
@@ -89,7 +110,7 @@ def test_gate_double_click_runs_once(client):
 def test_bad_direction_id_is_400_and_keeps_gate(client):
     set_settings(client, llm={"provider": "mock"})
     eid = _new_episode(client, "電動機車換電站怎麼運作")
-    ep = wait_for(client, eid)
+    ep = _pass_sources(client, eid)
     r = client.post(f"/api/episodes/{eid}/direction", json={"id": "Z"})
     assert r.status_code == 400, r.text
     ep = client.get(f"/api/episodes/{eid}").json()  # still parked at the same gate, retryable
@@ -102,11 +123,12 @@ def test_bad_package_index_is_400(client):
     set_settings(client, llm={"provider": "mock"}, visuals={"source": "slides"},
                  render={"engine": "ffmpeg"}, music={"provider": "openverse"})
     eid = _new_episode(client)
-    for _ in range(4):  # direction, script, storyboard, then stop at package
+    for _ in range(5):  # sources, direction, script, storyboard, then stop at package
         ep = wait_for(client, eid)
         if ep["waiting_for"] == "package":
             break
-        {"direction": lambda: client.post(f"/api/episodes/{eid}/direction",
+        {"sources": lambda: client.post(f"/api/episodes/{eid}/sources", json={"proceed": True}),
+         "direction": lambda: client.post(f"/api/episodes/{eid}/direction",
                                           json={"id": ep["files"]["brief"]["directions"][0]["id"]}),
          "script": lambda: client.post(f"/api/episodes/{eid}/script", json={"approve": True}),
          "storyboard": lambda: client.post(f"/api/episodes/{eid}/storyboard", json={"approve": True}),
@@ -126,7 +148,7 @@ def test_reject_to_script_resets_storyboard_gate(client):
     """B3: a new script must be re-checked at the storyboard gate, not skipped."""
     set_settings(client, llm={"provider": "mock"})
     eid = _new_episode(client)
-    ep = wait_for(client, eid)
+    ep = _pass_sources(client, eid)
     client.post(f"/api/episodes/{eid}/direction", json={"id": ep["files"]["brief"]["directions"][0]["id"]})
     ep = wait_for(client, eid)
     client.post(f"/api/episodes/{eid}/script", json={"approve": True})

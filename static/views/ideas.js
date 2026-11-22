@@ -1,5 +1,5 @@
-import { $, $$, api, esc, fmtName, statusPill, toast, when } from "../lib.js?v=20261122b";
-import { openNewEpisodeModal } from "../modals.js?v=20261122b";
+import { $, $$, api, esc, fmtName, statusPill, toast, when } from "../lib.js?v=20261122c";
+import { openNewEpisodeModal } from "../modals.js?v=20261122c";
 
 const KIND_LABEL = { radar: "雷達", note: "筆記", link: "連結", quote: "金句" };
 
@@ -55,12 +55,15 @@ export async function viewIdeas(main) {
             <div class="idea-card-head">
               <span class="pill accent">${esc(KIND_LABEL[it.kind] || it.kind)}</span>
               <span class="pill">${fmtName(it.format)}</span>
-              ${it.heat ? `<span class="pill">熱度：${esc(it.heat)}</span>` : ""}
+              ${it.attention_score != null ? `<span class="pill" title="${esc(it.score_reason || "")}">注意力 ${it.attention_score}</span>` : it.heat ? `<span class="pill">熱度：${esc(it.heat)}</span>` : ""}
+              ${it.group_size > 1 ? `<span class="pill" title="${esc((it.members || []).map((m) => m.title).join("\n"))}">${it.group_size} 篇同事件</span>` : ""}
+              ${it.needs_more ? `<span class="pill">待補</span>` : ""}
               <span class="grow"></span>
               <span class="muted" style="font-size:12px">${when(it.found).slice(5, 16)}</span>
             </div>
             <div class="idea-title">${esc(it.title)}</div>
             ${bodyTxt && bodyTxt !== it.title ? `<div class="idea-body">${esc(bodyTxt)}</div>` : ""}
+            ${it.score_reason ? `<div class="muted" style="font-size:12px">評分依據：${esc(it.score_reason)}</div>` : ""}
             ${url ? `<div class="muted" style="word-break:break-all"><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">🔗 ${esc(url)}</a></div>` : it.source ? `<div class="muted">來源：${esc(it.source)}</div>` : ""}
             <div class="idea-foot">
               ${ep ? statusPill(ep) : ""}
@@ -87,7 +90,7 @@ export async function viewIdeas(main) {
                   </td>
                   <td><span class="pill accent">${esc(KIND_LABEL[it.kind] || it.kind)}</span></td>
                   <td><span class="pill">${fmtName(it.format)}</span></td>
-                  <td>${it.heat ? `<span class="pill" title="${esc(it.heat)}" style="max-width:66px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle">${esc(it.heat)}</span>` : `<span class="muted">—</span>`}</td>
+                  <td>${it.attention_score != null ? `<span class="pill" title="${esc(it.score_reason || "")}">${it.attention_score}</span>` : it.heat ? `<span class="pill" title="${esc(it.heat)}" style="max-width:66px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle">${esc(it.heat)}</span>` : `<span class="muted">—</span>`}</td>
                   <td class="muted" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(url || it.source || "")}">${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>` : esc(it.source || "—")}</td>
                   <td>${ep ? statusPill(ep) : `<span class="muted">未開拍</span>`}</td>
                   <td class="muted">${when(it.found).slice(5, 16)}</td>

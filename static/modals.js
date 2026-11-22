@@ -1,4 +1,4 @@
-import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261122b";
+import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261122c";
 
 export async function openSettingsModal() {
   const s = await api("/api/settings");
@@ -103,6 +103,15 @@ export async function openSettingsModal() {
       <div data-spane="pipeline" style="${activeTab === "pipeline" ? "" : "display:none"}">
         <label style="margin-top:0"><input type="checkbox" id="p-review_script" style="width:auto;margin-right:6px" ${s.pipeline.review_script ? "checked" : ""}> 講稿定稿前先給我看（初期建議開著；穩定後可關掉放手）</label>
         <label style="margin-top:0"><input type="checkbox" id="p-review_storyboard" style="width:auto;margin-right:6px" ${s.pipeline.review_storyboard !== false ? "checked" : ""}> 配音與生圖前先看分鏡（縮圖＋旁白＋預估秒數，便宜又早攔錯）</label>
+        <label style="margin-top:0"><input type="checkbox" id="p-radar_scoring" style="width:auto;margin-right:6px" ${s.pipeline.radar_scoring !== false ? "checked" : ""}> 雷達評分＋同事件聚類（0–100 注意力分數，每則留一句依據；關掉回到舊的一次掃描）</label>
+        <label style="margin-top:0"><input type="checkbox" id="p-radar_prefilter" style="width:auto;margin-right:6px" ${s.pipeline.radar_prefilter !== false ? "checked" : ""}> 寬召回預篩（PASS 進評分、BLOCK 丟掉、UNKNOWN 留下待補）</label>
+        <label style="margin-top:0"><input type="checkbox" id="p-radar_grouping" style="width:auto;margin-right:6px" ${s.pipeline.radar_grouping !== false ? "checked" : ""}> 把同一件事的多篇報導併成一組（其餘仍分開）</label>
+        <label style="margin-top:0"><input type="checkbox" id="p-source_audit" style="width:auto;margin-right:6px" ${s.pipeline.source_audit !== false ? "checked" : ""}> 蒐集後求證來源（列出材料沒支持的主張，不替材料補內容）</label>
+        <label style="margin-top:0"><input type="checkbox" id="p-source_gate" style="width:auto;margin-right:6px" ${s.pipeline.source_gate !== false ? "checked" : ""}> 沒有可讀的一手來源就停下來問我（關掉只標示、不擋）</label>
+        <div class="grid-2">
+          <div><label>雷達一次最多抽幾則候選</label><input id="p-radar_candidates_max" type="number" min="3" max="30" value="${s.pipeline.radar_candidates_max ?? 12}"></div>
+          <div><label>求證至少幾個可讀來源</label><input id="p-source_min_readable" type="number" min="1" max="5" value="${s.pipeline.source_min_readable ?? 1}"></div>
+        </div>
         <div class="grid-2">
           <div><label>審稿通過門檻（每個角色至少幾分）</label><input id="p-critique_threshold" type="number" min="1" max="10" value="${s.pipeline.critique_threshold}"></div>
           <div><label>最多修稿幾輪</label><input id="p-critique_max_rounds" type="number" min="1" max="6" value="${s.pipeline.critique_max_rounds}"></div>
@@ -285,7 +294,10 @@ export async function openSettingsModal() {
             made_for_kids: $("#y-made_for_kids", root).checked };
           s.pipeline.review_script = $("#p-review_script", root).checked;
           s.pipeline.review_storyboard = $("#p-review_storyboard", root).checked;
-          for (const k of ["critique_threshold", "critique_max_rounds", "title_count", "thumbnail_count", "radar_min", "radar_max"]) {
+          for (const k of ["radar_prefilter", "radar_scoring", "radar_grouping", "source_audit", "source_gate"]) {
+            s.pipeline[k] = $(`#p-${k}`, root).checked;
+          }
+          for (const k of ["critique_threshold", "critique_max_rounds", "title_count", "thumbnail_count", "radar_min", "radar_max", "radar_candidates_max", "source_min_readable"]) {
             s.pipeline[k] = +$(`#p-${k}`, root).value;
           }
           s.pipeline.slideshow_risk_max = +$("#p-slideshow_risk_max", root).value;

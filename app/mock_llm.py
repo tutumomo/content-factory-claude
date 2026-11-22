@@ -16,6 +16,52 @@ def respond(task: str, prompt: str) -> str:
     short = "直式短片" in prompt
     if task == "health":
         return "ok"
+    if task == "radar_candidates":
+        m = re.search(r"# 上限\n(\d+) 則", prompt)
+        n = min(int(m.group(1)) if m else 4, 4)
+        rows = [
+            {"title": "示範候選 A：本地 AI 模型發布新版", "summary": "示範模式：某開源模型發布新版，主打更長上下文與更低記憶體。",
+             "source": "示範來源", "url": "", "format": "long"},
+            {"title": "示範候選 B：同一件事的另一篇報導", "summary": "示範模式：另一家媒體報導同一個模型發布，補充了授權與價格。",
+             "source": "示範來源 2", "url": "", "format": "short"},
+            {"title": "示範候選 C：區塊鏈錢包更新", "summary": "示範模式：與頻道主題無關的日常產品更新。",
+             "source": "示範來源 3", "url": "", "format": "short"},
+            {"title": "示範候選 D：不明貼文", "summary": "示範模式：只有代名詞與表情符號，無法判斷內容。",
+             "source": "來源不明", "url": "", "format": "short"},
+        ]
+        return json.dumps({"candidates": rows[:n]}, ensure_ascii=False)
+    if task == "prefilter":
+        title = re.search(r"標題：(.+)", prompt)
+        title = title.group(1) if title else ""
+        if "區塊鏈" in title or "錢包" in title:
+            return json.dumps({"label": "BLOCK", "reason": "與頻道主題無關的日常更新"}, ensure_ascii=False)
+        if "不明" in title:
+            return json.dumps({"label": "UNKNOWN", "reason": "只有代名詞，待補材料"}, ensure_ascii=False)
+        return json.dumps({"label": "PASS", "reason": "有明確模型與發布事實"}, ensure_ascii=False)
+    if task == "selection_score":
+        title = re.search(r"標題：(.+)", prompt)
+        title = title.group(1) if title else ""
+        score = 74 if "B：" in title else (40 if "不明" in title else 82)
+        return json.dumps({"attentionScore": score, "reason": "示範模式：依事件份量與可用性給分"}, ensure_ascii=False)
+    if task == "group_batch":
+        m = re.search(r"# 輸入\n(.+)", prompt, re.S)
+        payload = json.loads(m.group(1)) if m else {}
+        new = payload.get("new") or {}
+        same = "同一件事" in str(new.get("title") or "")
+        groups = payload.get("groups") or []
+        decisions = [{"id": g.get("id"), "relation": "SAME_OCCURRENCE" if same else "UNRELATED",
+                      "confidence": 0.9 if same else 0.9,
+                      "note": "示範模式：同一模型發布的兩篇報導" if same else "示範模式：不同事件"}
+                     for g in groups]
+        return json.dumps({"query": new.get("title") or "", "decisions": decisions}, ensure_ascii=False)
+    if task == "sources_audit":
+        ok = int(re.search(r"成功讀取 (\d+) 個", prompt).group(1)) if re.search(r"成功讀取 (\d+) 個", prompt) else 0
+        notes = re.search(r"# 使用者筆記\n(.+?)\n\n# 來源數量", prompt, re.S)
+        notes_ok = bool(notes and len(notes.group(1).strip()) >= 80)
+        sufficient = ok > 0 or notes_ok
+        gaps = [] if sufficient else ["沒有可讀的一手來源", "示範模式：內容未經查證"]
+        return json.dumps({"sufficient": sufficient, "primary": [], "failed": [],
+                           "gaps": gaps, "note": "示範模式求證結果"}, ensure_ascii=False)
     if task == "radar":
         m = re.search(r"# 數量\n(\d+)–(\d+)", prompt)
         n = int(m.group(2)) if m else 5

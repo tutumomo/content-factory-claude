@@ -115,9 +115,11 @@ class Fakes:
                            audio=True)
 
     # music (all providers)
-    def music_generate(self, seconds: float, style: str = "", seed=None, out=None, force=False, eid=""):
-        self.hit("music:" + music.provider())
-        p = music.cache_dir() / f"fake_bgm_{music.provider()}.wav"
+    def music_generate(self, seconds: float, style: str = "", seed=None, out=None, force=False, eid="",
+                       source: str = ""):
+        name = (source or music.provider()).lower()
+        self.hit("music:" + name)
+        p = music.cache_dir() / f"fake_bgm_{name}.wav"
         if not p.exists():
             _tone_wav(p, max(8.0, seconds), freq=110.0, amp=0.2)
         return p
@@ -142,7 +144,7 @@ def data_dir() -> Path:
         shutil.rmtree(_DATA, ignore_errors=True)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def fakes(data_dir) -> Fakes:
     f = Fakes()
     mp = pytest.MonkeyPatch()
@@ -163,6 +165,7 @@ def fakes(data_dir) -> Fakes:
     mp.setattr(llm, "complete_json", short_json)
     mp.setattr(media, "tts_health", f.tts_health)
     mp.setattr(media, "tts", f.tts)
+    mp.setitem(media.TTS_SOURCES, "audiocpp", f.tts)
     mp.setattr(media, "align", f.align)
     mp.setattr(stock, "status", f.stock_status)
     mp.setattr(stock, "fetch", f.stock_fetch)
@@ -180,7 +183,7 @@ def fakes(data_dir) -> Fakes:
 
 
 @pytest.fixture(scope="session")
-def client(fakes):
+def client(data_dir):
     # one TestClient for the whole session: each startup starts another worker thread
     with TestClient(main.app) as c:
         yield c
@@ -209,6 +212,7 @@ def wait_for(c: TestClient, eid: str, timeout: float = 300) -> dict:
 
 # answers for every gate, used by run_to_done
 GATE_ACTIONS = {
+    "sources": lambda c, eid, ep: c.post(f"/api/episodes/{eid}/sources", json={"proceed": True}),
     "direction": lambda c, eid, ep: c.post(f"/api/episodes/{eid}/direction",
                                            json={"id": ep["files"]["brief"]["directions"][0]["id"]}),
     "script": lambda c, eid, ep: c.post(f"/api/episodes/{eid}/script", json={"approve": True}),

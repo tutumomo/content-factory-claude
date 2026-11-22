@@ -461,6 +461,13 @@ def _gate(eid: str, what: str | None, status: str = "waiting"):
         raise
 
 
+@app.post("/api/episodes/{eid}/sources")
+def sources(eid: str, body: dict = Body(...)):
+    with _gate(eid, "sources"):
+        pipeline.sources_decision(eid, body.get("notes", ""), body.get("source_urls") or [], bool(body.get("proceed")))
+    return {"ok": True}
+
+
 @app.post("/api/episodes/{eid}/direction")
 def direction(eid: str, body: dict = Body(...)):
     with _gate(eid, "direction"):

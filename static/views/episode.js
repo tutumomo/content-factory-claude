@@ -1,5 +1,5 @@
-import { $, $$, api, esc, fileUrl, fmtName, fmtShortDate, state, statusPill, stepper, toast } from "../lib.js?v=20261122b";
-import { loginGoogle } from "../modals.js?v=20261122b";
+import { $, $$, api, esc, fileUrl, fmtName, fmtShortDate, state, statusPill, stepper, toast } from "../lib.js?v=20261122c";
+import { loginGoogle } from "../modals.js?v=20261122c";
 
 function gateDirection(brief) {
   if (!brief) return "";
@@ -12,6 +12,21 @@ function gateDirection(brief) {
     <label>你的觀點與要 agent 注意的點</label><textarea id="dir-notes" placeholder="身為觀眾我最好奇的是…；這段要講細；不要講…"></textarea>
     <div class="row" style="margin-top:12px"><button type="button" class="btn primary" id="dir-go">用這個方向寫稿</button>
       <button type="button" class="btn" data-reject="brief">都不好，重給方向</button></div></div>`;
+}
+
+function gateSources(ep) {
+  const s = (ep.checks || {}).sources || {};
+  const gaps = s.gaps || [];
+  return `<div class="card gate"><h2>來源不足，先補資料</h2>
+    <p class="muted">${esc(s.value || "沒有抓到可讀的一手來源")}。依照防幻覺規則，沒有材料就不該硬寫；你可以補連結或補上你已知的一手資訊，也可以明確選擇在標註需求證的情況下繼續。</p>
+    ${gaps.length ? `<div class="warn">需求證或待補：<ul>${gaps.map((g) => `<li>${esc(g)}</li>`).join("")}</ul></div>` : ""}
+    ${s.note ? `<div class="muted">${esc(s.note)}</div>` : ""}
+    <label>補一手連結（一行一個，會重新抓取）</label>
+    <textarea id="src-urls" placeholder="https://…"></textarea>
+    <label>或補你已知的一手資訊（至少 80 字才算足夠）</label>
+    <textarea id="src-notes" placeholder="我實際測試過…；官方公告寫的是…"></textarea>
+    <div class="row" style="margin-top:12px"><button type="button" class="btn primary" id="src-go">補好了，重新求證</button>
+      <button type="button" class="btn" id="src-skip">來源不足也繼續（講稿會標註需求證）</button></div></div>`;
 }
 
 function critiqueTable(c) {
@@ -69,7 +84,7 @@ function gatePackage(pk, vertical, video) {
   if (!pk) return "";
   return `<div class="card gate"><h2>挑標題與縮圖</h2><p class="muted">這兩件事決定有沒有人點進來。挑你自己最想點的。</p>
     ${video ? `<details><summary>先看成片</summary><video src="${fileUrl(video)}" controls class="${vertical ? "vertical" : ""}"></video></details>` : ""}
-    <h2>標題</h2><div class="choices">${pk.titles.map((t, i) => `<div class="choice ${i === 0 ? "sel" : ""}" data-title="${i}"><b>${esc(t.text)}</b><div class="muted">${esc(t.angle)}</div></div>`).join("")}</div>
+    <h2>標題</h2><div class="choices">${pk.titles.map((t, i) => `<div class="choice ${i === 0 ? "sel" : ""}" data-title="${i}"><b>${esc(t.text)}</b><div class="muted">${esc(t.angle)}</div>${(t.warnings || []).length ? `<div class="warn">${t.warnings.map(esc).join("；")}</div>` : ""}</div>`).join("")}</div>
     <label>或自己寫一個</label><input id="pk-custom" placeholder="留空就用上面選的">
     <h2>縮圖</h2><div class="thumbs ${vertical ? "vertical" : ""}">${pk.thumbnails.map((t, i) => `<div class="thumb ${i === 0 ? "sel" : ""}" data-thumb="${i}"><img src="${fileUrl(t.file)}"></div>`).join("")}</div>
     <h2>IG 輪播</h2><div class="carousel">${(pk.carousel || []).map((c) => `<img src="${fileUrl(c.file)}">`).join("")}</div>
@@ -172,6 +187,7 @@ export async function viewEpisode(main, id) {
     html += `<div class="card muted">agent 正在「${esc(state.META.stage_label[ep.stage])}」。你可以先去做別的事，好了會出現在內容頁的待決定區。</div>`;
   }
 
+  if (ep.status === "waiting" && ep.waiting_for === "sources") html += gateSources(ep);
   if (F.verify?.sources) html += sourcesBlock(F.verify);
 
   if (ep.status === "waiting" && ep.waiting_for === "direction") html += gateDirection(F.brief);
@@ -223,6 +239,14 @@ export async function viewEpisode(main, id) {
       location.hash = "#/content";
     } catch (e) { toast(e.message); }
   };
+  $("#src-go", main) && ($("#src-go", main).onclick = () => post("sources", {
+    notes: $("#src-notes", main).value,
+    source_urls: $("#src-urls", main).value.split(/\s+/).filter((u) => u.startsWith("http")),
+    proceed: false,
+  }));
+  $("#src-skip", main) && ($("#src-skip", main).onclick = () => {
+    if (confirm("來源不足就繼續，講稿與說明欄只能標註需求證。確定嗎？")) post("sources", { proceed: true });
+  });
   $("#dir-go", main) && ($("#dir-go", main).onclick = () => post("direction", {
     id: $(".choice.sel[data-dir]", main).dataset.dir,
     notes: $("#dir-notes", main).value,
