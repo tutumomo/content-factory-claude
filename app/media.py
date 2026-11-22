@@ -164,25 +164,36 @@ def _tts_body(cfg: dict, text: str, emotion: str = "") -> dict:
     """
     if cfg.get("convert_simplified", True) and str(cfg.get("language", "")).lower() in ("chinese", "中文", "zh"):
         text = to_simplified(text)
-    opts = {k: v for k, v in (("language", cfg.get("language")), ("instruct", cfg.get("instruct"))) if v}
+    model = cfg["model"]
+    qwen = model.startswith("qwen3")
+    opts: dict = {}
+    if qwen and str(cfg.get("language") or "").strip():
+        # qwen3 needs the language hint. IndexTTS2.5 also *declares* a `language` param, but it
+        # reads the value aloud at the start of every chunk (measured 2026-11-22: sending
+        # "chinese" made ASR hear "柴尼是第一段旁白…"), so leave it out for every other model —
+        # its docs say empty/auto selects the language from the text. The 繁轉簡 check above
+        # still keys off cfg["language"], which is independent of what goes on the wire.
+        opts["language"] = cfg["language"]
+    if cfg.get("instruct"):
+        opts["instruct"] = cfg["instruct"]
     emo = (emotion or "").strip() or (cfg.get("emotion") or "")
     if emo:
-        if cfg["model"].startswith("qwen3"):
+        if qwen:
             # qwen3 takes a free-text instruct: fold the per-scene emotion into it
             opts["instruct"] = "，".join(x for x in (opts.get("instruct"), f"語氣：{emo}") if x)
         else:
             opts["emotion"] = emo
             opts["emotion_alpha"] = float(cfg.get("emotion_alpha") or 1.0)
-    body = {"model": cfg["model"], "input": text}
+    body = {"model": model, "input": text}
     # `voice` is the one field the settings UI writes; `ref_voice` is the deprecated field from
     # PR #4 and only seeds `voice` when that is empty (store.get_settings does the same).
     voice = (cfg.get("voice") or "").strip() or (cfg.get("ref_voice") or "").strip()
     library_voice = bool(voice) and voice not in BUILTIN_VOICES
-    if voice and (cfg["model"].startswith("qwen3") or library_voice):
+    if voice and (qwen or library_voice):
         # audio.cpp resolves `voice` against its reference library first; measured working with
         # model=index-tts2.5 and a voice_dir name (no voice_ref path needed).
         body["voice"] = voice
-        if library_voice and cfg["model"].startswith("qwen3"):
+        if library_voice and qwen:
             # voice_dir recordings carry no transcript, so ask Qwen3 for the speaker-embedding
             # clone instead of ICL (which would demand reference_text).
             opts["x_vector_only_mode"] = True
