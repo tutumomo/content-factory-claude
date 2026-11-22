@@ -1,4 +1,4 @@
-import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261122f";
+import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261122g";
 
 export async function openSettingsModal() {
   const s = await api("/api/settings");
@@ -571,6 +571,25 @@ async function setupYouTubePane(root, s, collect) {
   try { render(await api("/api/youtube/status")); } catch (e) { box.textContent = e.message; }
 }
 
+// One <select> with an <optgroup> per category, in the server's category order. The search box
+// only narrows the options; the selected card always stays in the list so the choice never changes silently.
+function styleOptionsHtml(styles, selectedId, query) {
+  const q = (query || "").trim().toLowerCase();
+  const match = (st) => !q || [st.name, st.category, st.summary, st.id].some((v) => (v || "").toLowerCase().includes(q));
+  const order = state.META?.style_categories || [];
+  const groups = new Map(order.map((c) => [c, []]));
+  for (const st of styles) {
+    if (st.id !== selectedId && !match(st)) continue;
+    const cat = st.category || "其他";
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat).push(st);
+  }
+  return [...groups].filter(([, items]) => items.length).map(([cat, items]) =>
+    `<optgroup label="${esc(cat)}">${items.map((st) =>
+      `<option value="${esc(st.id)}" ${st.id === selectedId ? "selected" : ""}>${esc(st.icon)} ${esc(st.name)}</option>`).join("")}</optgroup>`,
+  ).join("");
+}
+
 export async function openNewEpisodeModal(prefill = {}) {
   const [ch, stylesRes] = await Promise.all([api("/api/channel"), api("/api/styles")]);
   const styles = stylesRes.items || [];
@@ -594,10 +613,9 @@ export async function openNewEpisodeModal(prefill = {}) {
           </select>
         </div>
         <div>
-          <label>採用風格卡</label>
-          <select id="ne-style">
-            ${styles.map((st) => `<option value="${esc(st.id)}" ${st.id === defaultStyle ? "selected" : ""}>${esc(st.icon)} ${esc(st.name)}</option>`).join("")}
-          </select>
+          <label>採用風格卡（${styles.length} 張）</label>
+          <input id="ne-style-q" type="search" placeholder="搜尋風格卡名稱或分類" style="margin-bottom:6px">
+          <select id="ne-style">${styleOptionsHtml(styles, defaultStyle, "")}</select>
         </div>
       </div>
       <label>參考連結（一行一個；官方公告、對標影片頁、社群討論）</label>
@@ -607,6 +625,10 @@ export async function openNewEpisodeModal(prefill = {}) {
     footHtml: `<button type="button" class="btn" id="ne-cancel">取消</button><button type="button" class="btn primary" id="ne-go">開始製作</button>`,
     onMount: (root) => {
       $("#ne-format", root).value = prefill.format === "long" ? "long" : "short";
+      $("#ne-style-q", root).oninput = (e) => {
+        const sel = $("#ne-style", root);
+        sel.innerHTML = styleOptionsHtml(styles, sel.value, e.target.value);
+      };
       $("#ne-topic", root).focus();
       $("#ne-cancel", root).onclick = closeModal;
       $("#ne-go", root).onclick = async () => {
@@ -725,6 +747,7 @@ export function openStyleEditorModal(style, onSaved) {
   const isEdit = Boolean(style && style.id && !style.asCopy);
   const cats = state.META?.style_categories || ["科技數碼", "新聞快評", "知識科普", "觀點深度", "生活工具"];
   const cur = style || { icon: "✨", category: cats[0], words: [], avoid: [] };
+  const catOptions = cats.includes(cur.category) || !cur.category ? cats : [...cats, cur.category];
 
   openModal({
     title: isEdit ? `編輯風格卡：${cur.name}` : "新增風格卡",
@@ -734,7 +757,7 @@ export function openStyleEditorModal(style, onSaved) {
         <div><label>風格名稱</label><input id="st-name" value="${esc(cur.name || "")}" placeholder="例如：犀利科技短評"></div>
         <div class="row">
           <div style="width:90px"><label>圖示</label><input id="st-icon" value="${esc(cur.icon || "✨")}"></div>
-          <div class="grow"><label>分類</label><select id="st-cat">${cats.map((c) => `<option ${c === cur.category ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></div>
+          <div class="grow"><label>分類</label><select id="st-cat">${catOptions.map((c) => `<option ${c === cur.category ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></div>
         </div>
       </div>
       <label>一句話定位</label><input id="st-summary" value="${esc(cur.summary || "")}">
@@ -748,6 +771,7 @@ export function openStyleEditorModal(style, onSaved) {
         <div><label>常用詞（用頓號或逗號分隔）</label><input id="st-words" value="${esc((cur.words || []).join("、"))}"></div>
         <div><label>絕對避開（用頓號或逗號分隔）</label><input id="st-avoid" value="${esc((cur.avoid || []).join("、"))}"></div>
       </div>
+      <label>畫面方向（選填：鏡頭、光線、色調、材質、模板偏好，寫畫面與挑模板時套用）</label><textarea id="st-visual">${esc(cur.visual || "")}</textarea>
       ${!isEdit ? `<label style="margin-top:12px"><input type="checkbox" id="st-act" style="width:auto;margin-right:6px" checked> 建立後直接設為目前使用中風格</label>` : ""}`,
     footHtml: `
       ${isEdit && !cur.preset ? `<button type="button" class="btn danger" id="st-del" style="margin-right:auto">刪除這張風格卡</button>` : ""}
@@ -776,6 +800,7 @@ export function openStyleEditorModal(style, onSaved) {
           pacing: $("#st-pacing", root).value,
           words: $("#st-words", root).value,
           avoid: $("#st-avoid", root).value,
+          visual: $("#st-visual", root).value,
         };
         try {
           if (isEdit) {

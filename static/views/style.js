@@ -1,7 +1,8 @@
-import { $, $$, api, esc, state, toast } from "../lib.js?v=20261122f";
-import { openExtractStyleModal, openStyleEditorModal, openVideoStyleModal } from "../modals.js?v=20261122f";
+import { $, $$, api, esc, state, toast } from "../lib.js?v=20261122g";
+import { openExtractStyleModal, openStyleEditorModal, openVideoStyleModal } from "../modals.js?v=20261122g";
 
 let styleCatFilter = "全部";
+let styleQuery = "";
 let prefCatFilter = "全部";
 let prefStatusFilter = "all";
 
@@ -23,7 +24,11 @@ export async function viewStyle(main) {
 
     const cats = state.META?.style_categories || ["科技數碼", "新聞快評", "知識科普", "觀點深度", "生活工具"];
     const prefCats = state.META?.pref_cats || ["選題", "方向與觀點", "講稿語氣", "開頭與節奏", "畫面風格", "標題", "縮圖", "配音與字幕"];
-    const styles = (stylesRes.items || []).filter((s) => styleCatFilter === "全部" || s.category === styleCatFilter);
+    const allStyles = stylesRes.items || [];
+    const q = styleQuery.trim().toLowerCase();
+    const styles = allStyles.filter((s) => (styleCatFilter === "全部" || s.category === styleCatFilter)
+      && (!q || [s.name, s.summary, s.category, s.visual].some((v) => (v || "").toLowerCase().includes(q))));
+    const catCount = (c) => (c === "全部" ? allStyles.length : allStyles.filter((s) => s.category === c).length);
 
     const proposed = prefs.filter((p) => p.status === "proposed");
     const rules = prefs.filter((p) => {
@@ -59,8 +64,12 @@ export async function viewStyle(main) {
         <button type="button" class="btn sm" id="st-video">🎞 從參考影片分析</button>
         <button type="button" class="btn primary sm" id="st-new">＋ 新增風格卡</button>
       </div>
-      <div class="filter-pills" style="margin-bottom:12px">
-        ${["全部", ...cats].map((c) => `<button type="button" class="fpill ${styleCatFilter === c ? "on" : ""}" data-scat="${esc(c)}">${esc(c)}</button>`).join("")}
+      <div class="toolbar" style="margin-bottom:12px">
+        <div class="filter-pills">
+          ${["全部", ...cats].map((c) => `<button type="button" class="fpill ${styleCatFilter === c ? "on" : ""}" data-scat="${esc(c)}">${esc(c)} ${catCount(c)}</button>`).join("")}
+        </div>
+        <span class="grow"></span>
+        <input id="st-q" type="search" value="${esc(styleQuery)}" placeholder="搜尋風格卡" style="width:180px">
       </div>
       <div class="style-grid">
         ${styles.map((s) => {
@@ -76,6 +85,7 @@ export async function viewStyle(main) {
             </div>
             <div style="font-size:13px">${esc(s.summary || s.tone)}</div>
             ${s.opening ? `<div class="muted" style="font-size:12px"><b>開頭：</b>${esc(s.opening)}</div>` : ""}
+            ${s.visual ? `<div class="muted" style="font-size:12px"><b>畫面：</b>${esc(s.visual)}</div>` : ""}
             <div class="style-tags">
               ${(s.words || []).slice(0, 3).map((w) => `<span class="style-tag">＋ ${esc(w)}</span>`).join("")}
               ${(s.avoid || []).slice(0, 2).map((w) => `<span class="style-tag avoid">✕ ${esc(w)}</span>`).join("")}
@@ -88,6 +98,7 @@ export async function viewStyle(main) {
           </article>`;
         }).join("")}
       </div>
+      ${styles.length ? "" : `<div class="empty">沒有符合條件的風格卡。</div>`}
 
       <div class="row" style="margin:26px 0 10px">
         <h2 style="margin:0" class="grow">品味紀錄（寫作規則庫）</h2>
@@ -154,6 +165,7 @@ export async function viewStyle(main) {
     };
 
     $$("[data-scat]", main).forEach((b) => { b.onclick = () => { styleCatFilter = b.dataset.scat; load(); }; });
+    $("#st-q", main).onchange = $("#st-q", main).onsearch = (e) => { styleQuery = e.target.value; load(); };
     $("#st-new", main).onclick = () => openStyleEditorModal(null, load);
     $("#st-extract", main).onclick = () => openExtractStyleModal(eps, load);
     $("#st-video", main).onclick = () => openVideoStyleModal(load);

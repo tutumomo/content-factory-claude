@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .style_presets import EXTRA_PRESETS, NEW_CATEGORIES
+
 ROOT = Path(__file__).resolve().parent.parent
 # CF_DATA lets a second instance (tests, smoke runs) use its own data folder instead of the live one.
 DATA = Path(os.environ["CF_DATA"]).expanduser().resolve() if os.environ.get("CF_DATA") else ROOT / "data"
@@ -19,7 +21,8 @@ EPISODES = DATA / "episodes"
 _lock = threading.RLock()
 
 PREF_CATS = ["選題", "方向與觀點", "講稿語氣", "開頭與節奏", "畫面風格", "標題", "縮圖", "配音與字幕"]
-STYLE_CATEGORIES = ["科技數碼", "新聞快評", "知識科普", "觀點深度", "生活工具"]
+# the first five are the original categories (old cards use them); the rest group the newer built-in cards
+STYLE_CATEGORIES = ["科技數碼", "新聞快評", "知識科普", "觀點深度", "生活工具", *NEW_CATEGORIES]
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "llm": {
@@ -240,6 +243,9 @@ PRESET_STYLES: list[dict[str, Any]] = [
         "source": "內建預設",
     },
 ]
+# The five cards above are the originals: never edit or remove them (styles.json and old episodes use their ids).
+# Newer built-in cards live in app/style_presets.py and are appended to existing styles.json by get_styles().
+PRESET_STYLES += EXTRA_PRESETS
 
 
 def _read(path: Path, default: Any) -> Any:
@@ -642,6 +648,7 @@ def _norm_style(s: dict) -> dict:
         "pacing": str(s.get("pacing") or "").strip(),
         "words": _norm_list(s.get("words")),
         "avoid": _norm_list(s.get("avoid")),
+        "visual": str(s.get("visual") or "").strip(),   # 畫面方向；舊卡沒有這欄就是空字串
         "preset": bool(s.get("preset", False)),
         "source": str(s.get("source") or ("內建預設" if s.get("preset") else "自訂")).strip(),
     }
@@ -777,6 +784,8 @@ def style_block(style_id: str | None = None) -> str:
         lines.append("常用詞／口頭禪：" + "、".join(card["words"]))
     if card["avoid"]:
         lines.append("絕對避開：" + "、".join(card["avoid"]))
+    if card.get("visual"):
+        lines.append("畫面方向（寫每個畫面的 visual、挑 style 模板時依此）：" + card["visual"])
     return "\n".join(lines)
 
 
@@ -803,7 +812,9 @@ def new_episode(
 ) -> dict:
     with _lock:
         eid = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + slugify(topic)
-        chosen_style = style_id or get_styles()["active_id"]
+        styles = get_styles()
+        # an unknown id (deleted card, stale page) falls back to the active card instead of being stored
+        chosen_style = style_id if any(x["id"] == style_id for x in styles["items"]) else styles["active_id"]
         ep = {
             "id": eid,
             "topic": topic,

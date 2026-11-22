@@ -74,6 +74,7 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 - **分鏡閘門**：預設開啟。講稿審完先進分鏡站產 `output/storyboard.json` 與縮圖，你按核准才開始配音與出片；退件會帶一句理由回講稿重排。
 - **畫面變化檢查**：`slideshow_risk_max`（預設 0.7）比對相鄰畫面的灰階差異，靜止比例超過門檻就在「畫面變化」一項標紅，提示這種成片像簡報輪播。
 - **雲端預算閘**：Lyria 這類付費 API 每筆在呼叫前先記帳（`data/cost/ledger.jsonl`）。低於單筆門檻直接放行，超過就讓集數停在「核准花費」等你按，累計超過月上限直接拒絕。核准與用量都是逐集記帳。
+- **內建風格卡**：37 張，分 12 類（科技數碼、新聞快評、知識科普、觀點深度、生活工具、敘事紀實、動畫手繪、極簡圖表、商業廣告、復古懷舊、電影質感、社群短影音）。最早的 5 張在 `app/store.py`（id 與內容不改），其餘在 `app/style_presets.py`，id 規則是 `preset-<類別>-<名稱>`，上線後不改名。新卡多一欄「畫面方向」（`visual`：鏡頭、光線、色調、材質、模板偏好），會跟著風格卡注入提示詞，讓講稿寫每個畫面的 `visual` 與挑 `bigtype|papercut|corkboard|clean` 模板時有依據。舊的 `styles.json` 讀取時會自動補上缺少的內建卡，已改過的內容與使用中的卡不變；集數指定的風格卡不存在時，退回使用中的卡。
 - **參考影片風格分析**：風格頁「從參考影片分析」貼 YouTube／Shorts／Reels 連結（或本機影片路徑），用 yt-dlp 抓下來後量剪點節奏、鏡頭長度分佈與畫面統計，再交給 LLM 寫成風格卡。只做大綱分析，不下載成片保存。
 - **成片引擎**：`ffmpeg`（燒字幕）或 `remotion`（React 動畫：Ken Burns、標題與重點逐條進場、浮動字幕條）。Remotion 音軌仍由 ffmpeg 準備後再合成，失敗會自動退回 ffmpeg。Remotion 專案在 `remotion/`，第一次用要先 `npm install`。
 - **官方 H3 提示詞技能**：MiniMax 官方的 9 個 H3 skill（`h3-prompt-writing` 與 8 個風格生成器）放在 `.claude/skills/`，Claude 在專案內可直接引用；`h3-prompt-writing/references/base-en.txt` 是 T2VA／I2VA／FL2VA／L2VA 的三段式欄位規範，`app/h3video.py` 的提示詞模板照這份寫。
