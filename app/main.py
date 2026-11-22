@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import comfy, cost, llm, media, music, pipeline, prompts, sfx, sources, stock, stock_audio, store, video, video_analysis, youtube
@@ -76,6 +76,24 @@ def get_settings():
 def tts_models(base_url: str = ""):
     """Voice-capable models the audio.cpp server has registered (for the settings dropdown)."""
     return media.list_models(base_url or None)
+
+
+@app.get("/api/tts/voices")
+def tts_voices(base_url: str = "", model: str = ""):
+    """Reference voice library of the audio.cpp server, proxied so the browser never calls :8090."""
+    return media.list_voices(base_url or None, model or None)
+
+
+@app.post("/api/tts/test")
+def tts_test(body: dict = Body(default={})):
+    """Speak one short line with the settings shown in the form (not saved to any episode)."""
+    text = (body.get("text") or "這是參考聲音測試").strip()[:200] or "這是參考聲音測試"
+    over = body.get("tts") if isinstance(body.get("tts"), dict) else None
+    try:
+        wav = media.test_tts(text, emotion=body.get("emotion") or "", cfg=over)
+    except media.MediaError as e:
+        raise HTTPException(502, str(e))
+    return Response(content=wav, media_type="audio/wav")
 
 
 @app.put("/api/settings")

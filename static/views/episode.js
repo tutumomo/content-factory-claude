@@ -1,5 +1,5 @@
-import { $, $$, api, esc, fileUrl, fmtName, fmtShortDate, state, statusPill, stepper, toast } from "../lib.js?v=20261122c";
-import { loginGoogle } from "../modals.js?v=20261122c";
+import { $, $$, api, esc, fileUrl, fmtName, fmtShortDate, state, statusPill, stepper, toast } from "../lib.js?v=20261122d";
+import { loginGoogle } from "../modals.js?v=20261122d";
 
 function gateDirection(brief) {
   if (!brief) return "";
@@ -162,9 +162,10 @@ function youtubeBlock(ep) {
 }
 
 export async function viewEpisode(main, id) {
-  const [ep, stylesRes] = await Promise.all([
+  const [ep, stylesRes, health] = await Promise.all([
     api(`/api/episodes/${encodeURIComponent(id)}`),
     api("/api/styles").catch(() => ({ items: [] })),
+    api("/api/health").catch(() => null),
   ]);
   const styleCard = (stylesRes.items || []).find((s) => s.id === ep.style_id);
   const F = ep.files;
@@ -178,6 +179,10 @@ export async function viewEpisode(main, id) {
     </div>
     <div class="row"><h1 class="grow">${esc(ep.package_choice?.title || ep.topic)}</h1><span class="pill">${fmtName(ep.format)}</span>${statusPill(ep)}</div>
     ${stepper(ep)}`;
+
+  if (health?.tts?.needs_voice_ref && !["done", "error"].includes(ep.status)) {
+    html += `<div class="warn">未設定參考聲音：${esc(health.tts.detail)}（在「系統設定 → 配音 audio.cpp → 參考聲音」挑一個，按「測試發音」確認。）</div>`;
+  }
 
   if (ep.status === "error") {
     html += `<div class="card" style="border-color:var(--bad)"><b>出錯了</b><div class="muted">${esc(ep.error)}</div>
