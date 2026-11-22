@@ -179,10 +179,15 @@ GEMINI_TTS_DEFAULT = "gemini-2.5-flash-preview-tts"
 GEMINI_VOICE_DEFAULT = "Kore"
 
 
-def _to_wav(src: Path, out: Path, rate: int = 24000) -> Path:
-    """Any TTS output → 24 kHz mono 16-bit wav, so chunks from different sources can be joined."""
-    run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-ac", "1", "-ar", str(rate),
-         "-c:a", "pcm_s16le", str(out)])
+def _to_wav(src: Path, out: Path, rate: int = 24000, raw: bool = False) -> Path:
+    """Any TTS output → 24 kHz mono 16-bit wav, so chunks from different sources can be joined.
+
+    `raw` means headerless PCM (Gemini TTS returns audio/L16), which ffmpeg needs told up front.
+    """
+    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    if raw:
+        cmd += ["-f", "s16le", "-ar", str(rate), "-ac", "1"]
+    run(cmd + ["-i", str(src), "-ac", "1", "-ar", str(rate), "-c:a", "pcm_s16le", str(out)])
     return out
 
 
@@ -266,7 +271,7 @@ def gemini_tts(text: str, out: Path, emotion: str = "") -> Path:
     m = re.search(r"rate=(\d+)", str(part.get("mimeType") or ""))
     pcm = out.with_suffix(".gemini.pcm")
     pcm.write_bytes(raw)
-    return _to_wav(pcm, out, rate=int(m.group(1)) if m else 24000)
+    return _to_wav(pcm, out, rate=int(m.group(1)) if m else 24000, raw=True)
 
 
 TTS_SOURCES = {"audiocpp": tts, "edge": edge_tts, "gemini": gemini_tts}

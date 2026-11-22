@@ -249,6 +249,27 @@ class VoiceTests(Base):
         self.assertIn("spending", str(ctx.exception))
 
 
+class GeminiParseTests(Base):
+    def test_pcm_response_becomes_wav(self):
+        import base64
+        pcm = b"\x00\x00" * 24000  # one second of silence at 24 kHz
+
+        class R:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                return {"candidates": [{"content": {"parts": [{"inlineData": {
+                    "mimeType": "audio/L16;codec=pcm;rate=24000",
+                    "data": base64.b64encode(pcm).decode()}}]}}]}
+
+        out = self.data / "g.wav"
+        with mock.patch.object(media.httpx, "post", return_value=R()):
+            p = media.gemini_tts("測試", out)
+        self.assertEqual(p, out)
+        self.assertAlmostEqual(media.wav_duration(out), 1.0, places=1)
+
+
 class MusicTests(Base):
     def _plan(self, ok):
         self.probes(ok)
