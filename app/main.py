@@ -5,6 +5,7 @@ import csv
 import html
 import io
 import shutil
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -25,6 +26,10 @@ def _startup() -> None:
     cur = store.get_insights_summary()  # a restart in the middle of an analysis leaves this flag set
     if cur.get("analyzing"):
         store.save_insights_summary({**cur, "analyzing": False, "error": "上次分析被伺服器重啟中斷，請重新分析"})
+    radar = store.get_radar_state()  # same for a radar scan that was running at restart
+    if radar.get("status") == "running":
+        store.save_radar_state({**radar, "status": "error", "finished": time.time(), "error": "上次掃描被伺服器重啟中斷",
+                                "message": "上次掃描被伺服器重啟中斷，請重新掃描。"})
     for ep in store.list_episodes():  # resume work interrupted by a restart
         if (ep.get("youtube") or {}).get("status") in ("queued", "uploading"):
             store.update_episode(ep["id"], youtube={**ep["youtube"], "status": "error", "error": "上傳被伺服器重啟中斷，請重新上傳"})
@@ -346,11 +351,20 @@ def radar():
     return store.get_radar()
 
 
+@app.get("/api/radar/state")
+def radar_state():
+    return store.get_radar_state()
+
+
 @app.post("/api/radar/scan")
 def radar_scan(body: dict = Body(...)):
     seeds = (body.get("seeds") or "").strip()
     if not seeds:
         raise HTTPException(400, "請貼上線索（連結、熱門話題或筆記）")
+    store.save_radar_state({
+        "status": "running", "message": "正在抓取線索與整理候選…", "started": time.time(),
+        "finished": None, "added": 0, "failed_urls": [], "error": None,
+    })
     pipeline.enqueue("radar", seeds)
     return {"ok": True}
 
@@ -480,7 +494,7 @@ def _gate(eid: str, what: str | None, status: str = "waiting"):
 
 
 @app.post("/api/episodes/{eid}/sources")
-def sources(eid: str, body: dict = Body(...)):
+def episode_sources(eid: str, body: dict = Body(...)):
     with _gate(eid, "sources"):
         pipeline.sources_decision(eid, body.get("notes", ""), body.get("source_urls") or [], bool(body.get("proceed")))
     return {"ok": True}

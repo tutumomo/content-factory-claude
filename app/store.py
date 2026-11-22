@@ -566,6 +566,20 @@ def save_radar(items: list[dict]) -> None:
         _write(DATA / "radar.json", _norm_idea_list(items))
 
 
+def get_radar_state() -> dict:
+    """Last radar scan outcome, for the ideas page (never blocks on a running scan)."""
+    with _lock:
+        raw = _read(DATA / "radar_state.json", {})
+        return raw if isinstance(raw, dict) else {}
+
+
+def save_radar_state(state: dict) -> dict:
+    with _lock:
+        merged = {**get_radar_state(), **state}
+        _write(DATA / "radar_state.json", merged)
+        return merged
+
+
 def add_idea(data: dict) -> dict:
     with _lock:
         items = get_radar()
