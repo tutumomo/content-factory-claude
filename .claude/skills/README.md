@@ -112,6 +112,12 @@ Create surreal short videos that blend rough glowing hand-drawn animation with l
 
 [SKILL.md](handdrawn-live-video-generator/SKILL.md) · [SKILL.cn.md](handdrawn-live-video-generator/SKILL.cn.md)
 
+### music-caption-rewriter (from MiniMax Music 3)
+
+Added from [MiniMax-AI/MiniMax-Music3 `skills/`](https://github.com/MiniMax-AI/MiniMax-Music3/tree/main/skills) (upstream commit `efecc21`). Turns a short music description plus optional tagged lyrics into a structured MiniMax Music 3 caption (Global Metadata, Vocal Details, section-aware Arrangement). It routes to a style family in [`references/`](music-caption-rewriter/references/) and reads only the matching files among its 1,000 [`templates/`](music-caption-rewriter/templates/). Text only: no scripts or API calls. Useful for the `music.style` / script `music` field when the music engine is `minimax-music3` on audio.cpp.
+
+[SKILL.md](music-caption-rewriter/SKILL.md) · [README.md](music-caption-rewriter/README.md)
+
 ## Contribute
 
 These skills are still being improved, and community contributions are encouraged. If you optimize an existing skill or add a new one, open a PR — contributing or optimizing skills comes with API credit rewards.
