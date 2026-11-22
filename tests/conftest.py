@@ -149,10 +149,15 @@ def fakes(data_dir) -> Fakes:
     real_json = llm.complete_json
 
     def short_json(task, system, prompt):
-        """The mock script has 4–6 scenes; keep 3 so a matrix row stays a few seconds."""
+        """Mock script: 3 short scenes, so a matrix row renders in a few seconds.
+
+        The narration stays in the 2–9 char/s band the assemble stage checks for.
+        """
         data = real_json(task, system, prompt)
         if task in ("script", "revise") and isinstance(data, dict):
             data["scenes"] = data["scenes"][:3]
+            for i, sc in enumerate(data["scenes"]):
+                sc["narration"] = f"第{i + 1}段測試旁白，說明這個主題的重點。"
         return data
 
     mp.setattr(llm, "complete_json", short_json)
