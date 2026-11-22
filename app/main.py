@@ -5,6 +5,7 @@ import csv
 import html
 import io
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Request
@@ -139,12 +140,12 @@ def cost_status():
 
 @app.post("/api/episodes/{eid}/cost")
 def cost_approve(eid: str):
-    _need_wait(_ep(eid), "cost")
-    mc = store.get_settings()["music"]
-    usd = cost.price((mc.get("lyria_model") or "lyria-3-clip-preview").strip())
-    cost.approve(eid, usd)
-    store.log(eid, f"使用者核准雲端花費 ${usd:.2f}")
-    pipeline.enqueue("episode", eid)
+    with _gate(eid, "cost"):
+        mc = store.get_settings()["music"]
+        usd = cost.price((mc.get("lyria_model") or "lyria-3-clip-preview").strip())
+        cost.approve(eid, usd)
+        store.log(eid, f"使用者核准雲端花費 ${usd:.2f}")
+        pipeline.enqueue("episode", eid)
     return {"ok": True, "usd": usd}
 
 
@@ -173,10 +174,12 @@ def music_preview(body: dict = Body(default={})):
 
 @app.post("/api/music/open")
 def music_open(body: dict = Body(default={})):
-    p = Path(body.get("path") or "")
+    p = Path(body.get("path") or "").resolve()
     if not p.is_file():
         raise HTTPException(400, "找不到音檔")
-    return {"url": f"/files/{p.relative_to(store.DATA).as_posix()}"}
+    if store.DATA.resolve() not in p.parents:
+        raise HTTPException(400, "音檔不在資料夾內，無法播放")
+    return {"url": f"/files/{p.relative_to(store.DATA.resolve()).as_posix()}"}
 
 
 @app.get("/api/channel")
@@ -429,22 +432,46 @@ def set_schedule(eid: str, body: dict = Body(...)):
         raise HTTPException(400, str(e)) from e
 
 
-def _need_wait(ep: dict, what: str) -> None:
-    if ep["status"] != "waiting" or ep["waiting_for"] != what:
+@contextmanager
+def _gate(eid: str, what: str | None, status: str = "waiting"):
+    """Claim a gate atomically (status -> queued) before acting on it.
+
+    A double click or a second tab gets 409 instead of running the pipeline twice.
+    If the decision fails (bad input, error), the episode goes back to the gate it was at.
+    """
+    _ep(eid)
+    before = store.claim_episode(eid, status, what)
+    if before is None:
+        if status != "waiting":
+            raise HTTPException(409, "這一集目前的狀態不能做這個動作")
+        if what is None:
+            raise HTTPException(409, "只有在等你決定時才能退件")
         raise HTTPException(409, f"這一集目前不是在等「{pipeline.WAIT_LABEL[what]}」")
+    try:
+        yield before
+    except Exception:
+        store.update_episode(eid, status=before["status"], waiting_for=before.get("waiting_for"),
+                             error=before.get("error"))
+        raise
 
 
 @app.post("/api/episodes/{eid}/direction")
 def direction(eid: str, body: dict = Body(...)):
-    _need_wait(_ep(eid), "direction")
-    pipeline.choose_direction(eid, body["id"], body.get("notes", ""))
+    with _gate(eid, "direction"):
+        try:
+            pipeline.choose_direction(eid, str(body.get("id") or ""), body.get("notes", ""))
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
     return {"ok": True}
 
 
 @app.post("/api/episodes/{eid}/script")
 def script(eid: str, body: dict = Body(...)):
-    _need_wait(_ep(eid), "script")
-    pipeline.script_decision(eid, bool(body.get("approve")), body.get("feedback", ""), body.get("script"))
+    with _gate(eid, "script"):
+        try:
+            pipeline.script_decision(eid, bool(body.get("approve")), body.get("feedback", ""), body.get("script"))
+        except llm.LLMError as e:  # an edited script without readable scenes
+            raise HTTPException(400, str(e)) from e
     return {"ok": True}
 
 
@@ -460,55 +487,54 @@ def storyboard(eid: str):
 
 @app.post("/api/episodes/{eid}/storyboard")
 def storyboard_decide(eid: str, body: dict = Body(...)):
-    _need_wait(_ep(eid), "storyboard")
     approve = bool(body.get("approve"))
     notes = (body.get("notes") or "").strip()
     if not approve and not notes:
         raise HTTPException(400, "退回請留一句原因，系統會記下來")
-    pipeline.storyboard_decision(eid, approve, notes)
+    with _gate(eid, "storyboard"):
+        pipeline.storyboard_decision(eid, approve, notes)
     return {"ok": True}
 
 
 @app.post("/api/episodes/{eid}/package")
 def package(eid: str, body: dict = Body(...)):
-    _need_wait(_ep(eid), "package")
-    pipeline.package_choice(
-        eid,
-        int(body.get("title", 0)),
-        body.get("custom_title", ""),
-        int(body.get("thumb", 0)),
-        body.get("schedule", ""),
-    )
+    try:
+        title_idx, thumb_idx = int(body.get("title", 0)), int(body.get("thumb", 0))
+    except (TypeError, ValueError) as e:
+        raise HTTPException(400, "標題或縮圖編號不正確") from e
+    with _gate(eid, "package"):
+        try:
+            pipeline.package_choice(eid, title_idx, body.get("custom_title", ""), thumb_idx, body.get("schedule", ""))
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
     return {"ok": True}
 
 
 @app.post("/api/episodes/{eid}/approve")
 def approve(eid: str):
-    _need_wait(_ep(eid), "approval")
-    pipeline.approve(eid)
+    with _gate(eid, "approval"):
+        pipeline.approve(eid)
     return {"ok": True}
 
 
 @app.post("/api/episodes/{eid}/reject")
 def reject(eid: str, body: dict = Body(...)):
-    ep = _ep(eid)
-    if ep["status"] != "waiting":
-        raise HTTPException(409, "只有在等你決定時才能退件")
+    _ep(eid)
     back = body.get("back_to")
     if back not in pipeline.REJECT_TO:
         raise HTTPException(400, "退回階段不正確")
     if not (body.get("reason") or "").strip():
         raise HTTPException(400, "請留一句退件理由，系統會記下來")
-    pipeline.reject(eid, back, body["reason"])
+    with _gate(eid, None):
+        pipeline.reject(eid, back, body["reason"])
     return {"ok": True}
 
 
 @app.post("/api/episodes/{eid}/retry")
 def retry(eid: str):
-    ep = _ep(eid)
-    if ep["status"] != "error":
+    _ep(eid)
+    if not store.claim_episode(eid, "error"):
         raise HTTPException(409, "只有出錯的集數可以重試")
-    store.update_episode(eid, status="queued", error=None)
     pipeline.enqueue("episode", eid)
     return {"ok": True}
 
