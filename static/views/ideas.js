@@ -1,5 +1,5 @@
-import { $, $$, api, esc, fmtName, statusPill, toast, when } from "../lib.js?v=20261122d";
-import { openNewEpisodeModal } from "../modals.js?v=20261122d";
+import { $, $$, api, esc, fmtName, statusPill, toast, when } from "../lib.js?v=20261122e";
+import { openNewEpisodeModal } from "../modals.js?v=20261122e";
 
 const KIND_LABEL = { radar: "雷達", note: "筆記", link: "連結", quote: "金句" };
 

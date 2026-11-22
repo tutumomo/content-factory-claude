@@ -1,4 +1,4 @@
-import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261122d";
+import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261122e";
 
 export async function openSettingsModal() {
   const s = await api("/api/settings");
@@ -60,25 +60,20 @@ export async function openSettingsModal() {
         <input id="t-base_url" value="${esc(s.tts.base_url)}">
         <div class="grid-2">
           <div><label>TTS 模型 id</label><select id="t-model"><option value="${esc(s.tts.model)}" selected>${esc(s.tts.model)}</option></select></div>
-          <div><label>參考音色</label><select id="t-voice"><option value="${esc(s.tts.voice || "")}" selected>${esc(s.tts.voice || "（模型預設）")}</option></select></div>
+          <div><label>聲音</label><select id="t-voice"><option value="${esc(s.tts.voice || "")}" selected>${esc(s.tts.voice || "（模型預設）")}</option></select></div>
         </div>
-        <div class="muted" style="margin-top:4px">內建聲音（vivian…）只適用 Qwen3 CustomVoice；參考音色庫來自 audio.cpp 的 voice_dir，要搭配 clon 模型（qwen3 Base、IndexTTS2.5 等）。留空＝模型預設。</div>
-        <label style="margin-top:10px">參考聲音（audio.cpp 音色庫；index-tts2.5 這類聲音複製模型必選）</label>
-        <div class="row">
-          <select id="t-ref_voice" class="grow"><option value="">（未設定）</option></select>
-          <button type="button" class="btn" id="t-voices-refresh">重新讀取</button>
-        </div>
-        <div class="muted" id="t-voices-out" style="margin-top:4px">讀取參考聲音清單…</div>
+        <div class="row" style="margin-top:4px"><button type="button" class="btn" id="t-voices-refresh">重新讀取聲音清單</button><span class="muted" id="t-voices-out">讀取聲音清單…</span></div>
+        <div class="muted" id="t-voice-note" style="margin-top:4px">聲音清單跟著模型變：customvoice 模型列內建聲音（vivian…），clon 模型（index-tts2.5、qwen3 Base）列 audio.cpp 音色庫，必選一個。留空＝模型預設。</div>
         <div class="row" style="margin-top:6px">
           <button type="button" class="btn" id="t-test-voice">測試發音</button>
           <span class="muted" id="t-test-out"></span>
         </div>
         <div id="t-test-player" style="margin-top:8px"></div>
-        <div class="muted" style="margin-top:4px">測試發音用上面表單目前的設定合成一句「這是參考聲音測試」，不會存進任何一集。設定參考聲音時它優先於上面的參考音色。</div>
+        <div class="muted" style="margin-top:4px">測試發音用上面表單目前的設定合成一句「這是參考聲音測試」，不會存進任何一集。</div>
         <div class="row" style="margin-top:4px"><button type="button" class="btn" id="t-models-refresh">重新讀取模型清單</button><span class="muted" id="t-models-out"></span><span class="muted">清單來自 audio.cpp 已下載的語音模型</span></div>
         <label>語氣指示</label>
         <input id="t-instruct" value="${esc(s.tts.instruct)}">
-        <label>參考音檔路徑（單一檔案，優先於上方參考音色；index-tts2.5、zonos3-mini 必填；qwen3 模型可留空）</label>
+        <label>參考音檔路徑（單一檔案，優先於上面的聲音；通常留空，用上面的聲音清單就好）</label>
         <input id="t-voice_ref" value="${esc(s.tts.voice_ref || "")}" placeholder="/home/altos/…/ref.wav">
         <div class="grid-2">
           <div><label>情緒示範文字（index-tts2.5 用）</label><input id="t-emotion" value="${esc(s.tts.emotion || "")}"></div>
@@ -295,7 +290,7 @@ export async function openSettingsModal() {
           for (const k of ["provider", "claude_model", "openai_base_url", "openai_model", "openai_key_env"]) {
             s.llm[k] = $(`#s-${k}`, root).value;
           }
-          for (const k of ["base_url", "model", "voice", "ref_voice", "instruct", "voice_ref", "emotion"]) {
+          for (const k of ["base_url", "model", "voice", "instruct", "voice_ref", "emotion"]) {
             s.tts[k] = $(`#t-${k}`, root).value;
           }
           s.tts.emotion_alpha = +$("#t-emotion_alpha", root).value;
@@ -393,7 +388,7 @@ export async function openSettingsModal() {
         setupSourcesPane(root);
         setupYouTubePane(root, s, collect);
         setupTtsModels(root, s);
-        setupTtsVoices(root, s, collect);
+        setupVoicePicker(root, s, collect);
         setupVisualPane(root, s, collect);
         api("/api/cost").then((c) => {
           const el = $("#p-cost-spent", root);
@@ -461,9 +456,8 @@ async function setupTtsModels(root, s) {
         sel.insertAdjacentHTML("afterbegin", `<option value="${esc(keep)}" selected>${esc(keep)}（伺服器上沒有這個 id）</option>`);
       }
       if (!rows.length) sel.innerHTML = `<option value="${esc(keep)}" selected>${esc(keep)}</option>`;
-      fillVoices(root, s, res);
       out.textContent = res.ok
-        ? `已讀到 ${rows.length} 個語音模型、${(res.voices || []).length} 個參考音色`
+        ? `已讀到 ${rows.length} 個語音模型`
         : (res.detail || "伺服器上沒有語音模型");
     } catch (e) {
       sel.innerHTML = `<option value="${esc(keep)}" selected>${esc(keep)}</option>`;
@@ -475,46 +469,39 @@ async function setupTtsModels(root, s) {
   await load();
 }
 
-function fillVoices(root, s, res) {
-  const vsel = $("#t-voice", root);
-  if (!vsel) return;
-  const cur = vsel.value || s.tts?.voice || "";
-  const opt = (v) => `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(v)}</option>`;
-  vsel.innerHTML = `<option value="" ${cur ? "" : "selected"}>（模型預設）</option>`
-    + `<optgroup label="內建聲音（Qwen3 CustomVoice）">${(res.builtin || []).map(opt).join("")}</optgroup>`
-    + ((res.voices || []).length ? `<optgroup label="參考音色庫">${res.voices.map(opt).join("")}</optgroup>` : "");
-  if (cur && ![...vsel.options].some((o) => o.value === cur)) {
-    vsel.insertAdjacentHTML("beforeend", `<optgroup label="目前設定">${opt(cur)}</optgroup>`);
-  }
-}
-
-/** 參考聲音 dropdown: names from audio.cpp's own voice library, through our proxy. */
-function setupTtsVoices(root, s, collect) {
-  const sel = $("#t-ref_voice", root);
+/** The one voice dropdown. Its list follows the selected model: builtin speaker names for
+ *  customvoice models, the audio.cpp voice library for clon models. Both write tts.voice. */
+function setupVoicePicker(root, s, collect) {
+  const sel = $("#t-voice", root);
   const out = $("#t-voices-out", root);
+  const note = $("#t-voice-note", root);
   const tsel = $("#t-model", root);
   if (!sel) return;
 
   const load = async () => {
-    const keep = sel.value || s.tts?.ref_voice || "";
+    const keep = sel.value || s.tts?.voice || "";
     const model = (tsel?.value || s.tts.model || "").trim();
-    out.textContent = "讀取參考聲音清單…";
+    out.textContent = "讀取聲音清單…";
     try {
       const base = $("#t-base_url", root)?.value || s.tts.base_url;
       const res = await api(`/api/tts/voices?model=${encodeURIComponent(model)}&base_url=${encodeURIComponent(base)}`);
       const voices = res.voices || [];
-      sel.innerHTML = `<option value="">（未設定）</option>`
+      sel.innerHTML = `<option value="" ${keep ? "" : "selected"}>（模型預設）</option>`
         + voices.map((v) => `<option value="${esc(v)}" ${v === keep ? "selected" : ""}>${esc(v)}</option>`).join("");
       if (keep && !voices.includes(keep)) {
         sel.insertAdjacentHTML("beforeend", `<option value="${esc(keep)}" selected>${esc(keep)}（清單裡沒有這個名字）</option>`);
       }
-      out.textContent = res.error
-        ? res.error
-        : `音色庫有 ${voices.length} 個參考聲音（模型 ${model}）`;
+      const what = (res.kind || "library") === "builtin" ? "模型內建聲音" : "audio.cpp 音色庫";
+      out.textContent = res.error ? res.error : `${what}：${voices.length} 個選項（模型 ${model}）`;
+      if (note) {
+        note.textContent = (res.kind || "library") === "builtin"
+          ? "這個模型用內建聲音（vivian…）。留空＝模型預設。"
+          : "這個模型是聲音複製（clon），要從 audio.cpp 音色庫挑一個參考聲音，不然合成會失敗、配音會降級。";
+      }
     } catch (e) {
-      sel.innerHTML = `<option value="">（未設定）</option>`
+      sel.innerHTML = `<option value="">（模型預設）</option>`
         + (keep ? `<option value="${esc(keep)}" selected>${esc(keep)}</option>` : "");
-      out.textContent = `讀不到參考聲音清單：${e.message}`;
+      out.textContent = `讀不到聲音清單：${e.message}`;
     }
   };
 
