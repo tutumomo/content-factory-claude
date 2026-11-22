@@ -759,10 +759,16 @@ def youtube_upload(eid: str):
 
 # ---------- files & SPA ----------
 
+_FILES_ROOTS = ("episodes", "music", "sfx", "stock", "tmp")  # settings.json / youtube token / cost stay private
+
+
 @app.get("/files/{path:path}")
 def files(path: str):
     p = (store.DATA / path).resolve()
-    if store.DATA.resolve() not in p.parents or not p.is_file():
+    root = store.DATA.resolve()
+    if root not in p.parents or not p.is_file():
+        raise HTTPException(404)
+    if p.relative_to(root).parts[0] not in _FILES_ROOTS:
         raise HTTPException(404)
     return FileResponse(p)
 

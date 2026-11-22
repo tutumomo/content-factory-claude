@@ -146,3 +146,13 @@ def test_reject_to_script_resets_storyboard_gate(client):
     client.post(f"/api/episodes/{eid}/script", json={"approve": True})
     ep = wait_for(client, eid)
     assert ep["waiting_for"] == "storyboard", "重寫講稿後應再過一次分鏡閘門"
+
+
+def test_files_route_does_not_serve_settings_or_tokens(client, data_dir):
+    (data_dir / "settings.json").write_text("{}", "utf-8")
+    (data_dir / "youtube").mkdir(exist_ok=True)
+    (data_dir / "youtube/token.json").write_text("{}", "utf-8")
+    assert client.get("/files/settings.json").status_code == 404
+    assert client.get("/files/youtube/token.json").status_code == 404
+    served = next((data_dir / "sfx").glob("*.wav"))
+    assert client.get(f"/files/sfx/{served.name}").status_code == 200
