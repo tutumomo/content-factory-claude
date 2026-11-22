@@ -32,6 +32,15 @@ VID = "6oM6gawZ-sQ"
     (f"https://music.youtube.com/watch?v={VID}", VID, ""),
     (f"https://www.youtube.com/watch?v={VID}&list=PLabc123", VID, "PLabc123"),
     ("https://www.youtube.com/playlist?list=PLabc123", "", "PLabc123"),
+    ("https://youtube.com/shorts/" + VID, VID, ""),
+    ("https://youtube.com/live/" + VID, VID, ""),
+    (f"https://m.youtube.com/shorts/{VID}?feature=share", VID, ""),
+    # short / truncated ids still count as YouTube links, so yt-dlp can say the id is incomplete
+    ("https://www.youtube.com/shorts/abc123", "abc123", ""),
+    ("https://youtube.com/shorts/abc123", "abc123", ""),
+    ("https://www.youtube.com/live/abc123", "abc123", ""),
+    ("https://youtube.com/live/abc123?si=x", "abc123", ""),
+    ("https://m.youtube.com/watch?v=abc123", "abc123", ""),
 ])
 def test_youtube_links_are_recognised(url, vid, plist):
     assert yt_page.is_youtube_url(url)
@@ -42,7 +51,10 @@ def test_youtube_links_are_recognised(url, vid, plist):
     "https://example.com/watch?v=6oM6gawZ-sQ",
     "https://notyoutube.com/watch?v=6oM6gawZ-sQ",
     "https://www.youtube.com/@somechannel",
-    "https://www.youtube.com/watch?v=short",
+    "https://www.youtube.com/shorts/",
+    "https://www.youtube.com/live/",
+    "https://www.youtube.com/watch?v=",
+    "https://www.youtube.com/shorts/abc!123",
     "https://aihot.news/",
     "ftp://youtu.be/6oM6gawZ-sQ",
 ])
@@ -280,6 +292,8 @@ def test_cookie_file_is_passed_when_present(monkeypatch, tmp_path):
      "login", "cookies"),
     ("ERROR: [youtube] 6oM6gawZ-sQ: Join this channel to get access to members-only content",
      "members", "會員限定"),
+    ("ERROR: [youtube:truncated_id] abc123: Incomplete YouTube ID abc123. URL https://www.youtube.com/watch?v=abc123 looks truncated.",
+     "truncated", "影片 ID 不完整"),
     ("ERROR: [youtube] 6oM6gawZ-sQ: Unable to extract player response; please report this issue",
      "other", "這支影片取不到中繼資料：Unable to extract player response"),
 ])
@@ -378,6 +392,33 @@ def test_private_video_does_not_try_the_api(monkeypatch):
     monkeypatch.setattr(youtube, "_access_token", lambda: pytest.fail("私人影片不用再問 API"))
     res = yt_page.fetch(f"https://youtu.be/{VID}")
     assert res["kind"] == "private"
+
+
+@pytest.mark.parametrize("url,vid", [
+    (f"https://www.youtube.com/shorts/{VID}", VID),
+    (f"https://youtube.com/shorts/{VID}", VID),
+    (f"https://www.youtube.com/live/{VID}", VID),
+    (f"https://youtube.com/live/{VID}", VID),
+    ("https://www.youtube.com/shorts/abc123", "abc123"),
+    ("https://youtube.com/live/abc123", "abc123"),
+])
+def test_shorts_and_live_go_to_yt_dlp_not_html(monkeypatch, url, vid):
+    monkeypatch.setattr(pipeline.httpx, "get", lambda *a, **k: pytest.fail("不該走一般 HTML 抓取"))
+    asked = []
+    fake_ydl(monkeypatch, lambda u: (asked.append(u), info(id=vid))[1])
+    fake_http(monkeypatch, {})
+    res = pipeline.fetch_page(url, 3000)
+    assert res["ok"] is True and res["source"] == "yt-dlp"
+    assert asked == [yt_page.watch_url(vid)]
+
+
+def test_truncated_id_says_so_and_skips_the_api(monkeypatch):
+    fake_ydl(monkeypatch, error=yt_dlp.utils.DownloadError(
+        "ERROR: [youtube:truncated_id] abc123: Incomplete YouTube ID abc123. URL looks truncated."))
+    monkeypatch.setattr(youtube, "_access_token", lambda: pytest.fail("ID 不完整不用再問 API"))
+    res = pipeline.fetch_page("https://www.youtube.com/shorts/abc123", 3000)
+    assert res["ok"] is False and res["kind"] == "truncated"
+    assert "11 碼" in res["reason"] and "反爬" not in res["reason"]
 
 
 # ---------- web pages unchanged ----------

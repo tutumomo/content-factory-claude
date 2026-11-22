@@ -38,7 +38,9 @@ COOKIE_FILE_NAME = "youtube_cookies.txt"   # data/youtube_cookies.txt, Netscape 
 
 _HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
           "youtube-nocookie.com", "www.youtube-nocookie.com", "youtu.be", "www.youtu.be"}
-_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
+# Real video ids are 11 characters, but a link on a YouTube host with a shorter or longer id is
+# still a YouTube link: send it to yt-dlp, which names a truncated id, instead of the HTML fetch.
+_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class _Timeout(Exception):
@@ -155,6 +157,8 @@ def _first_line(msg: str) -> str:
 def classify_error(msg: str) -> tuple[str, str]:
     """(kind, owner-facing reason) for a yt-dlp error text."""
     low = str(msg).lower()
+    if "incomplete youtube id" in low or "looks truncated" in low:
+        return "truncated", "影片 ID 不完整（YouTube 影片 ID 是 11 碼），連結可能被截斷，請重新複製完整網址"
     if "private video" in low:
         return "private", "這支影片是私人影片，只有上傳者授權的帳號看得到"
     if "confirm your age" in low or "age-restricted" in low or "inappropriate for some users" in low:
@@ -411,7 +415,7 @@ def fetch(url: str, limit: int = 6000) -> dict:
                 "bytes": len(body.encode("utf-8")), "kind": "ok", "note": note,
                 "source": "yt-dlp", "subtitle": label, "transcript_chars": len(text)}
 
-    if vid and err_kind not in ("private", "upcoming"):
+    if vid and err_kind not in ("private", "upcoming", "truncated"):
         meta, why = api_metadata(vid)
         if meta:
             body = _body(meta, "", "", limit)
