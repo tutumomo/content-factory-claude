@@ -159,4 +159,6 @@ def credits(sources: list[dict]) -> str:
 def save_sources(assets: Path, sources: list[dict]) -> None:
     if not sources:
         return
-    (assets / "sources.json").write_text(json.dumps(sources, ensure_ascii=False, indent=2), "utf-8")
+    # fetch() hands back a Path for the downloaded file; keep the record JSON-safe
+    rows = [{k: (str(v) if isinstance(v, Path) else v) for k, v in s.items()} for s in sources]
+    (assets / "sources.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), "utf-8")

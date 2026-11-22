@@ -26,10 +26,20 @@ WAIT_LABEL = {"direction": "挑方向", "script": "看講稿", "storyboard": "�
 
 _q: "queue.Queue[tuple]" = queue.Queue()
 _current: dict = {}
+_pending: set[tuple] = set()          # (kind, args) of per-episode jobs waiting in _q
+_pending_lock = threading.Lock()
+_DEDUPE = ("episode", "youtube_upload")
 
 
-def enqueue(kind: str, *args) -> None:
+def enqueue(kind: str, *args) -> bool:
+    """Queue a job. The same episode is never queued twice; returns False when it already is."""
+    if kind in _DEDUPE:
+        with _pending_lock:
+            if (kind, args) in _pending:
+                return False
+            _pending.add((kind, args))
     _q.put((kind, args))
+    return True
 
 
 def busy() -> dict:
@@ -39,6 +49,8 @@ def busy() -> dict:
 def _worker() -> None:
     while True:
         kind, args = _q.get()
+        with _pending_lock:  # released when the job starts, so a gate reached during this run can queue the next one
+            _pending.discard((kind, args))
         _current.clear()
         _current.update({"kind": kind, "args": list(args)})
         try:
@@ -194,9 +206,7 @@ def st_critique(ep: dict) -> bool:
         store.write_json(eid, "script.json", scr)
     last = rounds[-1]["reviews"]
     passed = all(r["score"] >= cfg["critique_threshold"] for r in last.values())
-    ep = store.get_episode(eid)
-    ep["checks"]["critique"] = {"ok": passed, "value": "、".join(f"{prompts.CRITICS[k][0]} {v['score']}" for k, v in last.items())}
-    store.save_episode(ep)
+    ep = store.update_check(eid, "critique", {"ok": passed, "value": "、".join(f"{prompts.CRITICS[k][0]} {v['score']}" for k, v in last.items())})
     if cfg["review_script"] or not passed:
         if not ep.get("script_approved"):
             wait(eid, "script")
@@ -266,9 +276,7 @@ def st_storyboard(ep: dict) -> bool:
     store.write_json(eid, "output/storyboard.json",
                      {"scenes": items, "est_total": round(est_total, 1), "size": list(size),
                       "format": ep["format"], "created": time.time()})
-    ep = store.get_episode(eid)
-    ep["checks"]["storyboard"] = {"ok": True, "value": f"{total} 個畫面，預估 {est_total:.0f} 秒"}
-    store.save_episode(ep)
+    store.update_check(eid, "storyboard", {"ok": True, "value": f"{total} 個畫面，預估 {est_total:.0f} 秒"})
     store.log(eid, f"分鏡就緒：{total} 個畫面，預估 {est_total:.0f} 秒")
     wait(eid, "storyboard")
     return False
@@ -692,8 +700,10 @@ def run_insights_analyze() -> None:
 # ---------- user decisions ----------
 
 def choose_direction(eid: str, direction_id: str, notes: str) -> None:
-    brief = store.read_json(eid, "brief.json")
-    d = next(x for x in brief["directions"] if x["id"] == direction_id)
+    brief = store.read_json(eid, "brief.json") or {}
+    d = next((x for x in brief.get("directions") or [] if x.get("id") == direction_id), None)
+    if d is None:
+        raise ValueError(f"沒有方向 {direction_id or '（空）'}")
     store.update_episode(eid, direction=d, direction_notes=notes, stage="script")
     store.log(eid, f"使用者選方向 {direction_id}")
     enqueue("episode", eid)
@@ -727,8 +737,13 @@ def storyboard_decision(eid: str, approve: bool, notes: str = "") -> None:
 
 
 def package_choice(eid: str, title_idx: int, custom_title: str, thumb_idx: int, schedule: str) -> None:
-    pk = store.read_json(eid, "package.json")
-    title = custom_title.strip() or pk["titles"][title_idx]["text"]
+    pk = store.read_json(eid, "package.json") or {}
+    titles, thumbs = pk.get("titles") or [], pk.get("thumbnails") or []
+    if not 0 <= thumb_idx < len(thumbs):
+        raise ValueError(f"沒有第 {thumb_idx + 1} 張縮圖")
+    if not custom_title.strip() and not 0 <= title_idx < len(titles):
+        raise ValueError(f"沒有第 {title_idx + 1} 個標題")
+    title = custom_title.strip() or titles[title_idx]["text"]
     store.update_episode(eid, package_choice={"title": title, "thumb": thumb_idx}, schedule=schedule or None, stage="review")
     store.log(eid, f"使用者選標題「{title}」、縮圖 {thumb_idx + 1}")
     enqueue("episode", eid)
@@ -745,10 +760,11 @@ REJECT_TO = {"brief": "brief", "script": "script", "assemble": "assemble", "pack
 def reject(eid: str, back_to: str, reason: str) -> None:
     _remember(eid, {"brief": "方向", "script": "講稿", "assemble": "畫面與配音", "package": "標題與縮圖"}[back_to], reason)
     reset = {"approved": False, "stage": REJECT_TO[back_to]}
+    # a new script needs a new storyboard check, or the storyboard gate is skipped on the way back
     if back_to == "brief":
-        reset.update(direction=None, script_approved=False, package_choice=None)
+        reset.update(direction=None, script_approved=False, storyboard_approved=False, package_choice=None)
     elif back_to == "script":
-        reset.update(script_approved=False, package_choice=None, direction_notes=(store.get_episode(eid).get("direction_notes") or "") + f"\n退件意見：{reason}")
+        reset.update(script_approved=False, storyboard_approved=False, package_choice=None, direction_notes=(store.get_episode(eid).get("direction_notes") or "") + f"\n退件意見：{reason}")
     elif back_to == "package":
         reset.update(package_choice=None)
     store.update_episode(eid, **reset)
