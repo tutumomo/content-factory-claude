@@ -111,6 +111,14 @@ class ChainTests(Base):
         self.settings(music={"provider": "audiocpp"})
         self.assertEqual(sources.chain("music"), ["audiocpp", "openverse"])
 
+    def test_section_level_chain_fields_are_honoured(self):
+        # the shape the review doc proposed: tts.chain / visuals.chain next to the old fields
+        self.settings(tts={"chain": ["edge", "gemini"]}, visuals={"chain": ["stock", "slides"]})
+        self.assertEqual(sources.chain("voice"), ["edge"])          # gemini is paid, switch off
+        self.assertEqual(sources.chain("visuals"), ["stock", "slides"])
+        self.settings(sources={"allow_paid_fallback": True})
+        self.assertEqual(sources.chain("voice"), ["edge", "gemini"])
+
     def test_voice_chain_defaults(self):
         self.assertEqual(sources.chain("voice"), ["audiocpp", "edge"])  # gemini paid, off by default
         self.settings(sources={"allow_paid_fallback": True})

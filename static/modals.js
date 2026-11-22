@@ -320,7 +320,12 @@ export async function openSettingsModal() {
             if (!el) continue;
             const chain = el.value.split(/[,，\s]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);
             if (chain.length) s.sources[k] = { ...(s.sources[k] || {}), chain };
-            else delete s.sources[k];
+            else {
+              delete s.sources[k];
+              // empty means "derive from the source dropdown"; drop a chain set through the API too
+              const section = { visuals: "visuals", voice: "tts", music: "music", sfx: "sfx" }[k];
+              if (s[section] && "chain" in s[section]) delete s[section].chain;
+            }
           }
           s.sources.allow_paid_fallback = $("#src-paid", root).checked;
           s.sources.probe_timeout_s = +$("#src-probe_timeout_s", root).value;

@@ -110,9 +110,18 @@ def _legacy(kind: str) -> list[str]:
     return []
 
 
+SECTION = {"visuals": "visuals", "voice": "tts", "music": "music", "sfx": "sfx"}
+
+
 def chain(kind: str) -> list[str]:
-    """The configured chain, with paid sources kept out unless the owner allowed them."""
-    raw = (cfg().get(kind) or {}).get("chain") or (cfg().get("chains") or {}).get(kind)
+    """The configured chain, with paid sources kept out unless the owner allowed them.
+
+    Accepted places for the list: `sources.<kind>.chain` (settings page), `sources.chains.<kind>`,
+    or the section's own field (`visuals.chain`, `tts.chain`, `music.chain`, `sfx.chain`).
+    """
+    raw = ((cfg().get(kind) or {}).get("chain")
+           or (cfg().get("chains") or {}).get(kind)
+           or (store.get_settings().get(SECTION[kind]) or {}).get("chain"))
     out = [str(x).strip().lower() for x in (raw or _legacy(kind)) if str(x).strip()]
     out = [x for i, x in enumerate(out) if x in LABEL and x not in out[:i]]
     if not allow_paid(kind):
