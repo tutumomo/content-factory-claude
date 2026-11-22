@@ -41,6 +41,24 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 
 退件理由會被抽象成一條規則寫進「品味紀錄」，之後每一步都會遵守（SOP 原則 3）。
 
+## 素材來源自動降級
+
+本地生成服務沒開時不會卡住整集，會照順序往下一順位走（先素材庫、最後才是線上生成）。設定頁「來源鏈」可改順序，留空就依原本的單一來源設定自動排：
+
+| 類別 | 預設順序 |
+|---|---|
+| 畫面 | h3video → comfy → stock → slides（`mix` 模式＝stock 先、剩下的才生圖） |
+| 配音 | audiocpp → edge → gemini |
+| 音樂 | audiocpp → openverse → lyria |
+| 音效 | library → freesound |
+
+- **開工前探測**：組裝開始時一次探測鏈上所有來源（每個 2–4 秒，結果快取約 30 秒），把「本集計畫」寫進 log 與 `output/verify.json`。
+- **同集熔斷**：某來源連續失敗 2 次，這一集剩下的段落就不再試它。ComfyUI 逾時會呼叫 `/interrupt` 並從 `/queue` 刪掉那個 prompt，不讓 GPU 被佔著。
+- **付費來源**（Lyria、Gemini TTS）預設不進鏈；勾「允許用付費來源」才會排在最後，而且一定先過月上限與單筆核准門檻，需要核准時直接退回免費選項，不會停下來等。
+- **配音備援**：audio.cpp 沒開或 503 等到逾時（`tts.busy_wait_s`，預設 120 秒）就換 Edge TTS（免費、免金鑰，`pip install edge-tts`）；Edge 也失敗才輪到 Gemini TTS。Edge／Gemini 沒有強制對齊資料，字幕改用字數估時；音色與 Qwen3 不同，`verify.json` 的「配音來源」與集數頁都會標出來。
+- **音效補檔**：組裝時音效庫缺標籤，有 `FREESOUND_API_KEY` 就當場從 Freesound 補。
+- 每次降級都寫進 log 與 `verify.json`（`sources.badges`），集數頁顯示「畫面：ComfyUI 未開，改用實拍素材 8/10」這種標記。
+
 ## 設定
 
 - **LLM**：預設 `claude -p`（用你本機 Claude Code 的登入）。也可換成 OpenAI 相容端點（LM Studio :1234、Strata :8081），或「示範模式」只測流程。API key 只填環境變數名稱。
@@ -74,6 +92,7 @@ app/llm.py       Claude CLI / OpenAI 相容 / 示範模式
 app/media.py     TTS、對齊、字幕、ffmpeg、實測檢查
 app/music.py     YuE2 背景音樂生成與混音（含 ducking）
 app/sfx.py       音效庫、標籤、MOSS-SoundEffect 批量生成
+app/sources.py   來源鏈、開工探測、同集熔斷、配音降級
 app/comfy.py     ComfyUI（Krea-2／H3-Image／MOSS／Qwen 2.1）生圖
 app/h3video.py   ComfyUI MiniMax-H3 文生影片（畫面來源＝h3video）
 app/stock.py     實拍素材（Pexels／Pixabay）搜尋、下載、快取、出處

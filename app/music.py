@@ -111,12 +111,23 @@ def _key(style: str, seconds: float, seed: int, model: str = "") -> str:
 
 
 def generate(seconds: float, style: str = "", seed: int | None = None, out: Path | None = None,
-             force: bool = False, eid: str = "") -> Path:
-    """Render an instrumental bed of `seconds` length (capped) and return the audio path."""
-    if provider() == "lyria":
+             force: bool = False, eid: str = "", source: str = "") -> Path:
+    """Render an instrumental bed of `seconds` length (capped) and return the audio path.
+
+    `source` overrides the setting so the music chain (sources.pick_music) can walk it in order.
+    """
+    p = (source or provider()).lower()
+    if p == "lyria":
         return lyria_generate(style, seconds, out=out, force=force, eid=eid)
-    if provider() == "openverse":
+    if p == "openverse":
         return openverse_generate(style, seconds, out=out, force=force)
+    return audiocpp_generate(seconds, style, seed=seed, out=out, force=force)
+
+
+def audiocpp_generate(seconds: float, style: str = "", seed: int | None = None, out: Path | None = None,
+                      force: bool = False) -> Path:
+    """Local audio.cpp music model (YuE2 / MiniMax Music): one task on the running server."""
+    from . import media
     c = cfg()
     style = (style or "").strip() or (c.get("style") or "").strip() or DEFAULT_STYLE
     seed = int(seed if seed is not None else (c.get("seed") or 1234))
@@ -143,9 +154,13 @@ def generate(seconds: float, style: str = "", seed: int | None = None, out: Path
         if c.get("guidance_scale"):
             options["guidance_scale"] = float(c["guidance_scale"])
         body = {"model": model, "request": {"lyrics": "", "options": options}}
+    # connect fails fast when audio.cpp is not running; generation itself may take a long time,
+    # and a 503 (server busy, one model slot) is retried for at most ~120 s then handed to the chain
     try:
-        r = httpx.post(base + "/v1/tasks/run", json=body, timeout=float(c.get("timeout_s") or 3600))
-    except httpx.HTTPError as e:
+        r = media._post_busy_retry(base + "/v1/tasks/run", json=body,
+                                   timeout=httpx.Timeout(float(c.get("timeout_s") or 3600), connect=5.0),
+                                   wait_total=float(c.get("busy_wait_s") or 120))
+    except (httpx.HTTPError, httpx.ConnectError) as e:
         raise MusicError(f"音樂伺服器連不上：{e}") from e
     if r.status_code != 200:
         raise MusicError(f"音樂生成失敗 HTTP {r.status_code}：{r.text[:300]}")

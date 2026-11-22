@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from . import comfy, cost, h3video, llm, media, music, prompts, render, sfx, stock, stock_audio, store, video
+from . import comfy, cost, h3video, llm, media, music, prompts, render, sfx, sources, stock, stock_audio, store, video
 
 STAGES = ["sources", "brief", "script", "critique", "storyboard", "assemble", "package", "review", "approved"]
 STAGE_LABEL = {
@@ -282,118 +282,126 @@ def st_assemble(ep: dict) -> bool:
     assets.mkdir(parents=True)
     out.mkdir(exist_ok=True)
     scr = store.read_json(eid, "script.json")
+    settings = store.get_settings()
     size = size_for(ep)
     vertical = size[1] > size[0]
     channel = store.get_channel()["name"]
-    rc = store.get_settings()["render"]
+    rc = settings["render"]
     engine = (rc.get("engine") or "ffmpeg").lower()
-    h = media.tts_health()
-    if not h["ok"]:
-        raise media.MediaError(h["detail"])
+    mc = settings["music"]
+    sfxc = settings["sfx"]
+    sfx_on = bool(sfxc.get("enabled", True))
+    sfx_gain = float(sfxc.get("gain_db", -16))
+    music_on = bool(mc.get("enabled", True))
 
-    # 0) paid cloud music budget gate (checked before the expensive TTS pass)
-    mc = store.get_settings()["music"]
-    if mc.get("enabled", True) and music.provider() == "lyria":
+    # 0) one probe of every source chain; the plan goes to the log and verify.json before any work
+    plan, br = sources.start()
+    rep = sources.Report()
+    for kind in sources.KINDS:
+        # the head of the chain is what the owner asked for; anything else used is a fallback
+        rep.set_first(kind, (plan.chains.get(kind) or [""])[0])
+        if (kind == "music" and not music_on) or (kind == "sfx" and not sfx_on):
+            continue
+        store.log(eid, f"來源：{plan.line(kind)}")
+    store.write_json(eid, "output/verify.json",
+                     {"plan": plan.to_dict(), "sources": {"plan": [plan.line(k) for k in sources.KINDS],
+                                                          "fallbacks": [], "badges": [], "notes": []},
+                      "checks": {}, "duration": 0, "running": True})
+    if not plan.usable("voice"):
+        raise media.MediaError("沒有可用的配音來源：" + plan.line("voice"))
+
+    # 0b) paid cloud music: only when Lyria is the first usable source does the episode stop for approval
+    lyria_ok = ""
+    if music_on and (plan.chains.get("music") or [""])[0] == "lyria" and (plan.probes["music"].get("lyria") or {}).get("ok"):
         usd = cost.price((mc.get("lyria_model") or "lyria-3-clip-preview").strip())
         dec = cost.decide(usd)
         if dec == "deny":
-            store.log(eid, f"本月雲端花費已達上限（已用 ${cost.month_sum():.2f}），本次不加音樂")
-            mc = {**mc, "enabled": False}
+            store.log(eid, f"本月雲端花費已達上限（已用 ${cost.month_sum():.2f}），Lyria 改由免費來源")
         elif dec == "need_approval" and not cost.episode_approved(eid):
-            gate = float((store.get_settings().get("cost") or {}).get("per_call_approval_usd") or 0.5)
+            gate = float((settings.get("cost") or {}).get("per_call_approval_usd") or 0.5)
             store.log(eid, f"Lyria 每首 ${usd:.2f} 超過核准門檻 ${gate:.2f}，等你核准")
             wait(eid, "cost")
             return False
         else:
             cost.consume(eid)
+            lyria_ok = "lyria"
 
-    # 1) scene backgrounds (stock footage, ComfyUI, or Pillow cards)
+    # 1) scene backgrounds: h3video → comfy → stock → slides, one source for every scene it can take
     scenes = scr["scenes"]
-    vis = store.get_settings()["visuals"]
-    src = (vis.get("source") or "slides").lower()
-    bgs: dict[int, Path] = {}
-    clip_bgs: dict[int, Path] = {}
-    stock_sources: list[dict] = []
-    if src in ("stock", "mix"):
-        st = stock.status()
-        if st["providers"]:
-            store.log(eid, f"找實拍素材：{len(scenes)} 段（{'、'.join(st['providers'])}）")
-            for i, sc in enumerate(scenes):
-                q = stock.scene_query(sc)
-                got = stock.fetch(q, vertical)
-                if got:
-                    clip_bgs[i] = got["path"]
-                    stock_sources.append(got)
-                else:
-                    store.log(eid, f"畫面 {i + 1} 找不到素材（{q or '無關鍵詞'}），改用字卡或生圖")
-            store.log(eid, f"實拍素材 {len(clip_bgs)}/{len(scenes)} 段")
-            stock.save_sources(assets, stock_sources)
-        else:
-            store.log(eid, "素材來源沒有金鑰，改用字卡／生圖：" + st["detail"])
-    if src in ("comfy", "mix"):
-        ch = comfy.health()
-        if ch["ok"]:
-            todo = [i for i in range(len(scenes)) if i not in clip_bgs]
-            store.log(eid, f"ComfyUI 生畫面：{len(todo)} 張（{vis.get('unet')}）")
-            for i in todo:
-                sc = scenes[i]
-                desc = (sc.get("visual") or sc.get("headline") or "").strip()
-                prompt = f"{desc}, {vis.get('style_hint')}, absolutely no text, no letters, no watermark"
-                try:
-                    bgs[i] = comfy.generate(prompt, size, assets / f"bg{i:02d}.jpg", seed=1000 + i)
-                except comfy.ComfyError as e:
-                    store.log(eid, f"畫面 {i + 1} 生圖失敗，改用字卡：{e}")
-            if vis.get("free_after", True):
-                comfy.free()
-                store.log(eid, "已請 ComfyUI 釋放模型記憶體")
-        else:
-            store.log(eid, f"{ch['detail']}；改用字卡畫面")
+    n = len(scenes)
+    vis = settings["visuals"]
 
-    vids: dict[int, Path] = {}
-    if src == "h3video":
-        hc = h3video.cfg()
-        ch = comfy.health()
-        if not hc.get("enabled", True):
-            store.log(eid, "MiniMax-H3 影片已關閉，改用字卡")
-        elif not ch["ok"]:
-            store.log(eid, f"{ch['detail']}；改用字卡畫面")
-        else:
-            store.log(eid, f"ComfyUI MiniMax-H3 生成影片：{len(scenes)} 段"
-                           f"（{hc.get('recipe') or 'flex'} 配方、單段最多 {hc.get('max_seconds')} 秒，"
-                           f"環境音 {hc.get('ambient_gain_db', -14)} dB 墊在旁白下）")
-            for i, sc in enumerate(scenes):
-                desc = (sc.get("visual") or sc.get("headline") or "").strip()
-                secs = len(re.sub(r"\s", "", sc["narration"])) / 4.6 + 0.7
-                try:
-                    vids[i] = h3video.generate(desc, size, secs, assets / f"v{i:02d}.mp4", i=i, seed=2000 + i)
-                    store.log(eid, f"畫面 {i + 1}/{len(scenes)} 影片就緒")
-                except comfy.ComfyError as e:
-                    store.log(eid, f"畫面 {i + 1} 生成影片失敗，改用字卡：{e}")
-            if vis.get("free_after", True):
-                comfy.free()
-                store.log(eid, "已請 ComfyUI 釋放模型記憶體")
+    def _h3(sc: dict, i: int) -> dict | None:
+        desc = (sc.get("visual") or sc.get("headline") or "").strip()
+        secs = len(re.sub(r"\s", "", sc["narration"])) / 4.6 + 0.7
+        try:
+            p = h3video.generate(desc, size, secs, assets / f"v{i:02d}.mp4", i=i, seed=2000 + i)
+        except comfy.ComfyError as e:
+            if getattr(e, "kind", "") == "connection":
+                br.trip("comfy")  # same server: do not queue stills behind a dead ComfyUI
+            raise
+        store.log(eid, f"畫面 {i + 1}/{n} 影片就緒")
+        return {"kind": "h3video", "path": p}
+
+    def _comfy(sc: dict, i: int) -> dict | None:
+        desc = (sc.get("visual") or sc.get("headline") or "").strip()
+        prompt = f"{desc}, {vis.get('style_hint')}, absolutely no text, no letters, no watermark"
+        try:
+            p = comfy.generate(prompt, size, assets / f"bg{i:02d}.jpg", seed=1000 + i)
+        except comfy.ComfyError as e:
+            if getattr(e, "kind", "") == "connection":
+                br.trip("comfy")
+            raise
+        return {"kind": "comfy", "path": p}
+
+    def _stock(sc: dict, i: int) -> dict | None:
+        q = stock.scene_query(sc)
+        got = stock.fetch(q, vertical)
+        if not got:
+            store.log(eid, f"畫面 {i + 1} 找不到素材（{q or '無關鍵詞'}）")
+            return None
+        return {"kind": "stock", "path": got["path"], "meta": got}
+
+    backgrounds = sources.visual_batches(plan, br, scenes, vertical,
+                                         {"h3video": _h3, "comfy": _comfy, "stock": _stock}, store.log, eid, rep)
+    vids = {i: b["path"] for i, b in backgrounds.items() if b["kind"] == "h3video"}
+    bgs = {i: b["path"] for i, b in backgrounds.items() if b["kind"] == "comfy"}
+    clip_bgs = {i: b["path"] for i, b in backgrounds.items() if b["kind"] == "stock"}
+    # credits go to assets/sources.json as plain JSON: drop the local cache Path
+    stock_sources = [{k: (str(v) if isinstance(v, Path) else v) for k, v in b["meta"].items()}
+                     for b in backgrounds.values() if b["kind"] == "stock" and b.get("meta")]
+    if stock_sources:
+        stock.save_sources(assets, stock_sources)
+    if (vids or bgs) and vis.get("free_after", True):
+        comfy.free()
+        store.log(eid, "已請 ComfyUI 釋放模型記憶體")
 
     # 2) narration, subtitles, per-scene clips
-    sfxc = store.get_settings()["sfx"]
-    sfx_on = bool(sfxc.get("enabled", True))
-    sfx_gain = float(sfxc.get("gain_db", -16))
-    per_emo = bool(store.get_settings()["tts"].get("per_scene_emotion"))
-    clips, all_cues, t0, n = [], [], 0.0, len(scenes)
+    per_emo = bool(settings["tts"].get("per_scene_emotion"))
+    narrator = sources.Narrator(plan, br, store.log, eid,
+                                total_chars=sum(len(sc["narration"]) for sc in scenes))
+    clips, all_cues, t0 = [], [], 0.0
     durs: list[float] = []
     rm_imgs: list[str] = []
     used_sfx, missing_sfx = 0, set()
+    sfx_tried: set[str] = set()
+    sfx_miss: dict[str, int] = {}
     for i, sc in enumerate(scenes):
         # Qwen3 的語氣指令會把聲音帶走（同一段文字換語氣聽起來像換人）；逐段情緒要使用者主動打開才套用
         emo = sc.get("emotion", "") if per_emo else ""
         store.log(eid, f"畫面 {i + 1}/{n}：配音中" + (f"（{emo}）" if emo else ""))
         parts = []
         for j, chunk in enumerate(media.split_for_tts(sc["narration"])):
-            parts.append(media.tts(chunk, assets / f"s{i:02d}_{j:02d}.wav", emotion=emo))
-        wav = media.concat_wavs(parts, assets / f"s{i:02d}.wav") if len(parts) > 1 else parts[0].rename(assets / f"s{i:02d}.wav")
+            src, p = narrator.say(chunk, assets / f"s{i:02d}_{j:02d}.wav", emotion=emo)
+            rep.use("voice", src)
+            parts.append(p)
+        wav = media.concat_wavs(parts, assets / f"s{i:02d}.wav") if len(parts) > 1 else parts[0]
         dur = media.wav_duration(wav)
-        words = media.align(wav, sc["narration"])
+        # alignment needs audio.cpp; other voices fall back to the character-count estimate
+        words = media.align(wav, sc["narration"]) if br.ok("audiocpp") and narrator.cur == "audiocpp" else None
         cues = media.cues_for_scene(sc["narration"], words, dur, 12 if vertical else 22)
         sc["_aligned"] = bool(words)
+        sc["_voice"] = narrator.cur
         all_cues += [{**c, "start": c["start"] + t0, "end": c["end"] + t0} for c in cues]
         img = assets / f"s{i:02d}.jpg"
         if i in vids:
@@ -406,6 +414,8 @@ def st_assemble(ep: dict) -> bool:
         else:
             render.slide(sc, size, img, channel, i, n)
             sc["_visual"] = "slide"
+            if rep.wanted("visuals", plan) != "slides":
+                rep.note(f"畫面 {i + 1} 最後用字卡（前面的來源都沒成功）")
         if engine == "remotion":
             # the React composition draws the text itself, so it needs a text-free plate
             rm = assets / f"p{i:02d}.jpg"
@@ -420,6 +430,13 @@ def st_assemble(ep: dict) -> bool:
             rm_imgs.append(rm.name)
         tag = (sc.get("sfx") or "").strip().lower()
         fx = sfx.pick(tag, f"{eid}-{i}") if (sfx_on and tag) else None
+        if not fx and sfx_on and tag and "freesound" in plan.chains.get("sfx", []):
+            # library miss: top that one tag up from Freesound now, then pick again
+            if plan.probes.get("sfx", {}).get("freesound", {}).get("ok") and \
+                    sources.fill_sfx_tag(tag, br, sfx_tried, store.log, eid, sfx_miss):
+                fx = sfx.pick(tag, f"{eid}-{i}")
+                if fx:
+                    rep.use("sfx", "freesound")
         if fx:
             used_sfx += 1
             sc["_sfx"] = fx.name
@@ -450,21 +467,22 @@ def st_assemble(ep: dict) -> bool:
     ass = media.write_ass(all_cues, size, assets / "subs.ass")
     media.write_srt(all_cues, out / "subtitles.srt")
 
-    # 3) background music (YuE2 or Lyria, cached per provider/style/length)
+    # 3) background music: audiocpp → openverse → lyria, cached per provider/style/length
     bgm, bgm_note = None, "已關閉"
-    if mc.get("enabled", True):
+    music_src = ""
+    if music_on:
         style = music.style_of(scr)
-        music_engine = {"lyria": "Lyria 3", "openverse": "Openverse"}.get(music.provider(), "YuE2")
-        store.log(eid, f"背景音樂：{music_engine} 生成 {t0:.0f} 秒（{style[:48]}）")
         try:
-            bgm = music.generate(t0, style, eid=eid)
-            bgm_note = f"{music.duration(bgm):.0f} 秒，{mc.get('gain_db', -20)} dB" + ("，自動閃避旁白" if mc.get("duck", True) else "")
-            store.log(eid, f"背景音樂就緒：{bgm.name}")
+            bgm, music_src = sources.pick_music(plan, br, t0, style, eid, store.log, preapproved=lyria_ok)
+            rep.use("music", music_src)
+            bgm_note = f"{sources.LABEL.get(music_src, music_src)}：{music.duration(bgm):.0f} 秒，" \
+                       f"{mc.get('gain_db', -20)} dB" + ("，自動閃避旁白" if mc.get("duck", True) else "")
+            store.log(eid, f"背景音樂就緒（{sources.LABEL.get(music_src, music_src)}）：{bgm.name}")
         except music.MusicError as e:
-            bgm_note = f"生成失敗，成片不加音樂：{e}"
+            bgm_note = f"所有音樂來源都失敗，成片不加音樂：{e}"
             store.log(eid, bgm_note)
 
-    # 4) keep license/attribution for downloaded audio (Freesound / Jamendo are often CC BY)
+    # 4) keep license/attribution for downloaded audio (Freesound / Jamendo / Openverse are often CC BY)
     audio_rows: list[dict] = []
     for sc in scr.get("scenes") or []:
         name = sc.get("_sfx")
@@ -516,8 +534,33 @@ def st_assemble(ep: dict) -> bool:
         parts.append(f"字卡 {slides} 張")
     v["checks"]["畫面來源"] = {"ok": True, "value": ("、".join(parts) or "字卡")}
     v["checks"]["音效"] = {"ok": True, "value": (f"{used_sfx}/{n} 個畫面有音效" if sfx_on else "已關閉")}
-    v["checks"]["背景音樂"] = {"ok": bool(bgm) or not mc.get("enabled", True), "value": bgm_note}
+    v["checks"]["背景音樂"] = {"ok": bool(bgm) or not music_on, "value": bgm_note}
     v["checks"]["成片引擎"] = {"ok": True, "value": "Remotion 動畫" if final_note == "Remotion" else "ffmpeg 字幕"}
+    # narration source: a different voice is not a broken film, but the owner must see it
+    voices: dict[str, int] = {}
+    for sc in scr["scenes"]:
+        if sc.get("_voice"):
+            voices[sc["_voice"]] = voices.get(sc["_voice"], 0) + 1
+    first_voice = rep.wanted("voice", plan)
+    voice_parts = [f"{sources.LABEL.get(s, s)} {c}/{n}" for s, c in voices.items()]
+    fallback_voice = any(s != first_voice for s in voices)
+    v["checks"]["配音來源"] = {
+        "ok": not fallback_voice,
+        "value": "、".join(voice_parts) + ("（音色與原設定不同，字幕改用字數估時）" if fallback_voice else ""),
+    }
+    badges = rep.badges(plan, n)
+    for b in badges:
+        store.log(eid, f"降級：{b['label']}：{b['text']}")
+    for nt in rep.notes:
+        store.log(eid, nt)
+    v["sources"] = {"plan": [plan.line(k) for k in sources.KINDS if plan.chains.get(k)],
+                    "badges": badges,
+                    "fallbacks": {k: rep.fallbacks(k, plan) for k in sources.KINDS if rep.used.get(k)},
+                    "voice": {"used": voices, "first": first_voice, "fallback": fallback_voice,
+                              "reason": narrator.reason},
+                    "music": music_src, "notes": rep.notes,
+                    "breaker_open": br.open_sources()}
+    v["plan"] = plan.to_dict()
     store.write_json(eid, "output/verify.json", v)
     ep = store.get_episode(eid)
     ep["checks"]["assemble"] = {"ok": all(c["ok"] for c in v["checks"].values()), "value": f"{v['duration']:.1f} 秒"}

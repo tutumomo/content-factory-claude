@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import wave
@@ -42,10 +43,10 @@ def _post_busy_retry(url: str, wait_total: float = 900, **kw) -> httpx.Response:
                 v[1].seek(0)
 
 
-def tts_health() -> dict:
+def tts_health(timeout: float = 5) -> dict:
     cfg = store.get_settings()["tts"]
     try:
-        r = httpx.get(cfg["base_url"].rstrip("/") + "/v1/models", timeout=5)
+        r = httpx.get(cfg["base_url"].rstrip("/") + "/v1/models", timeout=timeout)
         r.raise_for_status()
         ids = [m.get("id") for m in r.json().get("data", [])]
         return {"ok": cfg["model"] in ids, "models": ids,
@@ -131,6 +132,7 @@ def to_simplified(text: str) -> str:
 
 
 def tts(text: str, out: Path, emotion: str = "") -> Path:
+    """Narration from the audio.cpp server (qwen3 / index-tts2.5 / zonos3 …)."""
     cfg = store.get_settings()["tts"]
     if cfg.get("convert_simplified", True) and str(cfg.get("language", "")).lower() in ("chinese", "中文", "zh"):
         text = to_simplified(text)
@@ -157,13 +159,125 @@ def tts(text: str, out: Path, emotion: str = "") -> Path:
     if opts:
         body["options"] = opts
     try:
-        r = _post_busy_retry(cfg["base_url"].rstrip("/") + "/v1/audio/speech", json=body, timeout=900)
+        # Cap the 503 wait so a busy server falls through to the next voice source instead of
+        # holding the episode for 15 minutes; the chain (sources.Narrator) handles what comes next.
+        r = _post_busy_retry(cfg["base_url"].rstrip("/") + "/v1/audio/speech", json=body, timeout=300,
+                             wait_total=float(cfg.get("busy_wait_s") or 120))
     except httpx.HTTPError as e:
         raise MediaError(f"TTS 連線失敗：{e}") from e
     if r.status_code != 200 or not r.content.startswith(b"RIFF"):
         raise MediaError(f"TTS 失敗 HTTP {r.status_code}：{r.text[:300]}")
     out.write_bytes(r.content)
     return out
+
+
+# ---------- fallback voices (voice chain: see sources.py) ----------
+
+EDGE_VOICE_DEFAULT = "zh-TW-HsiaoChenNeural"
+GEMINI_TTS_API = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+GEMINI_TTS_DEFAULT = "gemini-2.5-flash-preview-tts"
+GEMINI_VOICE_DEFAULT = "Kore"
+
+
+def _to_wav(src: Path, out: Path, rate: int = 24000) -> Path:
+    """Any TTS output → 24 kHz mono 16-bit wav, so chunks from different sources can be joined."""
+    run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-ac", "1", "-ar", str(rate),
+         "-c:a", "pcm_s16le", str(out)])
+    return out
+
+
+def edge_tts(text: str, out: Path, emotion: str = "") -> Path:
+    """Free Microsoft Edge read-aloud endpoint (community `edge-tts` package, no key).
+
+    Unofficial endpoint: give it a short timeout and let the caller fall through on any failure.
+    It has no alignment data, so subtitles stay on the character-count estimate.
+    """
+    import asyncio
+    cfg = store.get_settings()["tts"]
+    voice = (cfg.get("edge_voice") or EDGE_VOICE_DEFAULT).strip()
+    text = (text or "").strip()
+    if not text:
+        raise MediaError("Edge TTS 沒有文字")
+    try:
+        import edge_tts
+    except ImportError as e:
+        raise MediaError("沒有 edge-tts 套件（pip install edge-tts）") from e
+    mp3 = out.with_suffix(".edge.mp3")
+    tmo = float(cfg.get("edge_timeout_s") or 60)
+
+    async def _run():
+        await asyncio.wait_for(edge_tts.Communicate(text, voice).save(str(mp3)), timeout=tmo)
+
+    try:
+        asyncio.run(_run())
+    except (asyncio.TimeoutError, Exception) as e:  # noqa: BLE001 - any failure means "try the next source"
+        raise MediaError(f"Edge TTS 失敗（{voice}）：{type(e).__name__}: {e}") from e
+    if not (mp3.exists() and mp3.stat().st_size > 1000):
+        raise MediaError("Edge TTS 沒有回傳音檔")
+    return _to_wav(mp3, out)
+
+
+def gemini_tts(text: str, out: Path, emotion: str = "") -> Path:
+    """Paid Google Gemini TTS. Callers must pass cost.decide first (sources.Narrator does)."""
+    import base64
+    cfg = store.get_settings()["tts"]
+    name = (cfg.get("gemini_key_env") or "GEMINI_API_KEY").strip()
+    key = os.environ.get(name, "")
+    if not key:
+        raise MediaError(f"沒有環境變數 {name}")
+    model = (cfg.get("gemini_model") or GEMINI_TTS_DEFAULT).strip()
+    voice = (cfg.get("gemini_voice") or GEMINI_VOICE_DEFAULT).strip()
+    text = (text or "").strip()
+    if not text:
+        raise MediaError("Gemini TTS 沒有文字")
+    body = {
+        "contents": [{"parts": [{"text": text}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}},
+        },
+    }
+    try:
+        r = httpx.post(GEMINI_TTS_API.format(model=model), json=body, timeout=float(cfg.get("gemini_timeout_s") or 180),
+                       headers={"x-goog-api-key": key})
+    except httpx.HTTPError as e:
+        raise MediaError(f"Gemini TTS 連線失敗：{e}") from e
+    if r.status_code == 429:
+        detail = r.text[:300]
+        if "spending" in detail.lower() or "billing" in detail.lower():
+            raise MediaError(f"Gemini 專案本月花費上限（429 spending cap）：{detail}")
+        raise MediaError(f"Gemini TTS 被限流（429）：{detail}")
+    if r.status_code in (401, 403):
+        raise MediaError(f"Gemini 金鑰無效或沒有權限（HTTP {r.status_code}）：{r.text[:200]}")
+    if r.status_code != 200:
+        raise MediaError(f"Gemini TTS 失敗 HTTP {r.status_code}：{r.text[:300]}")
+    try:
+        part = r.json()["candidates"][0]["content"]["parts"][0]["inlineData"]
+    except (KeyError, IndexError, ValueError):
+        raise MediaError(f"Gemini TTS 沒有回傳音訊：{r.text[:300]}")
+    raw = base64.b64decode(part.get("data") or "")
+    if not raw:
+        raise MediaError("Gemini TTS 回傳空音訊")
+    if raw[:4] == b"RIFF":
+        tmp = out.with_suffix(".gemini.wav")
+        tmp.write_bytes(raw)
+        return _to_wav(tmp, out)
+    # raw PCM: sample rate comes in the mime type, e.g. audio/L16;codec=pcm;rate=24000
+    m = re.search(r"rate=(\d+)", str(part.get("mimeType") or ""))
+    pcm = out.with_suffix(".gemini.pcm")
+    pcm.write_bytes(raw)
+    return _to_wav(pcm, out, rate=int(m.group(1)) if m else 24000)
+
+
+TTS_SOURCES = {"audiocpp": tts, "edge": edge_tts, "gemini": gemini_tts}
+
+
+def tts_with(source: str, text: str, out: Path, emotion: str = "") -> Path:
+    """Narration from one named source; unknown ids fail cleanly so the chain can move on."""
+    fn = TTS_SOURCES.get((source or "").lower())
+    if not fn:
+        raise MediaError(f"未知的配音來源：{source}")
+    return fn(text, out, emotion=emotion)
 
 
 def wav_duration(p: Path) -> float:

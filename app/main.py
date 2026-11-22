@@ -11,7 +11,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import comfy, cost, llm, media, music, pipeline, prompts, sfx, stock, stock_audio, store, video, video_analysis, youtube
+from . import comfy, cost, llm, media, music, pipeline, prompts, sfx, sources, stock, stock_audio, store, video, video_analysis, youtube
 
 app = FastAPI(title="內容工廠")
 STATIC = store.ROOT / "static"
@@ -151,6 +151,12 @@ def cost_approve(eid: str):
 @app.get("/api/music")
 def music_status():
     return music.status()
+
+
+@app.get("/api/sources")
+def sources_status(probe: bool = True):
+    """Source chains per category (visuals / voice / music / sfx) with live health lights."""
+    return sources.overview(probe_all=probe)
 
 
 @app.get("/api/render/remotion")

@@ -11,6 +11,7 @@ export async function openSettingsModal() {
       ["ui", "介面"],
       ["llm", "LLM 模型"],
       ["tts", "配音 audio.cpp"],
+      ["sources", "來源鏈"],
       ["pipeline", "流程參數"],
       ["visual", "畫面與音效"],
       ["youtube", "YouTube"],
@@ -75,6 +76,29 @@ export async function openSettingsModal() {
         <label style="margin-top:0"><input type="checkbox" id="t-per_scene_emotion" style="width:auto;margin-right:6px" ${s.tts?.per_scene_emotion ? "checked" : ""}> 每段套用講稿情緒（qwen3 的語氣指令會讓聲音聽起來像換人，想固定同一個聲音就關掉）</label>
         <label>字幕對齊模型 id（留空改用字數估算）</label>
         <input id="t-align_model" value="${esc(s.tts.align_model)}">
+      </div>
+      <div data-spane="sources" style="${activeTab === "sources" ? "" : "display:none"}">
+        <div class="muted" style="margin-bottom:10px">本地生成服務沒開時，自動往下一順位走：先素材庫，最後才是線上生成。留空＝依上面的設定自動排（畫面跟隨「畫面來源」、音樂跟隨「音樂來源」）。付費來源（Lyria、Gemini TTS）預設不進鏈，最後才會用到，而且一定先過花費上限。</div>
+        ${[["visuals", "畫面", "h3video, comfy, stock, slides"], ["voice", "配音", "audiocpp, edge, gemini"],
+           ["music", "音樂", "audiocpp, openverse, lyria"], ["sfx", "音效", "library, freesound"]].map(([k, label, ph]) => `
+          <label>${label}來源鏈（用逗號分隔，左邊優先）</label>
+          <input id="src-chain-${k}" value="${esc(((s.sources?.[k]?.chain) || []).join(", "))}" placeholder="${ph}">
+          <div class="muted" id="src-health-${k}" style="margin:-4px 0 8px">讀取來源狀態…</div>`).join("")}
+        <label style="margin-top:0"><input type="checkbox" id="src-paid" style="width:auto;margin-right:6px" ${s.sources?.allow_paid_fallback ? "checked" : ""}> 免費來源都失敗時，允許用付費來源（Lyria／Gemini TTS，仍受月上限與單筆核准限制）</label>
+        <div class="grid-2">
+          <div><label>探測逾時（秒，每個來源）</label><input id="src-probe_timeout_s" type="number" min="1" max="10" step="0.5" value="${s.sources?.probe_timeout_s ?? 4}"></div>
+          <div><label>熔斷：連續失敗幾次就跳過</label><input id="src-breaker_after" type="number" min="1" max="5" value="${s.sources?.breaker_after ?? 2}"></div>
+        </div>
+        <h2 style="margin-top:18px">備援配音（audio.cpp 沒開時）</h2>
+        <div class="grid-2">
+          <div><label>Edge TTS 聲音（免費、免金鑰）</label><input id="t-edge_voice" value="${esc(s.tts?.edge_voice || "zh-TW-HsiaoChenNeural")}"></div>
+          <div><label>Edge 逾時（秒）</label><input id="t-edge_timeout_s" type="number" min="10" max="180" value="${s.tts?.edge_timeout_s ?? 60}"></div>
+          <div><label>Gemini TTS 模型（計費）</label><input id="t-gemini_model" value="${esc(s.tts?.gemini_model || "gemini-2.5-flash-preview-tts")}"></div>
+          <div><label>Gemini 聲音</label><input id="t-gemini_voice" value="${esc(s.tts?.gemini_voice || "Kore")}"></div>
+          <div><label>Gemini 金鑰環境變數名稱（只填名稱）</label><input id="t-gemini_key_env" value="${esc(s.tts?.gemini_key_env || "GEMINI_API_KEY")}"></div>
+          <div><label>audio.cpp 忙碌時最多等幾秒再換來源</label><input id="t-busy_wait_s" type="number" min="10" max="900" value="${s.tts?.busy_wait_s ?? 120}"></div>
+        </div>
+        <div class="muted" style="margin-top:6px">Edge 與 Gemini 的聲音跟 audio.cpp 的 Qwen3 不一樣；用到備援時，集數頁與 verify.json 都會標出「配音來源」，字幕改用字數估時。</div>
       </div>
       <div data-spane="pipeline" style="${activeTab === "pipeline" ? "" : "display:none"}">
         <label style="margin-top:0"><input type="checkbox" id="p-review_script" style="width:auto;margin-right:6px" ${s.pipeline.review_script ? "checked" : ""}> 講稿定稿前先給我看（初期建議開著；穩定後可關掉放手）</label>
@@ -290,6 +314,19 @@ export async function openSettingsModal() {
           s.music.seed = +$("#m-seed", root).value;
           s.music.enabled = $("#m-enabled", root).checked;
           s.music.duck = $("#m-duck", root).checked;
+          s.sources = { ...(s.sources || {}) };
+          for (const k of ["visuals", "voice", "music", "sfx"]) {
+            const el = $(`#src-chain-${k}`, root);
+            if (!el) continue;
+            const chain = el.value.split(/[,，\s]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);
+            if (chain.length) s.sources[k] = { ...(s.sources[k] || {}), chain };
+            else delete s.sources[k];
+          }
+          s.sources.allow_paid_fallback = $("#src-paid", root).checked;
+          s.sources.probe_timeout_s = +$("#src-probe_timeout_s", root).value;
+          s.sources.breaker_after = +$("#src-breaker_after", root).value;
+          for (const k of ["edge_voice", "gemini_model", "gemini_voice", "gemini_key_env"]) s.tts[k] = $(`#t-${k}`, root).value;
+          for (const k of ["edge_timeout_s", "busy_wait_s"]) s.tts[k] = +$(`#t-${k}`, root).value;
           s.render = { ...(s.render || {}), engine: $("#r-engine", root).value,
             fallback_ffmpeg: $("#r-fallback_ffmpeg", root).checked };
           return s;
@@ -324,6 +361,7 @@ export async function openSettingsModal() {
           const h = await api("/api/health?llm_check=true");
           $("#s-test-out", root).textContent = (h.llm.ok ? "✓ " : "✗ ") + h.llm.detail;
         };
+        setupSourcesPane(root);
         setupYouTubePane(root, s, collect);
         setupTtsModels(root, s);
         setupVisualPane(root, s, collect);
@@ -356,6 +394,23 @@ export function loginGoogle() {
     window.addEventListener("message", onMsg);
     const timer = setInterval(() => { if (w.closed) done(); }, 1000);
   });
+}
+
+async function setupSourcesPane(root) {
+  // Health lights come from the same probes the assembly step runs before it starts.
+  let data;
+  try { data = await api("/api/sources"); } catch { return; }
+  const label = { visuals: "畫面", voice: "配音", music: "音樂", sfx: "音效" };
+  for (const [kind, info] of Object.entries(data.kinds || {})) {
+    const el = $(`#src-health-${kind}`, root);
+    if (!el) continue;
+    el.innerHTML = info.chain.length
+      ? info.chain.map((src) => {
+          const ok = info.probe?.[src]?.ok;
+          return `<span title="${esc(info.probe?.[src]?.detail || "")}">${ok ? "●" : "○"} ${esc(src)}</span>`;
+        }).join(" → ")
+      : "（沒有可用來源）";
+  }
 }
 
 async function setupTtsModels(root, s) {
