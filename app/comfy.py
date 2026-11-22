@@ -59,7 +59,11 @@ PRESETS: dict[str, dict] = {
 
 
 class ComfyError(RuntimeError):
-    pass
+    """kind: "connection" = server gone (trip the breaker), "error" = job/model failure."""
+
+    def __init__(self, msg: str, kind: str = "error"):
+        super().__init__(msg)
+        self.kind = kind
 
 
 def cfg() -> dict:
@@ -70,9 +74,9 @@ def base() -> str:
     return (cfg().get("comfy_url") or "http://127.0.0.1:8188").rstrip("/")
 
 
-def health() -> dict:
+def health(timeout: float = 4) -> dict:
     try:
-        r = httpx.get(base() + "/system_stats", timeout=4)
+        r = httpx.get(base() + "/system_stats", timeout=timeout)
         r.raise_for_status()
         dev = (r.json().get("devices") or [{}])[0]
         return {"ok": True, "detail": f"ComfyUI 就緒（{dev.get('name', 'GPU')}）"}
@@ -145,13 +149,18 @@ def run_graph(graph: dict, out: Path, tmo: float, what: str = "出圖") -> Path:
         r.raise_for_status()
         pid = r.json()["prompt_id"]
     except httpx.HTTPError as e:
-        raise ComfyError(f"送出工作失敗：{e}") from e
+        raise ComfyError(f"送出工作失敗：{e}", "connection") from e
     deadline = time.time() + tmo
+    misses = 0
     while time.time() < deadline:
         time.sleep(2)
         try:
             hr = httpx.get(base() + f"/history/{pid}", timeout=15).json()
-        except httpx.HTTPError:
+            misses = 0
+        except httpx.HTTPError as e:
+            misses += 1
+            if misses >= 8:  # ~30 s without an answer: the server is gone, stop burning the timeout
+                raise ComfyError(f"ComfyUI 中途連不上：{e}", "connection") from e
             continue
         entry = hr.get(pid) or {}
         status = entry.get("status") or {}
@@ -169,7 +178,25 @@ def run_graph(graph: dict, out: Path, tmo: float, what: str = "出圖") -> Path:
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(vr.content)
             return out
+    cancel(pid)  # don't leave the job holding the shared GPU
     raise ComfyError(f"等超過 {tmo:.0f} 秒還沒{what}")
+
+
+def cancel(pid: str) -> None:
+    """Stop a job we gave up on: /interrupt only if it is the one running, and drop it from the queue."""
+    try:
+        q = httpx.get(base() + "/queue", timeout=10).json()
+    except (httpx.HTTPError, ValueError):
+        return
+    running = [row[1] for row in (q.get("queue_running") or []) if len(row) > 1]
+    pending = [row[1] for row in (q.get("queue_pending") or []) if len(row) > 1]
+    try:
+        if pid in running:
+            httpx.post(base() + "/interrupt", json={"prompt_id": pid}, timeout=10)
+        if pid in pending or pid in running:
+            httpx.post(base() + "/queue", json={"delete": [pid]}, timeout=10)
+    except httpx.HTTPError:
+        pass
 
 
 def free() -> None:
