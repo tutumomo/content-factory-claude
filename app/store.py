@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import threading
 import time
@@ -12,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "data"
+# CF_DATA lets a second instance (tests, smoke runs) use its own data folder instead of the live one.
+DATA = Path(os.environ["CF_DATA"]).expanduser().resolve() if os.environ.get("CF_DATA") else ROOT / "data"
 EPISODES = DATA / "episodes"
 _lock = threading.RLock()
 
@@ -824,6 +826,34 @@ def update_episode(eid: str, **kw) -> dict:
         ep.update(kw)
         save_episode(ep)
         return ep
+
+
+def update_check(eid: str, key: str, check: dict) -> dict:
+    """Set one entry of ep["checks"] under the lock, so a concurrent HTTP update is not lost (B4)."""
+    with _lock:
+        ep = get_episode(eid)
+        ep.setdefault("checks", {})[key] = check
+        save_episode(ep)
+        return ep
+
+
+def claim_episode(eid: str, status: str, waiting_for: str | None = None) -> dict | None:
+    """Check and move an episode to "queued" in one locked step.
+
+    Returns the episode as it was before the claim, or None when it is not in `status`
+    (and, if given, not waiting for `waiting_for`). Two clicks on the same gate, or two
+    tabs, can therefore never both pass and start the pipeline twice.
+    """
+    with _lock:
+        ep = get_episode(eid)
+        if not ep or ep.get("status") != status:
+            return None
+        if waiting_for is not None and ep.get("waiting_for") != waiting_for:
+            return None
+        before = json.loads(json.dumps(ep))
+        ep.update(status="queued", waiting_for=None, error=None)
+        save_episode(ep)
+        return before
 
 
 def update_schedule(eid: str, schedule: str | None) -> dict:

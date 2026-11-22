@@ -5,3 +5,4 @@ __pycache__/
 .gstack/
 remotion/node_modules/
 remotion/out/
+.cf-smoke-data/

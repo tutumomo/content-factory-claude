@@ -94,6 +94,18 @@ function gatePackage(pk, vertical, video) {
       <button type="button" class="btn" data-reject="package">都不好，重做包裝</button></div></div>`;
 }
 
+function sourcesBlock(v) {
+  // The assembly step writes which source each category actually used (and every fallback).
+  const s = v && v.sources;
+  if (!s || (!(s.badges || []).length && !(s.plan || []).length)) return "";
+  const badges = (s.badges || []).map((b) => `<div class="warn" style="margin:8px 0 0">${esc(b.label)}：${esc(b.text)}</div>`).join("");
+  const plan = (s.plan || []).map((l) => `<div class="muted">${esc(l)}</div>`).join("");
+  const voice = s.voice?.fallback
+    ? `<div class="muted">配音：${esc(s.voice.reason || "改用備援聲音")}。這一集的音色跟原本設定的不同，字幕改用字數估時。</div>` : "";
+  return `<details class="card" ${(s.badges || []).length ? "open" : ""}><summary><b>素材來源</b>${(s.badges || []).length ? `　<span class="pill" style="background:var(--wait-soft);color:#9c5700">${s.badges.length} 項降級</span>` : ""}</summary>
+    ${badges}<div style="margin-top:8px">${plan}</div>${voice}</details>`;
+}
+
 function videoBlock(ep, vertical) {
   const v = ep.files.verify;
   return `<div class="card"><h2 style="margin-top:0">成片</h2>${ep.video ? `<video src="${fileUrl(ep.video)}" controls class="${vertical ? "vertical" : ""}"></video>` : ""}
@@ -176,6 +188,8 @@ export async function viewEpisode(main, id) {
   }
 
   if (ep.status === "waiting" && ep.waiting_for === "sources") html += gateSources(ep);
+  if (F.verify?.sources) html += sourcesBlock(F.verify);
+
   if (ep.status === "waiting" && ep.waiting_for === "direction") html += gateDirection(F.brief);
   if (ep.status === "waiting" && ep.waiting_for === "script") html += gateScript(F.script, F.critique);
   if (ep.status === "waiting" && ep.waiting_for === "storyboard") html += gateStoryboard(F.storyboard, ep.id);
