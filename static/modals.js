@@ -277,6 +277,10 @@ export async function openSettingsModal() {
         </div>
         <label style="margin-top:10px"><input type="checkbox" id="y-made_for_kids" style="width:auto;margin-right:6px" ${yt.made_for_kids ? "checked" : ""}> 這是為兒童打造的內容</label>
         <div class="muted" style="margin-top:8px">有設排期的集數會以「私人 + 預定發布時間」上傳，時間到 YouTube 自動公開。</div>
+        <h4 style="margin:16px 0 4px">AI 雷達讀 YouTube 連結</h4>
+        <div class="muted">雷達用 yt-dlp 讀影片標題、說明與字幕（不下載影片）。讀不到時，若上面已登入 Google，改用 YouTube Data API 拿標題與說明（沒有字幕）。</div>
+        <label>YouTube cookies 檔（Netscape 格式 cookies.txt；只有遇到「Sign in to confirm」、年齡限制或會員影片才需要）</label>
+        <input id="y-cookies_file" placeholder="空白 = data/youtube_cookies.txt（有這個檔才用）" value="${esc(yt.cookies_file || "")}">
       </div>`;
 
     openModal({
@@ -298,7 +302,7 @@ export async function openSettingsModal() {
           s.tts.convert_simplified = $("#t-convert_simplified", root).checked;
           s.youtube = { ...(s.youtube || {}), client_file: $("#y-client_file", root).value,
             privacy: $("#y-privacy", root).value, category_id: $("#y-category_id", root).value,
-            made_for_kids: $("#y-made_for_kids", root).checked };
+            made_for_kids: $("#y-made_for_kids", root).checked, cookies_file: $("#y-cookies_file", root).value.trim() };
           s.pipeline.review_script = $("#p-review_script", root).checked;
           s.pipeline.review_storyboard = $("#p-review_storyboard", root).checked;
           for (const k of ["radar_prefilter", "radar_scoring", "radar_grouping", "source_audit", "source_gate"]) {

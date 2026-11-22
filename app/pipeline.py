@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from . import comfy, cost, editorial, h3video, llm, media, music, prompts, render, sfx, sources, stock, stock_audio, store, video
+from . import comfy, cost, editorial, h3video, llm, media, music, prompts, render, sfx, sources, stock, stock_audio, store, video, yt_page
 
 STAGES = ["sources", "brief", "script", "critique", "storyboard", "assemble", "package", "review", "approved"]
 STAGE_LABEL = {
@@ -129,6 +129,8 @@ def fetch_page(url: str, limit: int = 6000, attempts: int = 2) -> dict:
     or challenge page is a failure, not "success with no content", so callers can
     stop instead of sending an empty prompt to the model.
     """
+    if yt_page.is_youtube_url(url):  # YouTube answers plain HTTP with a consent/bot page
+        return yt_page.fetch(url, limit)
     last = {"ok": False, "url": url, "text": "", "reason": "未抓取", "attempts": 0, "bytes": 0}
     for i, ua in enumerate(FETCH_UAS[:max(1, attempts)]):
         if i:
@@ -808,11 +810,15 @@ def run_radar(seeds: str) -> None:
         res = fetch_page(u, 3000)
         res["url"] = u
         fetched.append(res)
-    failed = [{"url": f["url"], "reason": f["reason"]} for f in fetched if not f["ok"]]
+    failed = [{"url": f["url"], "reason": f["reason"] + (f"；{f['note']}" if f.get("note") else "")}
+              for f in fetched if not f["ok"]]
+    # YouTube results carry their own advice; "paste an article URL" only fits web pages
+    web_failed = [f for f in failed if not yt_page.is_youtube_url(f["url"])]
+    notes = [f"{f['url']}：{f['note']}" for f in fetched if f["ok"] and f.get("note")]
     if urls and not any(f["ok"] for f in fetched) and len(seed_text) < 10:
         detail = "；".join(f"{f['url']}（{f['reason']}）" for f in failed[:3])
         msg = f"抓不到任何連結內容：{detail}。"
-        if "具體文章網址" not in detail:
+        if web_failed and "具體文章網址" not in detail:
             msg += "請改貼具體文章網址，或把重點貼進線索欄。"
         _save_radar_state("error", msg, started=started, failed=failed, error=msg)
         return
@@ -838,8 +844,10 @@ def run_radar(seeds: str) -> None:
         msg = "掃描完成，但模型沒有抽出候選。"
         if failed:
             msg += f"另有 {len(failed)} 個連結抓不到。"
-            if "具體文章網址" not in " ".join(f["reason"] for f in failed):
+            if web_failed and "具體文章網址" not in " ".join(f["reason"] for f in web_failed):
                 msg += "請改貼具體文章網址，或把重點貼進線索欄。"
+        if notes:
+            msg += "注意：" + "；".join(notes) + "。"
         _save_radar_state("empty", msg, started=started, failed=failed)
         return
     items = store.get_radar()
@@ -852,6 +860,8 @@ def run_radar(seeds: str) -> None:
     msg = f"新增 {len(rows)} 張候選卡。"
     if failed:
         msg += f"另有 {len(failed)} 個連結抓不到，已用其他線索完成掃描。"
+    if notes:
+        msg += "注意：" + "；".join(notes) + "。"
     _save_radar_state("ok", msg, started=started, added=len(rows), failed=failed)
 
 

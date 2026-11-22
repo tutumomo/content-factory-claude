@@ -152,6 +152,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "category_id": "28",               # 28 = Science & Technology
         "language": "zh-Hant",
         "made_for_kids": False,
+        "cookies_file": "",                # 雷達讀要登入的影片用；Netscape cookies.txt，空 = data/youtube_cookies.txt（有才用）
     },
 }
 
