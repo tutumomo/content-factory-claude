@@ -33,11 +33,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "tts": {
         "base_url": "http://127.0.0.1:8090",
         "model": "qwen3-tts-1.7b-customvoice",
-        "voice": "vivian",
+        "voice": "vivian",                # 唯一的聲音欄位：customvoice 內建聲音，或 clon 模型的音色庫名稱
         "language": "chinese",
         "instruct": "自然、清楚、有精神的科技節目主持人語氣",
-        "voice_ref": "",                  # 參考音檔路徑；index-tts2.5 / zonos3-mini 必填
-        "ref_voice": "",                  # 參考聲音庫名稱（audio.cpp /v1/audio/voices；clon 模型用，優先於 voice）
+        "voice_ref": "",                  # 參考音檔路徑；優先於 voice；index-tts2.5 / zonos3-mini 可用
+        "ref_voice": "",                  # 已棄用（PR #4）：舊設定讀到時會拿來當 voice 的初值
         "emotion": "",                    # index-tts2.5 的情緒示範文字
         "emotion_alpha": 1.0,             # 0–1，情緒強度
         "per_scene_emotion": False,       # 逐段套用講稿情緒；Qwen3 的語氣指令會讓聲音聽起來像換人，預設關
@@ -271,6 +271,10 @@ def get_settings() -> dict:
         if merged["ui"].get("nav_layout") not in ("top", "side"):
             merged["ui"]["nav_layout"] = "top"
         _fix_radar_range(merged["pipeline"])
+        # one voice field: a settings file from PR #4 may only have the deprecated ref_voice
+        tts = merged["tts"]
+        if not str(tts.get("voice") or "").strip() and str(tts.get("ref_voice") or "").strip():
+            tts["voice"] = tts["ref_voice"]
         return merged
 
 

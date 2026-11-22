@@ -112,22 +112,43 @@ def list_models(base_url: str | None = None) -> dict:
     return out
 
 
-def list_voices(base_url: str | None = None, model: str | None = None) -> dict:
-    """Reference voices in the audio.cpp voice library for the settings dropdown.
+def _model_task(base: str, model: str, timeout: float = 8) -> str:
+    try:
+        r = httpx.get(base + "/v1/models", timeout=timeout)
+        r.raise_for_status()
+        for m in r.json().get("data", []):
+            if m.get("id") == model:
+                return (m.get("task") or "").strip()
+    except (httpx.HTTPError, ValueError):
+        return ""
+    return ""
 
-    Returns {"voices": [...], "error": None} on success and a human-readable `error` when the
-    server is down or the library is empty, so the UI never shows a blank unexplained select.
+
+def list_voices(base_url: str | None = None, model: str | None = None) -> dict:
+    """Voices for the settings dropdown, shaped by the model's task.
+
+    audio.cpp answers the same voice_dir library for every model id (measured 2026-11-22), so the
+    builtin-vs-library split is made here: task=clon -> reference library; qwen3 …-customvoice ->
+    the model's builtin speaker names; anything else -> the reference library (the only list the
+    server can actually resolve). A human-readable `error` is returned when the server is down
+    or the library is empty, so the UI never shows a blank unexplained select.
     """
     cfg = store.get_settings()["tts"]
     base = (base_url or cfg["base_url"]).rstrip("/")
     mdl = (model or cfg["model"]).strip()
-    out: dict = {"base_url": base, "model": mdl, "voices": [], "error": None}
+    task = _model_task(base, mdl)
+    builtin = task != "clon" and "customvoice" in mdl
+    out: dict = {"base_url": base, "model": mdl, "task": task,
+                 "kind": "builtin" if builtin else "library", "voices": [], "error": None}
+    if builtin:
+        out["voices"] = list(BUILTIN_VOICES)
+        return out
     try:
         r = httpx.get(base + "/v1/audio/voices", params={"model": mdl}, timeout=8)
         r.raise_for_status()
         raw = r.json().get("voices", [])
     except (httpx.HTTPError, ValueError) as e:
-        out["error"] = f"audio.cpp 參考聲音清單讀不到：{e}"
+        out["error"] = f"audio.cpp 聲音清單讀不到：{e}"
         return out
     out["voices"] = [v for v in raw if isinstance(v, str) and v and v not in BUILTIN_VOICES]
     if not out["voices"]:
@@ -136,7 +157,13 @@ def list_voices(base_url: str | None = None, model: str | None = None) -> dict:
 
 
 def _tts_body(cfg: dict, text: str, emotion: str = "") -> dict:
-    """Request body for /v1/audio/speech; shared by narration and the settings test button."""
+    """Request body for /v1/audio/speech; shared by narration and the settings test button.
+
+    The 繁轉簡 toggle is applied here so the settings test line goes through exactly the same
+    conversion as an episode's narration.
+    """
+    if cfg.get("convert_simplified", True) and str(cfg.get("language", "")).lower() in ("chinese", "中文", "zh"):
+        text = to_simplified(text)
     opts = {k: v for k, v in (("language", cfg.get("language")), ("instruct", cfg.get("instruct"))) if v}
     emo = (emotion or "").strip() or (cfg.get("emotion") or "")
     if emo:
@@ -147,20 +174,17 @@ def _tts_body(cfg: dict, text: str, emotion: str = "") -> dict:
             opts["emotion"] = emo
             opts["emotion_alpha"] = float(cfg.get("emotion_alpha") or 1.0)
     body = {"model": cfg["model"], "input": text}
-    ref = (cfg.get("ref_voice") or "").strip()
-    voice = (cfg.get("voice") or "").strip()
+    # `voice` is the one field the settings UI writes; `ref_voice` is the deprecated field from
+    # PR #4 and only seeds `voice` when that is empty (store.get_settings does the same).
+    voice = (cfg.get("voice") or "").strip() or (cfg.get("ref_voice") or "").strip()
     library_voice = bool(voice) and voice not in BUILTIN_VOICES
-    if ref:
+    if voice and (cfg["model"].startswith("qwen3") or library_voice):
         # audio.cpp resolves `voice` against its reference library first; measured working with
         # model=index-tts2.5 and a voice_dir name (no voice_ref path needed).
-        body["voice"] = ref
-        if cfg["model"].startswith("qwen3"):
-            # voice_dir recordings carry no transcript, so ask Qwen3 for the speaker-embedding
-            # clone instead of ICL (which would demand reference_text).
-            opts["x_vector_only_mode"] = True
-    elif voice and (cfg["model"].startswith("qwen3") or library_voice):
         body["voice"] = voice
         if library_voice and cfg["model"].startswith("qwen3"):
+            # voice_dir recordings carry no transcript, so ask Qwen3 for the speaker-embedding
+            # clone instead of ICL (which would demand reference_text).
             opts["x_vector_only_mode"] = True
     if cfg.get("voice_ref"):
         body["voice_ref"] = cfg["voice_ref"]
@@ -228,8 +252,6 @@ def to_simplified(text: str) -> str:
 def tts(text: str, out: Path, emotion: str = "") -> Path:
     """Narration from the audio.cpp server (qwen3 / index-tts2.5 / zonos3 …)."""
     cfg = store.get_settings()["tts"]
-    if cfg.get("convert_simplified", True) and str(cfg.get("language", "")).lower() in ("chinese", "中文", "zh"):
-        text = to_simplified(text)
     body = _tts_body(cfg, text, emotion)
     try:
         # Cap the 503 wait so a busy server falls through to the next voice source instead of
