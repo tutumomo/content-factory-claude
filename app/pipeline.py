@@ -417,6 +417,13 @@ def st_assemble(ep: dict) -> bool:
     per_emo = bool(settings["tts"].get("per_scene_emotion"))
     narrator = sources.Narrator(plan, br, store.log, eid,
                                 total_chars=sum(len(sc["narration"]) for sc in scenes))
+    if narrator.cur == "audiocpp":
+        try:  # say it up front instead of letting every chunk fail with a 500 first
+            h = media.tts_health()
+            if h.get("needs_voice_ref"):
+                store.log(eid, f"配音：{h['detail']}")
+        except Exception:  # noqa: BLE001 - a health probe must never block assembly
+            pass
     clips, all_cues, t0 = [], [], 0.0
     durs: list[float] = []
     rm_imgs: list[str] = []

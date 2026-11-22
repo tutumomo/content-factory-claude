@@ -1,12 +1,12 @@
-// v=20261122c busts the browser module cache after UI changes
-import { $, $$, api, applyNavLayout, esc, getNavLayout, state } from "./lib.js?v=20261122c";
-import { openNewEpisodeModal, openSettingsModal } from "./modals.js?v=20261122c";
-import { viewContent } from "./views/content.js?v=20261122c";
-import { viewEpisode } from "./views/episode.js?v=20261122c";
-import { viewIdeas } from "./views/ideas.js?v=20261122c";
-import { viewInsights } from "./views/insights.js?v=20261122c";
-import { viewSchedule } from "./views/schedule.js?v=20261122c";
-import { viewStyle } from "./views/style.js?v=20261122c";
+// v=20261122d busts the browser module cache after UI changes
+import { $, $$, api, applyNavLayout, esc, getNavLayout, state } from "./lib.js?v=20261122d";
+import { openNewEpisodeModal, openSettingsModal } from "./modals.js?v=20261122d";
+import { viewContent } from "./views/content.js?v=20261122d";
+import { viewEpisode } from "./views/episode.js?v=20261122d";
+import { viewIdeas } from "./views/ideas.js?v=20261122d";
+import { viewInsights } from "./views/insights.js?v=20261122d";
+import { viewSchedule } from "./views/schedule.js?v=20261122d";
+import { viewStyle } from "./views/style.js?v=20261122d";
 
 const main = $("#main");
 
@@ -39,7 +39,7 @@ async function refreshStatus() {
     const cur = kind ? (WORKER_LABEL[kind] || "處理中") : "閒置";
     const qTxt = h.worker.queued ? `（排隊 ${h.worker.queued}）` : "";
     $("#status").innerHTML = `
-      <div class="st-item"><span class="dot ${h.tts.ok ? "ok" : "bad"}"></span>配音 <b>${h.tts.ok ? "就緒" : "未就緒"}</b></div>
+      <div class="st-item" title="${esc(h.tts.detail || "")}"><span class="dot ${h.tts.ok ? "ok" : "bad"}"></span>配音 <b>${h.tts.needs_voice_ref ? "缺參考聲音" : (h.tts.ok ? "就緒" : "未就緒")}</b></div>
       <div class="st-item"><span class="dot ok"></span>LLM <b>${esc(PROVIDER_LABEL[h.provider] || h.provider)}</b></div>
       <div class="st-item">agent：<b>${cur}</b>${qTxt}</div>`;
   } catch { /* server restarting */ }

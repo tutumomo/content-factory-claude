@@ -43,16 +43,37 @@ def _post_busy_retry(url: str, wait_total: float = 900, **kw) -> httpx.Response:
                 v[1].seek(0)
 
 
+def has_reference_voice(cfg: dict) -> bool:
+    """True when a clon model would get a reference voice (library name, file path, or builtin voice)."""
+    if (cfg.get("ref_voice") or "").strip() or (cfg.get("voice_ref") or "").strip():
+        return True
+    return bool((cfg.get("voice") or "").strip())
+
+
 def tts_health(timeout: float = 5) -> dict:
     cfg = store.get_settings()["tts"]
+    out = {"ok": False, "models": [], "model": cfg["model"], "task": "",
+           "needs_voice_ref": False, "detail": ""}
     try:
         r = httpx.get(cfg["base_url"].rstrip("/") + "/v1/models", timeout=timeout)
         r.raise_for_status()
-        ids = [m.get("id") for m in r.json().get("data", [])]
-        return {"ok": cfg["model"] in ids, "models": ids,
-                "detail": "就緒" if cfg["model"] in ids else f"伺服器上沒有 {cfg['model']}"}
+        rows = r.json().get("data", [])
     except httpx.HTTPError as e:
-        return {"ok": False, "models": [], "detail": f"audio.cpp 伺服器連不上：{e}（請先執行 audiocpp-webui 或啟動 audiocpp_server）"}
+        out["detail"] = f"audio.cpp 伺服器連不上：{e}（請先執行 audiocpp-webui 或啟動 audiocpp_server）"
+        return out
+    out["models"] = [m.get("id") for m in rows]
+    out["ok"] = cfg["model"] in out["models"]
+    out["task"] = next((m.get("task") or "" for m in rows if m.get("id") == cfg["model"]), "")
+    # index-tts2.5 / qwen3 Base answer task=clon: without a reference voice the server replies 500
+    # and the episode silently falls back to Edge TTS, so say it before the render starts.
+    out["needs_voice_ref"] = out["task"] == "clon" and not has_reference_voice(cfg)
+    if not out["ok"]:
+        out["detail"] = f"伺服器上沒有 {cfg['model']}"
+    elif out["needs_voice_ref"]:
+        out["detail"] = f"{cfg['model']} 是聲音複製模型，但沒有設定參考聲音；配音會失敗並降級成備援聲音。請到系統設定的「參考聲音」挑一個。"
+    else:
+        out["detail"] = "就緒"
+    return out
 
 
 VOICE_TASKS = {"tts", "clon", "vdes"}  # audio.cpp task tokens that produce narration
@@ -89,6 +110,79 @@ def list_models(base_url: str | None = None) -> dict:
     except httpx.HTTPError:
         pass
     return out
+
+
+def list_voices(base_url: str | None = None, model: str | None = None) -> dict:
+    """Reference voices in the audio.cpp voice library for the settings dropdown.
+
+    Returns {"voices": [...], "error": None} on success and a human-readable `error` when the
+    server is down or the library is empty, so the UI never shows a blank unexplained select.
+    """
+    cfg = store.get_settings()["tts"]
+    base = (base_url or cfg["base_url"]).rstrip("/")
+    mdl = (model or cfg["model"]).strip()
+    out: dict = {"base_url": base, "model": mdl, "voices": [], "error": None}
+    try:
+        r = httpx.get(base + "/v1/audio/voices", params={"model": mdl}, timeout=8)
+        r.raise_for_status()
+        raw = r.json().get("voices", [])
+    except (httpx.HTTPError, ValueError) as e:
+        out["error"] = f"audio.cpp 參考聲音清單讀不到：{e}"
+        return out
+    out["voices"] = [v for v in raw if isinstance(v, str) and v and v not in BUILTIN_VOICES]
+    if not out["voices"]:
+        out["error"] = f"audio.cpp 沒有回傳任何參考聲音（{mdl} 的 voice_dir 是空的？）"
+    return out
+
+
+def _tts_body(cfg: dict, text: str, emotion: str = "") -> dict:
+    """Request body for /v1/audio/speech; shared by narration and the settings test button."""
+    opts = {k: v for k, v in (("language", cfg.get("language")), ("instruct", cfg.get("instruct"))) if v}
+    emo = (emotion or "").strip() or (cfg.get("emotion") or "")
+    if emo:
+        if cfg["model"].startswith("qwen3"):
+            # qwen3 takes a free-text instruct: fold the per-scene emotion into it
+            opts["instruct"] = "，".join(x for x in (opts.get("instruct"), f"語氣：{emo}") if x)
+        else:
+            opts["emotion"] = emo
+            opts["emotion_alpha"] = float(cfg.get("emotion_alpha") or 1.0)
+    body = {"model": cfg["model"], "input": text}
+    ref = (cfg.get("ref_voice") or "").strip()
+    voice = (cfg.get("voice") or "").strip()
+    library_voice = bool(voice) and voice not in BUILTIN_VOICES
+    if ref:
+        # audio.cpp resolves `voice` against its reference library first; measured working with
+        # model=index-tts2.5 and a voice_dir name (no voice_ref path needed).
+        body["voice"] = ref
+        if cfg["model"].startswith("qwen3"):
+            # voice_dir recordings carry no transcript, so ask Qwen3 for the speaker-embedding
+            # clone instead of ICL (which would demand reference_text).
+            opts["x_vector_only_mode"] = True
+    elif voice and (cfg["model"].startswith("qwen3") or library_voice):
+        body["voice"] = voice
+        if library_voice and cfg["model"].startswith("qwen3"):
+            opts["x_vector_only_mode"] = True
+    if cfg.get("voice_ref"):
+        body["voice_ref"] = cfg["voice_ref"]
+    if opts:
+        body["options"] = opts
+    return body
+
+
+def test_tts(text: str = "這是參考聲音測試", emotion: str = "", cfg: dict | None = None) -> bytes:
+    """Synthesise one short line with the current (or given) settings; returns WAV bytes.
+
+    Raises MediaError carrying audio.cpp's own message so the settings page can show it verbatim.
+    """
+    cur = {**store.get_settings()["tts"], **(cfg or {})}
+    body = _tts_body(cur, text, emotion)
+    try:
+        r = httpx.post(cur["base_url"].rstrip("/") + "/v1/audio/speech", json=body, timeout=180)
+    except httpx.HTTPError as e:
+        raise MediaError(f"TTS 連線失敗：{e}") from e
+    if r.status_code != 200 or not r.content.startswith(b"RIFF"):
+        raise MediaError(f"audio.cpp HTTP {r.status_code}：{r.text[:400]}")
+    return r.content
 
 
 def split_for_tts(text: str, limit: int = 110) -> list[str]:
@@ -136,28 +230,7 @@ def tts(text: str, out: Path, emotion: str = "") -> Path:
     cfg = store.get_settings()["tts"]
     if cfg.get("convert_simplified", True) and str(cfg.get("language", "")).lower() in ("chinese", "中文", "zh"):
         text = to_simplified(text)
-    opts = {k: v for k, v in (("language", cfg.get("language")), ("instruct", cfg.get("instruct"))) if v}
-    emo = (emotion or "").strip() or (cfg.get("emotion") or "")
-    if emo:
-        if cfg["model"].startswith("qwen3"):
-            # qwen3 takes a free-text instruct: fold the per-scene emotion into it
-            opts["instruct"] = "，".join(x for x in (opts.get("instruct"), f"語氣：{emo}") if x)
-        else:
-            opts["emotion"] = emo
-            opts["emotion_alpha"] = float(cfg.get("emotion_alpha") or 1.0)
-    body = {"model": cfg["model"], "input": text}
-    voice = (cfg.get("voice") or "").strip()
-    library_voice = bool(voice) and voice not in BUILTIN_VOICES
-    if voice and (cfg["model"].startswith("qwen3") or library_voice):
-        body["voice"] = voice
-    if library_voice and cfg["model"].startswith("qwen3"):
-        # voice_dir recordings in this library carry no transcript, so ask Qwen3 for the
-        # speaker-embedding clone instead of ICL (which would demand reference_text).
-        opts["x_vector_only_mode"] = True
-    if cfg.get("voice_ref"):
-        body["voice_ref"] = cfg["voice_ref"]
-    if opts:
-        body["options"] = opts
+    body = _tts_body(cfg, text, emotion)
     try:
         # Cap the 503 wait so a busy server falls through to the next voice source instead of
         # holding the episode for 15 minutes; the chain (sources.Narrator) handles what comes next.

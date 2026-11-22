@@ -37,6 +37,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "language": "chinese",
         "instruct": "自然、清楚、有精神的科技節目主持人語氣",
         "voice_ref": "",                  # 參考音檔路徑；index-tts2.5 / zonos3-mini 必填
+        "ref_voice": "",                  # 參考聲音庫名稱（audio.cpp /v1/audio/voices；clon 模型用，優先於 voice）
         "emotion": "",                    # index-tts2.5 的情緒示範文字
         "emotion_alpha": 1.0,             # 0–1，情緒強度
         "per_scene_emotion": False,       # 逐段套用講稿情緒；Qwen3 的語氣指令會讓聲音聽起來像換人，預設關
