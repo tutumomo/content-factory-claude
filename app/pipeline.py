@@ -338,6 +338,7 @@ def st_assemble(ep: dict) -> bool:
             p = h3video.generate(desc, size, secs, assets / f"v{i:02d}.mp4", i=i, seed=2000 + i)
         except comfy.ComfyError as e:
             if getattr(e, "kind", "") == "connection":
+                br.trip("h3video")
                 br.trip("comfy")  # same server: do not queue stills behind a dead ComfyUI
             raise
         store.log(eid, f"畫面 {i + 1}/{n} 影片就緒")
@@ -414,6 +415,7 @@ def st_assemble(ep: dict) -> bool:
         else:
             render.slide(sc, size, img, channel, i, n)
             sc["_visual"] = "slide"
+            rep.use("visuals", "slides")
             if rep.wanted("visuals", plan) != "slides":
                 rep.note(f"畫面 {i + 1} 最後用字卡（前面的來源都沒成功）")
         if engine == "remotion":
@@ -473,7 +475,8 @@ def st_assemble(ep: dict) -> bool:
     if music_on:
         style = music.style_of(scr)
         try:
-            bgm, music_src = sources.pick_music(plan, br, t0, style, eid, store.log, preapproved=lyria_ok)
+            bgm, music_src = sources.pick_music(plan, br, t0, style, eid, store.log, preapproved=lyria_ok,
+                                                report=rep)
             rep.use("music", music_src)
             bgm_note = f"{sources.LABEL.get(music_src, music_src)}：{music.duration(bgm):.0f} 秒，" \
                        f"{mc.get('gain_db', -20)} dB" + ("，自動閃避旁白" if mc.get("duck", True) else "")

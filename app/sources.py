@@ -113,7 +113,6 @@ def _legacy(kind: str) -> list[str]:
 def chain(kind: str) -> list[str]:
     """The configured chain, with paid sources kept out unless the owner allowed them."""
     raw = (cfg().get(kind) or {}).get("chain") or (cfg().get("chains") or {}).get(kind)
-    derived = not raw
     out = [str(x).strip().lower() for x in (raw or _legacy(kind)) if str(x).strip()]
     out = [x for i, x in enumerate(out) if x in LABEL and x not in out[:i]]
     if not allow_paid(kind):
@@ -176,10 +175,10 @@ def _probe_music(src: str) -> dict:
             rows = r.json().get("data", [])
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "detail": f"audio.cpp 連不上：{type(e).__name__}"}
-        ids = [m.get("id") for m in rows]
+        # same rule as music.model_id: any installed music generator (not the sfx model) will do
+        mus = [m for m in rows if m.get("task") == "gen" and (m.get("family") or "") != "moss_soundeffect"]
         model = music.model_id(base)
-        ok = any(str(i).lower().startswith(str(model).split("-")[0].lower()) for i in ids)
-        return {"ok": ok, "detail": f"模型 {model}" if ok else f"伺服器上沒有音樂模型 {model}"}
+        return {"ok": bool(mus), "detail": f"模型 {model}" if mus else f"伺服器上沒有音樂模型 {model}"}
     if src == "openverse":
         # No request here: the anonymous quota is 20/min and 200/day, so keep it for real fetches.
         return {"ok": True, "detail": "免金鑰（授權曲庫；抓不到會往下一順位）"}
@@ -216,24 +215,29 @@ def _probe_one(kind: str, src: str) -> dict:
     return res
 
 
+def _probe_pairs(pairs: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
+    """Probe (kind, source) pairs in parallel: one 2–4 s budget for the whole set."""
+    out: dict[tuple[str, str], dict] = {}
+    if not pairs:
+        return out
+    with ThreadPoolExecutor(max_workers=len(pairs), thread_name_prefix="probe") as ex:
+        futs = {ex.submit(_probe_one, k, s): (k, s) for k, s in pairs}
+        done, pending = fut_wait(futs, timeout=_tmo() + 2)
+        for f in done:
+            try:
+                out[futs[f]] = f.result()
+            except Exception as e:  # noqa: BLE001
+                out[futs[f]] = {"ok": False, "detail": f"探測失敗：{e}"}
+        for f in pending:
+            out[futs[f]] = {"ok": False, "detail": "探測逾時"}
+    return out
+
+
 def probe(kind: str, chain_: list[str] | None = None) -> dict[str, dict]:
     """Probe every source of a category in parallel; returns {source: {ok, detail}}."""
     srcs = chain_ if chain_ is not None else chain(kind)
-    out: dict[str, dict] = {}
-    if not srcs:
-        return out
-    with ThreadPoolExecutor(max_workers=len(srcs), thread_name_prefix=f"probe-{kind}") as ex:
-        futs = {ex.submit(_probe_one, kind, s): s for s in srcs}
-        done, pending = fut_wait(futs, timeout=_tmo() + 2)
-        for f in done:
-            s = futs[f]
-            try:
-                out[s] = f.result()
-            except Exception as e:  # noqa: BLE001
-                out[s] = {"ok": False, "detail": f"探測失敗：{e}"}
-        for f in pending:
-            out[futs[f]] = {"ok": False, "detail": "探測逾時"}
-    return {s: out[s] for s in srcs}  # keep chain order
+    got = _probe_pairs([(kind, s) for s in srcs])
+    return {s: got[(kind, s)] for s in srcs}  # keep chain order
 
 
 # ---------- per-episode state ----------
@@ -338,9 +342,9 @@ class Report:
             if src == first_ok:
                 continue
             why = ""
-            probe = (plan.probes.get(kind) or {}).get(src) or {}
+            probe = (plan.probes.get(kind) or {}).get(first_ok) or {}
             if src in self.first_failed:
-                why = "失敗"
+                why = "中途失敗"
             elif first_ok and not probe.get("ok", True):
                 why = "未開"
             rows.append({"source": src, "label": LABEL.get(src, src), "n": n, "reason": why})
@@ -354,10 +358,11 @@ class Report:
             if not used:
                 continue
             first_ok = self.wanted(kind, plan)
-            parts = []
+            ok_part, groups = [], {}
             for src, n in used.items():
+                label = LABEL.get(src, src) + ("" if kind == "music" else f" {n}/{total}")
                 if src == first_ok:
-                    parts.append(f"{LABEL.get(src, src)} {n}/{total}")
+                    ok_part.append(label)
                     continue
                 probe = (plan.probes.get(kind) or {}).get(first_ok) or {}
                 if src in self.first_failed:
@@ -368,8 +373,9 @@ class Report:
                     why = "音效庫缺這個標籤"
                 else:
                     why = "降級"
-                parts.append(f"{why}，改用{LABEL.get(src, src)}" + ("" if kind == "music" else f" {n}/{total}"))
-            if any(s != first_ok for s in used):
+                groups.setdefault(why, []).append(label)
+            parts = ok_part + [f"{why}，改用{'、'.join(v)}" for why, v in groups.items()]
+            if groups:
                 out.append({"kind": kind, "label": KIND_LABEL[kind], "text": "；".join(parts)})
         return out
 
@@ -383,7 +389,8 @@ def start(kinds: list[str] | None = None) -> tuple[Plan, Breaker]:
     """Probe the chains once, before any expensive work. Returns the plan and a fresh breaker."""
     kinds = kinds or KINDS
     chains = {k: chain(k) for k in kinds}
-    probes = {k: probe(k, chains[k]) for k in kinds}
+    got = _probe_pairs([(k, s) for k in kinds for s in chains[k]])  # every category at once
+    probes = {k: {s: got[(k, s)] for s in chains[k]} for k in kinds}
     return Plan(chains, probes), Breaker(int(cfg().get("breaker_after") or BREAK_AFTER))
 
 
@@ -391,8 +398,8 @@ def overview(probe_all: bool = False) -> dict:
     """Settings page: the chains plus (optionally) live health of every source."""
     chains = {k: chain(k) for k in KINDS}
     if probe_all:  # one pass over every category, so the settings page waits ~one probe, not four
-        with ThreadPoolExecutor(max_workers=len(KINDS), thread_name_prefix="probe-all") as ex:
-            probes = dict(zip(KINDS, ex.map(lambda k: probe(k, chains[k]), KINDS)))
+        got = _probe_pairs([(k, s) for k in KINDS for s in chains[k]])
+        probes = {k: {s: got[(k, s)] for s in chains[k]} for k in KINDS}
     else:
         probes = {k: {} for k in KINDS}
     kinds = {k: {"label": KIND_LABEL[k], "chain": chains[k], "allow_paid": allow_paid(k),
@@ -434,6 +441,8 @@ def visual_batches(plan: Plan, br: Breaker, scenes: list[dict], vertical: bool,
                 r = fn(scenes[i], i)
             except Exception as e:  # noqa: BLE001 - a dead source must never kill the episode
                 br.fail(src)
+                if report and src == report.wanted("visuals", plan):
+                    report.primary_failed(src)
                 log(eid, f"畫面 {i + 1} 用 {LABEL[src]} 失敗：{e}")
                 continue
             if r:
@@ -547,7 +556,7 @@ def estimate_gemini_tts(chars: int, model: str = "") -> float:
 # ---------- music ----------
 
 def pick_music(plan: Plan, br: Breaker, seconds: float, style: str, eid: str, log,
-               preapproved: str = "") -> tuple:
+               preapproved: str = "", report: "Report | None" = None) -> tuple:
     """Walk the music chain. Returns (path, source). Lyria only runs after cost.decide says yes."""
     errors = []
     for src in plan.chains.get("music", []):
@@ -573,6 +582,8 @@ def pick_music(plan: Plan, br: Breaker, seconds: float, style: str, eid: str, lo
             errors.append(f"{LABEL[src]}：{e}")
             log(eid, f"音樂來源 {LABEL[src]} 失敗：{e}")
             br.fail(src)
+            if report and src == report.wanted("music", plan):
+                report.primary_failed(src)
     raise music.MusicError("；".join(errors[-3:]) or "沒有可用的音樂來源")
 
 
