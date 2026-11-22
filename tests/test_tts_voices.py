@@ -274,6 +274,34 @@ def test_test_endpoint_honours_convert_toggle(client, monkeypatch):
     assert body_seen["input"] == ZH
 
 
+# ---------- options.language: qwen3 only ----------
+
+def test_index_tts_body_omits_language_but_still_converts(client, monkeypatch, tmp_path):
+    set_settings(client, tts={"model": "index-tts2.5", "voice": "speaker-a",
+                              "language": "chinese", "convert_simplified": True})
+    seen = _capture_tts_request(monkeypatch)
+    media.tts(ZH, tmp_path / "idx.wav")
+    assert "language" not in (seen.get("options") or {})  # IndexTTS2.5 reads it aloud
+    assert seen["input"] == ZH_SIMPLIFIED                 # 繁轉簡 still keyed on tts.language
+
+
+def test_qwen3_body_keeps_language(client, monkeypatch, tmp_path):
+    set_settings(client, tts={"model": "qwen3-tts-1.7b-customvoice", "voice": "vivian",
+                              "language": "chinese", "convert_simplified": True})
+    seen = _capture_tts_request(monkeypatch)
+    media.tts(ZH, tmp_path / "qwen.wav")
+    assert (seen.get("options") or {}).get("language") == "chinese"
+    assert seen["input"] == ZH_SIMPLIFIED
+
+
+def test_non_qwen_tts_model_also_omits_language(client, monkeypatch, tmp_path):
+    set_settings(client, tts={"model": "zonos3-mini", "voice": "", "language": "chinese",
+                              "convert_simplified": False})
+    seen = _capture_tts_request(monkeypatch)
+    media.tts(ZH, tmp_path / "zonos.wav")
+    assert "language" not in (seen.get("options") or {})
+
+
 def test_settings_key_names_match_ui_and_media():
     """The toggle the modal writes must be the key media reads (guards against A/B rename drift)."""
     assert "convert_simplified" in store.DEFAULT_SETTINGS["tts"]
