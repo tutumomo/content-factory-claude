@@ -28,7 +28,7 @@ _q: "queue.Queue[tuple]" = queue.Queue()
 _current: dict = {}
 _pending: set[tuple] = set()          # (kind, args) of per-episode jobs waiting in _q
 _pending_lock = threading.Lock()
-_DEDUPE = ("episode", "youtube_upload")
+_DEDUPE = ("episode", "youtube_upload", "watch")
 
 
 def enqueue(kind: str, *args) -> bool:
@@ -58,6 +58,9 @@ def _worker() -> None:
                 run_episode(*args)
             elif kind == "radar":
                 run_radar(*args)
+            elif kind == "watch":
+                from . import watch
+                watch.run(*args)
             elif kind == "insights_analyze":
                 run_insights_analyze()
             elif kind == "youtube_upload":
@@ -71,6 +74,9 @@ def _worker() -> None:
                 msg = f"{type(e).__name__}: {e}"
                 tb = traceback.format_exc()[-800:]
                 _save_radar_state("error", f"雷達掃描失敗：{msg}", error=f"{msg}\n{tb}")
+            elif kind == "watch":
+                from . import watch
+                watch.mark(args[0], "error", f"掃描失敗：{type(e).__name__}: {e}")
             elif kind == "insights_analyze":
                 cur = store.get_insights_summary()
                 store.save_insights_summary({**cur, "analyzing": False, "error": f"{type(e).__name__}: {e}"})
@@ -736,14 +742,47 @@ def st_assemble(ep: dict) -> bool:
     return True
 
 
+def _source_urls(ep: dict) -> list[str]:
+    """Owner links first, then links the agent found itself; http(s) only, no repeats."""
+    seen, out = set(), []
+    for u in list(ep.get("source_urls") or []) + list(ep.get("auto_source_urls") or []):
+        u = str(u).strip()
+        if u.startswith(("http://", "https://")) and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def _with_links(text, urls: list[str], tags: list[str]) -> str:
+    """Make sure the body text carries the source links and hashtags the model may have left out."""
+    body = str(text or "").rstrip()
+    missing = [u for u in urls if u not in body]
+    if missing:
+        head = "\n" if any(u in body for u in urls) else "\n\n來源連結：\n"
+        body += head + "\n".join(missing)
+    if tags and not all(t in body for t in tags):
+        body += "\n\n" + " ".join(tags)
+    return body.strip()
+
+
+def _finish_package(pk: dict, urls: list[str]) -> None:
+    """Links and hashtags go into the description and the FB post body (not only metadata).
+    FB gets at most 3 links to keep the post short."""
+    tags = [str(t).strip() for t in (pk.get("hashtags") or []) if str(t).strip()]
+    pk["description"] = _with_links(pk.get("description"), urls, tags)
+    pk["fb_post"] = _with_links(pk.get("fb_post"), urls[:3], tags)
+
+
 def st_package(ep: dict) -> bool:
     eid = ep["id"]
     if ep.get("package_choice"):
         return True
     cfg = store.get_settings()["pipeline"]
     scr = store.read_json(eid, "script.json")
-    sys, pr = prompts.package(ep, scr, cfg["title_count"], cfg["thumbnail_count"])
+    urls = _source_urls(ep)
+    sys, pr = prompts.package(ep, scr, cfg["title_count"], cfg["thumbnail_count"], urls)
     pk = llm.complete_json("package", sys, pr)
+    _finish_package(pk, urls)
     for t in pk.get("titles") or []:
         if isinstance(t, dict):
             t["warnings"] = editorial.title_lint(t.get("text", ""))
@@ -818,7 +857,11 @@ def st_approved(ep: dict) -> bool:
     meta["shorts"] = {"vertical": ep["format"] == "short", "caption_tiktok": caption[:2100],
                       "caption_instagram": caption[:2100]}
     (pub / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
-    (pub / "description.txt").write_text(f"{ch['title']}\n\n{pk.get('description', '')}\n\n{' '.join(pk.get('hashtags', []))}", "utf-8")
+    desc = pk.get("description", "")
+    tags = [str(t).strip() for t in (pk.get("hashtags") or []) if str(t).strip()]
+    # old packages kept hashtags only in the metadata: append them then, but never twice
+    tail = "" if not tags or all(t in desc for t in tags) else " ".join(tags)
+    (pub / "description.txt").write_text(f"{ch['title']}\n\n{desc}" + (f"\n\n{tail}" if tail else ""), "utf-8")
     store.update_episode(eid, status="done", waiting_for=None)
     store.log(eid, f"已核准，發布包輸出到 {pub}")
     return True
@@ -857,6 +900,33 @@ def _save_radar_state(status: str, message: str, *, started: float | None = None
     })
 
 
+def radar_rows(text: str) -> list[dict]:
+    """Scored radar topics from prepared seed text (raises llm.LLMError)."""
+    rng = store.get_settings()["pipeline"]
+    lo, hi = rng["radar_min"], rng["radar_max"]
+    rows = None
+    if rng.get("radar_scoring", True):
+        rows = editorial.radar_scored(text, lo, hi, rng)
+    if rows is None:  # scoring off: keep the old single-pass radar
+        sys, pr = prompts.radar(text, lo, hi)
+        data = llm.complete_json("radar", sys, pr)
+        rows = [t for t in data.get("topics", []) if isinstance(t, dict)][:hi]
+    return rows
+
+
+def add_radar_cards(rows: list[dict], kind: str = "radar", source: str = "") -> None:
+    with store._lock:
+        items = store.get_radar()
+        now = time.time()
+        for t in reversed(rows):  # keep the ranking with the best on top
+            t["found"] = now
+            t["kind"] = kind
+            if source and not str(t.get("source") or "").strip():
+                t["source"] = source
+            items.insert(0, t)
+        store.save_radar(items)
+
+
 def run_radar(seeds: str) -> None:
     started = time.time()
     _save_radar_state("running", "正在抓取線索與整理候選…", started=started)
@@ -883,16 +953,8 @@ def run_radar(seeds: str) -> None:
     for f in fetched:
         blocks.append(f"## {f['url']}\n" + (f["text"] if f["ok"] else f"（抓取失敗：{f['reason']}）"))
     text = "\n\n".join(blocks)
-    rng = store.get_settings()["pipeline"]
-    lo, hi = rng["radar_min"], rng["radar_max"]
-    rows = None
     try:
-        if rng.get("radar_scoring", True):
-            rows = editorial.radar_scored(text, lo, hi, rng)
-        if rows is None:  # scoring off: keep the old single-pass radar
-            sys, pr = prompts.radar(text, lo, hi)
-            data = llm.complete_json("radar", sys, pr)
-            rows = [t for t in data.get("topics", []) if isinstance(t, dict)][:hi]
+        rows = radar_rows(text)
     except llm.LLMError as e:
         msg = f"模型呼叫失敗（{type(e).__name__}）：{e}"
         _save_radar_state("error", msg, started=started, failed=failed, error=msg)
@@ -907,13 +969,7 @@ def run_radar(seeds: str) -> None:
             msg += "注意：" + "；".join(notes) + "。"
         _save_radar_state("empty", msg, started=started, failed=failed)
         return
-    items = store.get_radar()
-    now = time.time()
-    for t in reversed(rows):  # keep the ranking with the best on top
-        t["found"] = now
-        t["kind"] = "radar"
-        items.insert(0, t)
-    store.save_radar(items)
+    add_radar_cards(rows)
     msg = f"新增 {len(rows)} 張候選卡。"
     if failed:
         msg += f"另有 {len(failed)} 個連結抓不到，已用其他線索完成掃描。"

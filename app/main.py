@@ -13,7 +13,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import comfy, cost, llm, media, music, pipeline, prompts, sfx, sources, stock, stock_audio, store, video, video_analysis, youtube
+from . import comfy, cost, llm, media, music, pipeline, prompts, sfx, sources, stock, stock_audio, store, video, video_analysis, watch, youtube
 
 app = FastAPI(title="內容工廠")
 STATIC = store.ROOT / "static"
@@ -36,6 +36,7 @@ def _startup() -> None:
         if ep["status"] in ("queued", "running"):
             store.log(ep["id"], "伺服器重啟，重新排入佇列")
             pipeline.enqueue("episode", ep["id"])
+    watch.start_scheduler()
 
 
 def _ep(eid: str) -> dict:
@@ -367,6 +368,46 @@ def radar_scan(body: dict = Body(...)):
     })
     pipeline.enqueue("radar", seeds)
     return {"ok": True}
+
+
+@app.get("/api/watch")
+def watch_list():
+    return {"sources": watch.list_sources(), "now": time.time()}
+
+
+@app.post("/api/watch")
+def watch_create(body: dict = Body(...)):
+    try:
+        src = watch.create(body)
+    except watch.WatchError as e:
+        raise HTTPException(400, str(e)) from e
+    if body.get("run_now"):
+        watch.run_now(src["id"])
+    return src
+
+
+@app.put("/api/watch/{sid}")
+def watch_update(sid: str, body: dict = Body(...)):
+    try:
+        return watch.update(sid, body)
+    except watch.WatchError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.delete("/api/watch/{sid}")
+def watch_delete(sid: str):
+    if not watch.delete(sid):
+        raise HTTPException(404, "找不到這個訂閱來源")
+    return {"ok": True}
+
+
+@app.post("/api/watch/{sid}/run")
+def watch_run(sid: str):
+    try:
+        queued = watch.run_now(sid)
+    except watch.WatchError as e:
+        raise HTTPException(404, str(e)) from e
+    return {"ok": True, "queued": queued}
 
 
 @app.delete("/api/radar/{idx}")

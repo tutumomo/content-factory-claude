@@ -489,7 +489,7 @@ def _norm_idea(item: dict, idx: int = 0) -> dict | None:
         digest = hashlib.sha1(f"{title}|{found_ts}|{idx}".encode("utf-8")).hexdigest()[:8]
         iid = f"idea-{digest}"
     kind = item.get("kind")
-    if kind not in ("radar", "note", "link", "quote"):
+    if kind not in ("radar", "watch", "note", "link", "quote"):
         kind = "radar"
     fmt = item.get("format") if item.get("format") in ("long", "short") else "short"
     tags = [str(t).strip() for t in (item.get("tags") or []) if str(t).strip()]
@@ -547,6 +547,7 @@ def _norm_idea_radar(item: dict) -> dict:
 
 IDEA_LIMIT = 300      # 使用者自己記的靈感：超過才從最舊的開始丟
 RADAR_LIMIT = 60      # 雷達掃回來的題目：只留最新的
+WATCH_LIMIT = 120     # 訂閱來源定時掃描的題目：只留最新的
 
 
 def _norm_idea_list(items: list[dict]) -> list[dict]:
@@ -555,11 +556,13 @@ def _norm_idea_list(items: list[dict]) -> list[dict]:
         norm = _norm_idea(item, idx)
         if norm:
             kept.append(norm)
-    manual = [x for x in kept if x["kind"] != "radar"]
+    manual = [x for x in kept if x["kind"] not in ("radar", "watch")]
     radar = [x for x in kept if x["kind"] == "radar"]
     radar = sorted(radar, key=lambda x: x["found"], reverse=True)[:RADAR_LIMIT]
+    watch = [x for x in kept if x["kind"] == "watch"]  # scheduled scans get their own quota
+    watch = sorted(watch, key=lambda x: x["found"], reverse=True)[:WATCH_LIMIT]
     manual = sorted(manual, key=lambda x: x["found"], reverse=True)[:IDEA_LIMIT]
-    return sorted(manual + radar, key=lambda x: x["found"], reverse=True)
+    return sorted(manual + radar + watch, key=lambda x: x["found"], reverse=True)
 
 
 def get_radar() -> list[dict]:

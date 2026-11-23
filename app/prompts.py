@@ -190,7 +190,15 @@ def revise(ep: dict, scr: dict, reviews: dict, extra: str = "") -> tuple[str, st
     return sys, prompt
 
 
-def package(ep: dict, scr: dict, n_titles: int, n_thumbs: int) -> tuple[str, str]:
+def _link_rule(urls: list[str]) -> str:
+    tags = "說明欄最後一行與 FB 貼文最後一行都要寫 hashtags 陣列的標籤（正文內，不是只放在 hashtags 欄位）。"
+    if not urls:
+        return "說明欄與 FB 貼文不寫來源連結段，也不編造網址。" + tags
+    return ("說明欄與 FB 貼文的正文都要有「來源連結」段，逐行原樣列出下面的網址（一字不改、不增加、不捏造）；"
+            "來源段放在時間軸之後。\n可用網址：\n" + "\n".join(f"- {u}" for u in urls) + "\n" + tags)
+
+
+def package(ep: dict, scr: dict, n_titles: int, n_thumbs: int, urls: list[str] | None = None) -> tuple[str, str]:
     sys = base_system(ep.get("style_id")) + f"""
 
 # 任務：包裝
@@ -207,6 +215,8 @@ def package(ep: dict, scr: dict, n_titles: int, n_thumbs: int) -> tuple[str, str
 {TERM_RULES}
 
 說明欄的寫法：第一段第一句就是「答案前置」的摘要，直接講誰做了什麼、關鍵結果或變化；第二段再補 1–2 個最重要的重點；時間軸佔位放在最後。不要用「本文介紹」「這支影片帶你了解」開頭。
+
+{_link_rule(urls or [])}
 標題要與內容相符、不誇大、不騙點擊；每個標題都必須能脫離影片封面與頻道名稱獨立理解。
 輸出：{{"titles":[{{"text":"標題","angle":"好奇|數字|衝突|實用"}}]（{n_titles} 個）,
 "thumbnails":[{{"main":"縮圖大字 4–10 字","sub":"小字 12 字內","theme":"dark|light"}}]（{n_thumbs} 個，深淺都要有）,
