@@ -1,6 +1,7 @@
 """SOP stages and a single background worker. Agents do the work; users decide at the gates."""
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import queue
@@ -382,7 +383,7 @@ def _render_ffmpeg(clips: list[Path], ass: Path, out: Path, assets: Path, bgm: P
 def _render_remotion(eid: str, clips: list[Path], scenes: list[dict], durs: list[float],
                      cues: list[dict], size: tuple[int, int], assets: Path, out: Path,
                      bgm: Path | None, t0: float, mc: dict, channel: str,
-                     imgs: list[str] | None = None) -> Path:
+                     imgs: list[str] | None = None, videos: list[str] | None = None) -> Path:
     """Animated composition: soundtrack is prepared first, the React render supplies the picture."""
     chk = video.available()
     if not chk["ok"]:
@@ -396,7 +397,7 @@ def _render_remotion(eid: str, clips: list[Path], scenes: list[dict], durs: list
         mixed = media.loudnorm_copy(joined, assets / "mixed.mp4")
     track = media.extract_audio(mixed, assets / "track.m4a")
     store.log(eid, f"Remotion：渲染 {len(scenes)} 個畫面的動畫")
-    props = video.build_props(scenes, cues, size, durs, channel=channel, imgs=imgs)
+    props = video.build_props(scenes, cues, size, durs, channel=channel, imgs=imgs, videos=videos)
     vid = video.render(assets, props, assets / "remotion.mp4")
     return media.mux_audio(vid, track, out, t0)
 
@@ -435,6 +436,18 @@ def st_storyboard(ep: dict) -> bool:
     store.log(eid, f"分鏡就緒：{total} 個畫面，預估 {est_total:.0f} 秒")
     wait(eid, "storyboard")
     return False
+
+
+def _shot_seconds(ep: dict, vis: dict) -> float:
+    """Target length of one stock shot: the episode's style card (from a reference video) wins,
+    then settings visuals.stock_shot_seconds (5)."""
+    card = store.get_style(ep.get("style_id")) or store.get_style() or {}
+    v = (card.get("visual_notes") or {}).get("avg_shot_seconds") if isinstance(card, dict) else None
+    try:
+        v = float(v) if v else float(vis.get("stock_shot_seconds", 5) or 5)
+    except (TypeError, ValueError):
+        v = 5.0
+    return min(8.0, max(2.5, v))
 
 
 def st_assemble(ep: dict) -> bool:
@@ -493,12 +506,19 @@ def st_assemble(ep: dict) -> bool:
     scenes = scr["scenes"]
     n = len(scenes)
     vis = settings["visuals"]
+    # per-episode seed offset: the same scene index in two episodes must not share a seed
+    ep_seed = int(hashlib.sha1(eid.encode()).hexdigest()[:6], 16) % 100000
+    shot_s = _shot_seconds(ep, vis)
+    max_shots = max(1, int(vis.get("stock_max_shots", 3) or 1))
+    used_clips: set[str] = set()
+    recent_clips = stock.recent_keys(skip_episode=eid)
+    stock_shots: dict[int, list[dict]] = {}
 
     def _h3(sc: dict, i: int) -> dict | None:
         desc = (sc.get("visual") or sc.get("headline") or "").strip()
         secs = len(re.sub(r"\s", "", sc["narration"])) / 4.6 + 0.7
         try:
-            p = h3video.generate(desc, size, secs, assets / f"v{i:02d}.mp4", i=i, seed=2000 + i)
+            p = h3video.generate(desc, size, secs, assets / f"v{i:02d}.mp4", i=i, seed=2000 + ep_seed + i)
         except comfy.ComfyError as e:
             if getattr(e, "kind", "") == "connection":
                 br.trip("h3video")
@@ -511,7 +531,7 @@ def st_assemble(ep: dict) -> bool:
         desc = (sc.get("visual") or sc.get("headline") or "").strip()
         prompt = f"{desc}, {vis.get('style_hint')}, absolutely no text, no letters, no watermark"
         try:
-            p = comfy.generate(prompt, size, assets / f"bg{i:02d}.jpg", seed=1000 + i)
+            p = comfy.generate(prompt, size, assets / f"bg{i:02d}.jpg", seed=1000 + ep_seed + i)
         except comfy.ComfyError as e:
             if getattr(e, "kind", "") == "connection":
                 br.trip("comfy")
@@ -520,10 +540,15 @@ def st_assemble(ep: dict) -> bool:
 
     def _stock(sc: dict, i: int) -> dict | None:
         q = stock.scene_query(sc)
-        got = stock.fetch(q, vertical)
+        est = len(re.sub(r"\s", "", sc.get("narration") or "")) / 4.6 + 0.7
+        want = min(max_shots, max(1, round(est / shot_s)))
+        got = stock.fetch(q, vertical, n=want, exclude=used_clips, recent=recent_clips, seed=f"{eid}-{i}")
         if not got:
             store.log(eid, f"畫面 {i + 1} 找不到素材（{q or '無關鍵詞'}）")
             return None
+        shots = got.get("shots") or [got]
+        used_clips.update(s.get("key") or "" for s in shots)
+        stock_shots[i] = shots
         return {"kind": "stock", "path": got["path"], "meta": got}
 
     backgrounds = sources.visual_batches(plan, br, scenes, vertical,
@@ -531,11 +556,14 @@ def st_assemble(ep: dict) -> bool:
     vids = {i: b["path"] for i, b in backgrounds.items() if b["kind"] == "h3video"}
     bgs = {i: b["path"] for i, b in backgrounds.items() if b["kind"] == "comfy"}
     clip_bgs = {i: b["path"] for i, b in backgrounds.items() if b["kind"] == "stock"}
-    # credits go to assets/sources.json as plain JSON: drop the local cache Path
-    stock_sources = [{k: (str(v) if isinstance(v, Path) else v) for k, v in b["meta"].items()}
-                     for b in backgrounds.values() if b["kind"] == "stock" and b.get("meta")]
+    # credits go to assets/sources.json as plain JSON: one row per clip, without the local cache Path
+    stock_sources = [{k: (str(v) if isinstance(v, Path) else v) for k, v in sh.items()}
+                     for i in sorted(stock_shots) for sh in stock_shots[i]]
     if stock_sources:
         stock.save_sources(assets, stock_sources)
+        stock.mark_used([r.get("key") for r in stock_sources], eid)
+        multi = sum(1 for v in stock_shots.values() if len(v) > 1)
+        store.log(eid, f"實拍素材：{len(stock_sources)} 支不重複的片段，{multi} 個畫面切成多鏡頭（每鏡約 {shot_s:g} 秒）")
     if (vids or bgs) and vis.get("free_after", True):
         comfy.free()
         store.log(eid, "已請 ComfyUI 釋放模型記憶體")
@@ -621,7 +649,14 @@ def st_assemble(ep: dict) -> bool:
                                               sfx=fx, sfx_gain=sfx_gain,
                                               bg_audio_gain=None if amb is None or float(amb) <= -60 else float(amb))
         elif i in clip_bgs:
-            clip_dur = media.scene_clip_video(clip_bgs[i], wav, assets / f"s{i:02d}.mp4", size,
+            bg = clip_bgs[i]
+            shots = stock_shots.get(i) or []
+            if len(shots) > 1:
+                total = media.wav_duration(wav) + 0.35
+                use = shots[:min(len(shots), max(1, round(total / shot_s)))]
+                if len(use) > 1:
+                    bg = media.montage(use, total, assets / f"m{i:02d}.mp4", size, seed=f"{eid}-{i}")
+            clip_dur = media.scene_clip_video(bg, wav, assets / f"s{i:02d}.mp4", size,
                                               sfx=fx, sfx_gain=sfx_gain)
         else:
             clip_dur = media.scene_clip(img, wav, assets / f"s{i:02d}.mp4", sfx=fx, sfx_gain=sfx_gain)
@@ -679,7 +714,9 @@ def st_assemble(ep: dict) -> bool:
     if engine == "remotion":
         try:
             final = _render_remotion(eid, clips, scr["scenes"], durs, all_cues, size, assets, out / "final.mp4",
-                                     bgm, t0, mc, channel, rm_imgs)
+                                     bgm, t0, mc, channel, rm_imgs,
+                                     videos=[f"s{i:02d}.mp4" if (i in vids or i in clip_bgs) and rc.get("remotion_video", True)
+                                             else "" for i in range(n)])
             final_note = "Remotion"
             store.log(eid, "Remotion 渲染完成")
         except Exception as e:

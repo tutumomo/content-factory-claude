@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -18,6 +20,10 @@ from . import store
 PEXELS_API = "https://api.pexels.com/videos/search"
 PIXABAY_API = "https://pixabay.com/api/videos/"
 MIN_SECONDS = 3.0
+PER_PAGE = 15                # candidates per provider and query; more choice = fewer repeats
+USAGE_FILE = "stock_usage.json"   # data/stock_usage.json: {"pexels:123": [unix time, episode id], ...}
+USAGE_MAX = 2000
+_usage_lock = threading.Lock()
 
 
 class StockError(RuntimeError):
@@ -58,7 +64,7 @@ def _orientation(vertical: bool) -> str:
 
 def _pexels(query: str, vertical: bool, key: str) -> list[dict]:
     r = httpx.get(PEXELS_API, params={"query": query, "orientation": _orientation(vertical),
-                                      "per_page": 8, "size": "medium"},
+                                      "per_page": PER_PAGE, "size": "medium"},
                   headers={"Authorization": key}, timeout=20)
     r.raise_for_status()
     out = []
@@ -78,7 +84,7 @@ def _pexels(query: str, vertical: bool, key: str) -> list[dict]:
 
 
 def _pixabay(query: str, vertical: bool, key: str) -> list[dict]:
-    r = httpx.get(PIXABAY_API, params={"key": key, "q": query, "video_type": "film", "per_page": 8,
+    r = httpx.get(PIXABAY_API, params={"key": key, "q": query, "video_type": "film", "per_page": PER_PAGE,
                                        "safesearch": "true"}, timeout=20)
     r.raise_for_status()
     out = []
@@ -117,27 +123,111 @@ def search(query: str, vertical: bool = False) -> list[dict]:
     return rows
 
 
-def fetch(query: str, vertical: bool = False) -> dict | None:
-    """Download the best candidate; returns {path, provider, author, page, license, duration}."""
-    for cand in search(query, vertical)[:3]:
-        h = hashlib.sha1(cand["url"].encode()).hexdigest()[:16]
-        ext = ".mp4" if ".mp4" in cand["url"].lower() else Path(cand["url"]).suffix or ".mp4"
-        path = cache_dir() / f"{h}{ext}"
-        if not (path.exists() and path.stat().st_size > 10000):
-            try:
-                with httpx.stream("GET", cand["url"], timeout=120, follow_redirects=True) as r:
-                    r.raise_for_status()
-                    tmp = path.with_suffix(".part")
-                    with tmp.open("wb") as fh:
-                        for chunk in r.iter_bytes(1 << 16):
-                            fh.write(chunk)
-                    tmp.replace(path)
-            except httpx.HTTPError:
-                continue
-        return {"path": path, "provider": cand["provider"], "author": cand.get("author", ""),
-                "page": cand.get("page", ""), "license": cand.get("license", ""),
-                "duration": float(cand.get("duration") or 0), "query": query}
-    return None
+def clip_key(row: dict) -> str:
+    """Stable id of one stock clip across searches: provider + provider's video id."""
+    return f"{row.get('provider')}:{row.get('id')}"
+
+
+# ---------- usage ledger: clips used in recent episodes rank last ----------
+
+def _usage_path() -> Path:
+    return store.DATA / USAGE_FILE
+
+
+def usage() -> dict:
+    try:
+        d = json.loads(_usage_path().read_text("utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def recent_keys(days: float | None = None, skip_episode: str = "") -> set[str]:
+    """Clips another episode used in the last `days` days (settings visuals.stock_recent_days, 30)."""
+    if days is None:
+        days = float(cfg().get("stock_recent_days", 30) or 0)
+    if days <= 0:
+        return set()
+    cut = time.time() - days * 86400
+    out = set()
+    for k, v in usage().items():
+        if isinstance(v, list) and len(v) >= 2 and float(v[0] or 0) >= cut and v[1] != skip_episode:
+            out.add(k)
+    return out
+
+
+def mark_used(keys, episode: str) -> None:
+    keys = [k for k in keys if k]
+    if not keys:
+        return
+    with _usage_lock:
+        d = usage()
+        now = time.time()
+        for k in keys:
+            d[k] = [round(now), episode]
+        if len(d) > USAGE_MAX:   # forget the oldest
+            d = dict(sorted(d.items(), key=lambda kv: kv[1][0] if isinstance(kv[1], list) else 0)[-USAGE_MAX:])
+        tmp = _usage_path().with_suffix(".tmp")
+        tmp.write_text(json.dumps(d, ensure_ascii=False), "utf-8")
+        tmp.replace(_usage_path())
+
+
+def rank(rows: list[dict], exclude: set[str], recent: set[str], seed: str = "") -> list[dict]:
+    """Unused-in-this-episode only; clips other recent episodes used go last; a good size fit beats a
+    poor one; among equals the order is shuffled per seed so similar queries do not land on one clip."""
+    def jitter(r: dict) -> str:
+        return hashlib.sha1(f"{seed}|{clip_key(r)}".encode()).hexdigest()
+    keep = [r for r in rows if clip_key(r) not in exclude]
+    # rows arrive sorted by fit; keep that as a coarse band (top half / rest) and shuffle inside it
+    band = {clip_key(r): (0 if i < max(3, len(keep) // 2) else 1) for i, r in enumerate(keep)}
+    return sorted(keep, key=lambda r: (clip_key(r) in recent, band[clip_key(r)], jitter(r)))
+
+
+def _download(cand: dict) -> Path | None:
+    h = hashlib.sha1(cand["url"].encode()).hexdigest()[:16]
+    ext = ".mp4" if ".mp4" in cand["url"].lower() else Path(cand["url"]).suffix or ".mp4"
+    path = cache_dir() / f"{h}{ext}"
+    if path.exists() and path.stat().st_size > 10000:
+        return path
+    try:
+        with httpx.stream("GET", cand["url"], timeout=120, follow_redirects=True) as r:
+            r.raise_for_status()
+            tmp = path.with_suffix(".part")
+            with tmp.open("wb") as fh:
+                for chunk in r.iter_bytes(1 << 16):
+                    fh.write(chunk)
+            tmp.replace(path)
+    except httpx.HTTPError:
+        return None
+    return path
+
+
+def fetch(query: str, vertical: bool = False, n: int = 1, exclude: set[str] | None = None,
+          recent: set[str] | None = None, seed: str = "") -> dict | None:
+    """Download up to `n` different clips for one scene.
+
+    Returns the first clip as {path, provider, id, key, author, page, license, duration, query}
+    plus "shots": every downloaded clip (the first included), for a multi-shot scene.
+    `exclude` = clips this episode already used (never picked again); `recent` = clips other recent
+    episodes used (picked only when nothing else is left).
+    """
+    exclude = set(exclude or ())
+    shots: list[dict] = []
+    tries = 0
+    for cand in rank(search(query, vertical), exclude, set(recent or ()), seed):
+        if len(shots) >= max(1, n) or tries >= max(3, n + 2):
+            break
+        tries += 1
+        path = _download(cand)
+        if not path:
+            continue
+        shots.append({"path": path, "provider": cand["provider"], "id": cand.get("id"),
+                      "key": clip_key(cand), "author": cand.get("author", ""),
+                      "page": cand.get("page", ""), "license": cand.get("license", ""),
+                      "duration": float(cand.get("duration") or 0), "query": query})
+    if not shots:
+        return None
+    return {**shots[0], "shots": shots}
 
 
 def scene_query(scene: dict) -> str:

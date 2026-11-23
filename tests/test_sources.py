@@ -359,7 +359,7 @@ class AssembleTests(Base):
              mock.patch.object(media, "align", lambda w, t: None), \
              mock.patch.object(comfy, "health", lambda timeout=4: {"ok": comfy_ok, "detail": "測試"}), \
              mock.patch.object(stock, "fetch",
-                               lambda q, vertical=False: {"path": clip, "provider": "pexels", "author": "a",
+                               lambda q, vertical=False, **kw: {"path": clip, "provider": "pexels", "author": "a",
                                                           "page": "", "license": "", "duration": 1.0,
                                                           "query": q}), \
              mock.patch.object(stock, "save_sources", lambda *a, **k: None), \

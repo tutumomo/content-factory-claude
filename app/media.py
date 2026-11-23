@@ -622,6 +622,35 @@ def scene_clip_video(bg: Path, wav: Path, out: Path, size: tuple[int, int], pad:
     return dur
 
 
+def montage(shots: list[dict], dur: float, out: Path, size: tuple[int, int], seed: str = "") -> Path:
+    """Video-only cut of several clips, `dur` seconds in total, cropped to the frame.
+
+    `shots`: [{"path": Path, "duration": seconds or 0}]. Each shot gets an equal slice and starts
+    at a seed-picked point inside its clip, so a clip seen before does not open on the same frame.
+    """
+    import hashlib
+    W, H = size
+    n = max(1, len(shots))
+    seg = max(0.5, dur / n)
+    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    parts = []
+    for k, sh in enumerate(shots):
+        cd = float(sh.get("duration") or 0)
+        room = cd - seg - 0.3
+        start = 0.0
+        if room > 0.5:
+            frac = int(hashlib.sha1(f"{seed}|{k}|{sh['path']}".encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+            start = round(room * frac, 2)
+        cmd += ["-ss", f"{start:.2f}", "-stream_loop", "-1", "-i", str(sh["path"])]
+        parts.append(f"[{k}:v]trim=duration={seg:.3f},setpts=PTS-STARTPTS,"
+                     f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps=30,setsar=1[v{k}]")
+    parts.append("".join(f"[v{k}]" for k in range(n)) + f"concat=n={n}:v=1:a=0[v]")
+    cmd += ["-filter_complex", ";".join(parts), "-map", "[v]", "-t", f"{dur:.3f}", "-an",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-r", "30", str(out)]
+    run(cmd)
+    return out
+
+
 def concat_and_burn(clips: list[Path], ass: Path, out: Path, workdir: Path, loudnorm: bool = True) -> Path:
     lst = workdir / "concat.txt"
     lst.write_text("".join(f"file '{c.resolve()}'\n" for c in clips), "utf-8")

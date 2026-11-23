@@ -66,6 +66,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "style_hint": "cinematic editorial illustration, soft natural light, shallow depth of field, high detail",
         "pexels_key_env": "PEXELS_API_KEY",   # 只存名稱；實拍素材（Pexels）
         "pixabay_key_env": "PIXABAY_API_KEY", # 只存名稱；實拍素材（Pixabay）
+        "stock_shot_seconds": 5,           # 實拍素材每個鏡頭約幾秒；參考影片風格卡的平均鏡頭長度優先
+        "stock_max_shots": 3,              # 一個畫面最多切幾個鏡頭
+        "stock_recent_days": 30,           # 這幾天內別集用過的片段排到最後
     },
     "h3video": {
         "enabled": True,
@@ -124,6 +127,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "engine": "ffmpeg",                # ffmpeg = 直接燒字幕；remotion = React 動畫合成
         "fallback_ffmpeg": True,           # Remotion 失敗時自動退回 ffmpeg
         "remotion_dir": "",                # 空 = app 旁邊的 remotion/
+        "remotion_video": True,            # Remotion 畫面用實拍／H3 影片本身（False = 只取一張靜態畫格）
     },
     "pipeline": {
         "review_script": True,             # gate: user reviews script before assembly
@@ -156,6 +160,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "language": "zh-Hant",
         "made_for_kids": False,
         "cookies_file": "",                # 雷達讀要登入的影片用；Netscape cookies.txt，空 = data/youtube_cookies.txt（有才用）
+        "asr_fallback": True,              # 沒有可下載字幕（或被 429 擋）時，下載音軌用本機 audio.cpp 語音轉文字
+        "asr_model": "qwen3-asr-1-7b-q8-0",
+        "asr_max_minutes": 30,             # 超過這個長度的影片不轉（避免長時間佔住 audio.cpp）
+        "asr_busy_wait_s": 300,            # audio.cpp 忙碌時最多排隊等幾秒
     },
 }
 

@@ -65,12 +65,15 @@ def _captions(cues: list[dict], fps: int) -> list[dict]:
 
 def build_props(scenes: list[dict], cues: list[dict], size: tuple[int, int], durations: list[float],
                 accent: str = "#ffd166", channel: str = "", fps: int = 30,
-                imgs: list[str] | None = None) -> dict:
+                imgs: list[str] | None = None, videos: list[str] | None = None) -> dict:
+    """`videos[i]` (file name in the assets dir, "" = none) plays under scene i instead of the still;
+    the still stays as the poster and the fallback."""
     out = []
     for i, sc in enumerate(scenes):
         dur = max(1.0, float(durations[i]))
         out.append({
             "img": (imgs[i] if imgs and i < len(imgs) else f"s{i:02d}.jpg"),
+            "video": (videos[i] if videos and i < len(videos) else "") or "",
             "headline": sc.get("headline") or "",
             "bullets": (sc.get("bullets") or [])[:3],
             "frames": max(1, int(round(dur * fps))),

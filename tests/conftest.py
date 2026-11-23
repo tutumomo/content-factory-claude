@@ -90,13 +90,14 @@ class Fakes:
     def stock_status(self) -> dict:
         return {"providers": ["pexels"], "detail": "fake"}
 
-    def stock_fetch(self, query: str, vertical: bool = False):
+    def stock_fetch(self, query: str, vertical: bool = False, **kw):
         self.hit("stock")
         p = stock.cache_dir() / "fake_stock.mp4"
         if not p.exists():
             _test_video(p, 6, (360, 640) if vertical else (640, 360))
-        return {"path": p, "provider": "pexels", "author": "fake", "page": "https://example.invalid/v",
-                "license": "Pexels", "duration": 6.0, "query": query}
+        row = {"path": p, "provider": "pexels", "id": 1, "key": "pexels:1", "author": "fake",
+               "page": "https://example.invalid/v", "license": "Pexels", "duration": 6.0, "query": query}
+        return {**row, "shots": [row]}
 
     # ComfyUI / H3
     def comfy_health(self) -> dict:

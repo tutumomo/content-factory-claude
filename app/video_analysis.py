@@ -58,7 +58,7 @@ def stats(path: Path) -> dict:
             "cut_density_per_min": round(len(pts) / max(dur / 60, 0.1), 1),
             "longest_shot": round(max(shots), 1) if shots else round(dur, 1),
             "shortest_shot": round(min(shots), 1) if shots else round(dur, 1),
-            "mean_db": vol.get("mean_db")}
+            "mean_db": vol.get("mean_db"), "cut_times": [round(t, 2) for t in pts]}
 
 
 def analyze(url_or_path: str, name_hint: str = "") -> dict:
@@ -68,6 +68,7 @@ def analyze(url_or_path: str, name_hint: str = "") -> dict:
     local = Path(src)
     path = local if local.exists() else _download(src)
     st = stats(path)
+    cut_times = st.pop("cut_times")
     sysp, pr = prompts.style_from_video(json.dumps(st, ensure_ascii=False), name_hint)
     card = llm.complete_json("style_video", sysp, pr)
     card.setdefault("source", "由參考影片分析")
@@ -80,9 +81,10 @@ def analyze(url_or_path: str, name_hint: str = "") -> dict:
                 f"- 最長／最短鏡頭：{st['longest_shot']}／{st['shortest_shot']} 秒", "",
                 "## 分鏡參考", "", "| # | 秒數 | 內容摘要 |", "|---|---|---|"]
     prev = 0.0
-    for i, t in enumerate(cuts + [st["duration"]], 1):
+    for i, t in enumerate(cut_times + [st["duration"]], 1):
         shotlist.append(f"| {i} | {round(t - prev, 1)} | （參考片第 {i} 個鏡頭） |")
         prev = t
+    TMP.mkdir(parents=True, exist_ok=True)   # a local file skips _download, which made the folder
     out = TMP / f"shotlist-{saved['id']}.md"
     out.write_text("\n".join(shotlist) + "\n", "utf-8")
     return {"style": saved, "stats": st, "shotlist": str(out.relative_to(store.DATA))}

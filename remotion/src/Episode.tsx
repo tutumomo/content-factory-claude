@@ -1,8 +1,9 @@
 import React from "react";
-import {AbsoluteFill, Img, Sequence, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig} from "remotion";
+import {AbsoluteFill, Img, OffthreadVideo, Sequence, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig} from "remotion";
 
 export type Scene = {
   img: string;
+  video?: string;
   headline: string;
   bullets: string[];
   frames: number;
@@ -33,8 +34,11 @@ const SceneLayer: React.FC<{scene: Scene; index: number; accent: string; vertica
   const {fps, width} = useVideoConfig();
   const n = Math.max(1, scene.frames);
   const out = scene.kenBurns === "out";
-  const zoom = interpolate(frame, [0, n], out ? [1.12, 1.02] : [1.02, 1.12], {extrapolateRight: "clamp"});
-  const drift = interpolate(frame, [0, n], out ? [1.5, -1.5] : [-1.5, 1.5], {extrapolateRight: "clamp"});
+  // footage already moves: a lighter push-in than on a still
+  const z = scene.video ? [1.0, 1.05] : [1.02, 1.12];
+  const zoom = interpolate(frame, [0, n], out ? [z[1], z[0]] : z, {extrapolateRight: "clamp"});
+  const dx = scene.video ? 0.6 : 1.5;
+  const drift = interpolate(frame, [0, n], out ? [dx, -dx] : [-dx, dx], {extrapolateRight: "clamp"});
   const enter = ease(frame / Math.max(6, fps * 0.35));
   const leave = interpolate(frame, [n - Math.round(fps * 0.3), n], [1, 0], {
     extrapolateLeft: "clamp",
@@ -47,7 +51,11 @@ const SceneLayer: React.FC<{scene: Scene; index: number; accent: string; vertica
   return (
     <AbsoluteFill style={{opacity, backgroundColor: "#0b0d12"}}>
       <AbsoluteFill style={{transform: `scale(${zoom}) translateX(${drift}%)`}}>
-        <Img src={staticFile(scene.img)} style={{width: "100%", height: "100%", objectFit: "cover"}} />
+        {scene.video ? (
+          <OffthreadVideo muted src={staticFile(scene.video)} style={{width: "100%", height: "100%", objectFit: "cover"}} />
+        ) : (
+          <Img src={staticFile(scene.img)} style={{width: "100%", height: "100%", objectFit: "cover"}} />
+        )}
       </AbsoluteFill>
       <AbsoluteFill
         style={{

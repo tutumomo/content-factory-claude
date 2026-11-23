@@ -15,6 +15,9 @@ from __future__ import annotations
 import html
 import json
 import re
+import shutil
+import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -30,6 +33,11 @@ API_TIMEOUT_S = 15
 MIN_LIMIT = 6000            # a transcript is worth more room than one article excerpt
 DESC_LIMIT = 1500
 VIDEOS_API = "https://www.googleapis.com/youtube/v3/videos"
+# no downloadable subtitles (none, or YouTube answered 429): local speech-to-text on audio.cpp
+ASR_DOWNLOAD_TIMEOUT_S = 300
+ASR_CHUNK_S = 600           # audio.cpp gets the audio in 10-minute WAV pieces
+ASR_DEFAULTS = {"asr_fallback": True, "asr_model": "qwen3-asr-1-7b-q8-0",
+                "asr_max_minutes": 30, "asr_busy_wait_s": 300}
 
 # preferred subtitle languages, best first (keys as yt-dlp reports them)
 LANGS = ("zh-Hant", "zh-TW", "zh-HK", "zh", "zh-Hans", "zh-CN", "en", "en-US", "en-GB")
@@ -255,10 +263,21 @@ def _download_sub(entry: dict) -> str:
 
 
 def transcript(info: dict) -> tuple[str, str]:
-    """(text, label) from the best subtitle track: manual first, then automatic captions."""
+    """(text, label) from the best subtitle track: manual first, then automatic captions.
+
+    Automatic captions must be in the video's own language (info["language"]): YouTube sometimes
+    recognises a Chinese video as English and offers zh-* only as translations of that English
+    track. Then no auto track is used and the caller falls back to local speech-to-text.
+    """
+    vlang = str(info.get("language") or "").split("-")[0].lower()
     for auto, key in ((False, "subtitles"), (True, "automatic_captions")):
         tracks = dict(info.get(key) or {})
         tracks.pop("live_chat", None)
+        if auto and vlang:
+            orig = {k for k in tracks if k.endswith("-orig")}
+            if orig and not any(k.split("-")[0].lower() == vlang for k in orig):
+                break   # the original-language track is the wrong language: every auto track is bad
+            tracks = {k: v for k, v in tracks.items() if k.split("-")[0].lower() == vlang}
         for _ in range(2):   # one retry with the next track if a download fails
             pick = _pick_track(tracks, auto)
             if not pick:
@@ -273,6 +292,86 @@ def transcript(info: dict) -> tuple[str, str]:
                 return text, f"{'自動' if auto else '人工'}字幕（{lang.removesuffix('-orig')}）"
             tracks.pop(lang, None)
     return "", ""
+
+
+# ---------- speech-to-text fallback (audio.cpp) ----------
+
+def asr_cfg() -> dict:
+    return {**ASR_DEFAULTS, **(store.get_settings().get("youtube") or {})}
+
+
+def asr_cache(video_id: str) -> Path:
+    return store.DATA / "yt_asr" / f"{re.sub(r'[^A-Za-z0-9_-]', '_', video_id)}.txt"
+
+
+def _download_audio(url: str, workdir: Path) -> Path:
+    import yt_dlp
+    opts = _ydl_opts(skip_download=False, format="bestaudio/best",
+                     outtmpl=str(workdir / "audio.%(ext)s"), retries=2)
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.extract_info(url, download=True)
+    got = [p for p in workdir.glob("audio.*") if p.suffix not in (".part", ".ytdl")]
+    if not got:
+        raise RuntimeError("音軌下載失敗")
+    return got[0]
+
+
+def _wav_chunks(src: Path, workdir: Path) -> list[Path]:
+    """16 kHz mono WAV pieces (audio.cpp takes WAV uploads only)."""
+    r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000",
+                        "-f", "segment", "-segment_time", str(ASR_CHUNK_S), "-c:a", "pcm_s16le",
+                        str(workdir / "chunk%03d.wav")], capture_output=True, text=True, timeout=600)
+    if r.returncode != 0:
+        raise RuntimeError("音軌轉 WAV 失敗：" + (r.stderr or "").strip()[-200:])
+    return sorted(workdir.glob("chunk*.wav"))
+
+
+def asr_transcript(video_id: str, duration: float | None = None, live: bool = False) -> tuple[str, str, str]:
+    """(text, label, note). Downloads the audio only, transcribes it on the local audio.cpp server
+    and caches the text in data/yt_asr/<id>.txt, so the radar and the sources stage pay once."""
+    cfg = asr_cfg()
+    model = str(cfg.get("asr_model") or "").strip()
+    label = f"語音轉文字（{model}）"
+    if not cfg.get("asr_fallback", True) or not model:
+        return "", "", ""
+    cache = asr_cache(video_id)
+    if cache.is_file() and cache.stat().st_size:
+        return cache.read_text("utf-8"), label, "沒有可下載字幕，用本機語音轉文字（快取）"
+    if live:
+        return "", "", "直播影片不做語音轉文字"
+    max_min = float(cfg.get("asr_max_minutes") or 0)
+    if duration and max_min and float(duration) > max_min * 60:
+        return "", "", f"影片超過 {max_min:g} 分鐘，不做語音轉文字（設定 youtube.asr_max_minutes）"
+    from . import media   # lazy: media pulls in the TTS stack
+    base = (store.get_settings().get("tts") or {}).get("base_url", "http://127.0.0.1:8090").rstrip("/")
+    work = Path(tempfile.mkdtemp(prefix="yt-asr-", dir=str(store.DATA / "tmp") if (store.DATA / "tmp").is_dir() else None))
+    try:
+        audio = _with_timeout(lambda: _download_audio(watch_url(video_id), work), ASR_DOWNLOAD_TIMEOUT_S)
+        texts = []
+        for ch in _wav_chunks(audio, work):
+            with ch.open("rb") as fh:
+                r = media._post_busy_retry(base + "/v1/audio/transcriptions",
+                                           wait_total=float(cfg.get("asr_busy_wait_s") or 300),
+                                           data={"model": model}, files={"file": (ch.name, fh, "audio/wav")},
+                                           timeout=900)
+            if r.status_code == 503:
+                return "", "", "audio.cpp 一直忙碌，這次沒做語音轉文字"
+            r.raise_for_status()
+            texts.append(str((r.json() or {}).get("text") or "").strip())
+        text = "\n".join(t for t in texts if t)
+    except _Timeout:
+        return "", "", f"音軌下載超過 {ASR_DOWNLOAD_TIMEOUT_S} 秒，沒做語音轉文字"
+    except (httpx.HTTPError, ValueError) as e:
+        return "", "", f"語音轉文字失敗（{type(e).__name__}），audio.cpp 是否開著？"
+    except Exception as e:  # noqa: BLE001 - yt-dlp / ffmpeg errors: the metadata still goes through
+        return "", "", f"語音轉文字失敗：{_first_line(str(e))[:120]}"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    if text:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(text, "utf-8")
+        return text, label, "沒有可下載字幕，改用本機語音轉文字"
+    return "", "", "語音轉文字沒有結果"
 
 
 # ---------- text ----------
@@ -409,7 +508,11 @@ def fetch(url: str, limit: int = 6000) -> dict:
             text, label = transcript(info)
         except Exception:  # noqa: BLE001 - a broken subtitle never sinks the metadata
             text, label = "", ""
-        note = "" if text else "這支影片沒有字幕，只用說明文字"
+        note = ""
+        if not text:
+            text, label, note = asr_transcript(info.get("id") or vid, info.get("duration"),
+                                               live=bool(info.get("is_live")))
+            note = note if text else ("這支影片沒有字幕，只用說明文字" + (f"（{note}）" if note else ""))
         body = _body(meta, text, label, limit)
         return {"ok": True, "url": url, "text": body, "reason": "", "attempts": 1,
                 "bytes": len(body.encode("utf-8")), "kind": "ok", "note": note,

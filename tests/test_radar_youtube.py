@@ -64,6 +64,12 @@ def test_other_links_are_not_youtube(url):
 
 # ---------- fakes ----------
 
+@pytest.fixture(autouse=True)
+def _no_asr(monkeypatch):
+    """No speech-to-text unless a test asks for it (it would download audio and call audio.cpp)."""
+    monkeypatch.setattr(yt_page, "asr_transcript", lambda *a, **k: ("", "", ""))
+
+
 def info(**kw) -> dict:
     base = {"id": VID, "title": "測試影片標題", "channel": "測試頻道", "upload_date": "20261120",
             "duration": 754, "description": "這是影片說明。" * 10, "chapters": [
