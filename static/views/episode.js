@@ -1,5 +1,5 @@
-import { $, $$, api, esc, fileUrl, fmtName, fmtShortDate, state, statusPill, stepper, toast } from "../lib.js?v=20261123a";
-import { loginGoogle } from "../modals.js?v=20261123a";
+import { $, $$, api, esc, fileUrl, fmtName, fmtShortDate, state, statusPill, stepper, toast } from "../lib.js?v=20261123b";
+import { loginGoogle } from "../modals.js?v=20261123b";
 
 function gateDirection(brief) {
   if (!brief) return "";

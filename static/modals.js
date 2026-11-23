@@ -1,4 +1,4 @@
-import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261123a";
+import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261123b";
 
 export async function openSettingsModal() {
   const s = await api("/api/settings");
@@ -154,6 +154,11 @@ export async function openSettingsModal() {
           <div><label>Pixabay 金鑰環境變數名稱</label><input id="v-pixabay_key_env" value="${esc(s.visuals?.pixabay_key_env || "PIXABAY_API_KEY")}"></div>
         </div>
         <div class="row" style="margin-top:4px"><button type="button" class="btn" id="v-stock-check">檢查素材來源</button><span class="muted" id="v-stock-out"></span></div>
+        <div class="grid-2">
+          <div><label>實拍素材每鏡幾秒（切成多個鏡頭）</label><input id="v-stock_shot_seconds" type="number" min="2.5" max="8" step="0.5" value="${s.visuals?.stock_shot_seconds ?? 5}"></div>
+          <div><label>一個畫面最多幾個鏡頭</label><input id="v-stock_max_shots" type="number" min="1" max="6" value="${s.visuals?.stock_max_shots ?? 3}"></div>
+        </div>
+        <div><label>避開幾天內別集用過的素材（0＝不避）</label><input id="v-stock_recent_days" type="number" min="0" max="365" value="${s.visuals?.stock_recent_days ?? 30}"></div>
         <label>ComfyUI 位址</label>
         <input id="v-comfy_url" value="${esc(s.visuals?.comfy_url || "http://127.0.0.1:8188")}">
         <label>圖像模型組合（自動偵測已安裝；套用會蓋掉 UNET／CLIP／VAE／步數／CFG）</label>
@@ -329,6 +334,7 @@ export async function openSettingsModal() {
             s.visuals[k] = $(`#v-${k}`, root).value;
           }
           for (const k of ["steps", "cfg", "timeout_s"]) s.visuals[k] = +$(`#v-${k}`, root).value;
+          for (const k of ["stock_shot_seconds", "stock_max_shots", "stock_recent_days"]) s.visuals[k] = +$(`#v-${k}`, root).value;
           s.visuals.free_after = $("#v-free_after", root).checked;
           s.h3video = { ...(s.h3video || {}) };
           for (const k of ["recipe", "unet", "clip", "vae", "audio_vae", "lora", "lora_node", "sigmas", "sampler", "style_hint"]) s.h3video[k] = $(`#h-${k}`, root).value;
