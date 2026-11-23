@@ -6,7 +6,11 @@ Engines, tried in order until one returns links:
   uses it whenever the `claude` command is installed, whatever the LLM provider; if it is not
   logged in it fails fast and the chain moves on.
 - `bing`: keyless Bing HTML results for the topic (result links are unwrapped from /ck/a).
+  Unreliable for bot requests: Bing sometimes answers unrelated canned results (observed
+  2026-11-23, Chinese queries), so links it contributes are cut by the LLM relevance filter.
 - `wikipedia`: zh.wikipedia search API (zh-tw pages); background material, not news.
+- All results are re-checked by the configured LLM against the topic (`_relevance`), which
+  drops the unrelated hits the HTML engines can return. Skipped in offline demo mode.
 
 DuckDuckGo's HTML endpoint was tested on 2026-11-23 and answered 202 with no results (bot
 check), so it is not in the chain. Only the topic, notes and gaps go into the Claude prompt;
@@ -16,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import html
+import json
 import re
 import shutil
 from urllib.parse import parse_qs, quote, urlparse
@@ -135,34 +140,72 @@ def _wikipedia(query: str) -> list[dict]:
              "title": h["title"], "why": "維基百科背景資料"} for h in hits if h.get("title")]
 
 
+_RELEVANCE_SYS = """你是資料蒐集助理。從搜尋結果清單中挑出與題目直接相關、可以支撐講稿的頁面。
+規則：
+- 只留標題或描述能看出與題目主體（人名、產品、公司、事件）直接相關的結果。
+- 排除只是沾到關鍵字的無關頁面（購物、社群、登入頁、不同主體的同名詞）。
+- 不新增清單以外的項目。無關的全部不要留；全部有關就全留。
+輸出：{"keep":[清單中要保留的編號整數]}"""
+
+
+def _relevance(ep: dict, gaps: list[str] | None, rows: list[dict], limit: int) -> list[dict]:
+    """Drop search hits unrelated to the topic, using the configured LLM (skipped in mock mode)."""
+    if not rows or store.get_settings()["llm"]["provider"] == "mock":
+        return rows
+    cand = [{"i": i, "url": r["url"], "title": r.get("title") or "", "why": r.get("why") or ""}
+            for i, r in enumerate(rows)]
+    gaps = [g for g in (gaps or []) if g][:6]
+    prompt = f"# 題目\n{ep.get('topic') or ''}\n"
+    if gaps:
+        prompt += "# 目前缺的證據\n" + "\n".join(f"- {g}" for g in gaps) + "\n"
+    prompt += "# 候選\n" + json.dumps(cand, ensure_ascii=False)
+    try:
+        keep = llm.complete_json("relevance", _RELEVANCE_SYS, prompt).get("keep")
+        keep = {int(i) for i in keep or [] if isinstance(i, (int, str)) and str(i).isdigit()}
+    except Exception:
+        return rows
+    out = [r for i, r in enumerate(rows) if i in keep]
+    return out or rows[:limit]
+
+
 def search(ep: dict, gaps: list[str] | None = None, tried: list[str] | None = None,
            limit: int = 3, choice: str = "auto") -> dict:
     """Return `{"engine", "results": [{url,title,why}], "errors": [..]}`.
 
-    Stops at the first engine that yields usable links; `tried` URLs are never returned again.
+    Collects usable links from every engine in the chain (they are re-ranked by relevance at the
+    end); `tried` URLs are never returned again.
     """
     seen = set(tried or [])
     errors: list[str] = []
+    used: list[str] = []
     query = re.sub(r"\s+", " ", str(ep.get("topic") or "")).strip()[:100]
+    rows: list[dict] = []
     for eng in engines(choice):
         try:
             if eng == "claude":
-                rows = _claude(ep, list(gaps or []), list(tried or []), limit)
+                got = _claude(ep, list(gaps or []), list(tried or []), limit)
             elif not query:
                 continue
             elif eng == "bing":
-                rows = _bing(query)
+                got = _bing(query)
             else:
-                rows = _wikipedia(query)
+                got = _wikipedia(query)
         except SearchError as e:
             errors.append(str(e))
             continue
         keep = []
-        for r in rows:
+        for r in got:
             if _usable(r["url"], seen):
                 seen.add(r["url"])
                 keep.append(r)
         if keep:
-            return {"engine": eng, "results": keep[:limit + 3], "errors": errors}
-        errors.append(f"{eng} 沒有可用結果")
-    return {"engine": "", "results": [], "errors": errors}
+            used.append(eng)
+            rows.extend(keep)
+        else:
+            errors.append(f"{eng} 沒有可用結果")
+    if not rows:
+        return {"engine": "", "results": [], "errors": errors}
+    if len(used) > 1:
+        rows = _relevance(ep, gaps, rows, limit + 3) if len(rows) > limit + 3 else rows
+    rows = rows[:limit + 3]
+    return {"engine": "+".join(used), "results": rows, "errors": errors}
