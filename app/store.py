@@ -141,6 +141,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "source_audit": True,              # LLM checks whether the fetched material supports the topic
         "source_gate": True,               # stop for the owner when no first-hand source is readable
         "source_min_readable": 1,
+        "source_auto_search": True,        # not enough material: search the web first, ask the owner only if that fails
+        "source_search_engine": "auto",    # auto | claude | bing | wikipedia (auto = Claude CLI when it is the LLM, then Bing, Wikipedia)
+        "source_search_max": 3,            # readable pages to keep from one search
         "slideshow_risk_max": 0.7,         # 幀對「幾乎無變化」比例上限；超過記警告（畫面變化檢查）
     },
     "ui": {

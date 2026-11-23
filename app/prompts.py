@@ -344,7 +344,7 @@ def sources_audit(ep: dict, fetched: list[dict]) -> tuple[str, str]:
     sys = _editorial_system() + f"""
 
 # 任務：來源求證（只做核對，不做創作）
-使用者要做的題目與筆記如下；下面是他提供的一手連結抓下來的內容。你的工作只有三件：
+使用者要做的題目與筆記如下；下面是他提供的連結，以及標成「智能體自動搜尋」的網頁抓下來的內容。自動搜尋的網頁不一定是一手來源，要依內容判斷。你的工作只有三件：
 1. 判斷這些材料是否足以支撐題目與筆記中的核心主張。
 2. 列出材料沒有支持、或只支持到較弱版本的主張（放進 gaps）。不要用你的外部知識替材料補全。
 3. 指出哪些是可讀的一手來源、哪些抓取失敗。
@@ -360,11 +360,12 @@ def sources_audit(ep: dict, fetched: list[dict]) -> tuple[str, str]:
 輸出：{{"sufficient":true或false,"primary":["可讀的一手來源"],"failed":["抓取失敗的連結"],"gaps":["需求證的主張"],"note":"一句話總結"}}"""
     blocks = [
         f"# 題目\n{ep.get('topic') or ''}\n\n# 使用者筆記\n{ep.get('notes') or '（無）'}",
-        f"# 來源數量\n提供 {len(fetched)} 個連結，成功讀取 {sum(1 for f in fetched if not f.get('failed'))} 個。",
+        f"# 來源數量\n共 {len(fetched)} 個連結（其中自動搜尋 {sum(1 for f in fetched if f.get('auto'))} 個），"
+        f"成功讀取 {sum(1 for f in fetched if not f.get('failed'))} 個。",
     ]
     for f in fetched:
         blocks.append(
-            f"## 來源：{f.get('url')}\n"
+            f"## 來源{'（智能體自動搜尋）' if f.get('auto') else ''}：{f.get('url')}\n"
             + ("（抓取失敗）" if f.get("failed") else (f.get("text") or "")[:5000])
         )
     return sys, "\n\n".join(blocks)

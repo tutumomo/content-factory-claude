@@ -115,6 +115,14 @@ export async function openSettingsModal() {
         <label style="margin-top:0"><input type="checkbox" id="p-radar_grouping" style="width:auto;margin-right:6px" ${s.pipeline.radar_grouping !== false ? "checked" : ""}> 把同一件事的多篇報導併成一組（其餘仍分開）</label>
         <label style="margin-top:0"><input type="checkbox" id="p-source_audit" style="width:auto;margin-right:6px" ${s.pipeline.source_audit !== false ? "checked" : ""}> 蒐集後求證來源（列出材料沒支持的主張，不替材料補內容）</label>
         <label style="margin-top:0"><input type="checkbox" id="p-source_gate" style="width:auto;margin-right:6px" ${s.pipeline.source_gate !== false ? "checked" : ""}> 沒有可讀的一手來源就停下來問我（關掉只標示、不擋）</label>
+        <label style="margin-top:0"><input type="checkbox" id="p-source_auto_search" style="width:auto;margin-right:6px" ${s.pipeline.source_auto_search !== false ? "checked" : ""}> 來源不足時先自己上網搜尋，找不到才停下來請我補連結</label>
+        <div class="grid-2">
+          <div><label>自動搜尋引擎</label><select id="p-source_search_engine">
+            ${[["auto", "自動（有裝 Claude CLI 就用它的 WebSearch，再退 Bing、維基百科）"], ["claude", "Claude CLI WebSearch"], ["bing", "Bing（免金鑰）"], ["wikipedia", "維基百科"]]
+              .map(([v, t]) => `<option value="${v}" ${(s.pipeline.source_search_engine || "auto") === v ? "selected" : ""}>${t}</option>`).join("")}
+          </select></div>
+          <div><label>自動搜尋最多留幾個可讀網頁</label><input id="p-source_search_max" type="number" min="1" max="8" value="${s.pipeline.source_search_max ?? 3}"></div>
+        </div>
         <div class="grid-2">
           <div><label>雷達一次最多抽幾則候選</label><input id="p-radar_candidates_max" type="number" min="3" max="30" value="${s.pipeline.radar_candidates_max ?? 12}"></div>
           <div><label>求證至少幾個可讀來源</label><input id="p-source_min_readable" type="number" min="1" max="5" value="${s.pipeline.source_min_readable ?? 1}"></div>
@@ -305,12 +313,13 @@ export async function openSettingsModal() {
             made_for_kids: $("#y-made_for_kids", root).checked, cookies_file: $("#y-cookies_file", root).value.trim() };
           s.pipeline.review_script = $("#p-review_script", root).checked;
           s.pipeline.review_storyboard = $("#p-review_storyboard", root).checked;
-          for (const k of ["radar_prefilter", "radar_scoring", "radar_grouping", "source_audit", "source_gate"]) {
+          for (const k of ["radar_prefilter", "radar_scoring", "radar_grouping", "source_audit", "source_gate", "source_auto_search"]) {
             s.pipeline[k] = $(`#p-${k}`, root).checked;
           }
-          for (const k of ["critique_threshold", "critique_max_rounds", "title_count", "thumbnail_count", "radar_min", "radar_max", "radar_candidates_max", "source_min_readable"]) {
+          for (const k of ["critique_threshold", "critique_max_rounds", "title_count", "thumbnail_count", "radar_min", "radar_max", "radar_candidates_max", "source_min_readable", "source_search_max"]) {
             s.pipeline[k] = +$(`#p-${k}`, root).value;
           }
+          s.pipeline.source_search_engine = $("#p-source_search_engine", root).value;
           s.pipeline.slideshow_risk_max = +$("#p-slideshow_risk_max", root).value;
           s.cost = { ...(s.cost || {}) };
           s.cost.monthly_cap_usd = +$("#p-cost_cap", root).value;

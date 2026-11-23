@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from . import comfy, cost, editorial, h3video, llm, media, music, prompts, render, sfx, sources, stock, stock_audio, store, video, yt_page
+from . import comfy, cost, editorial, h3video, llm, media, music, prompts, render, sfx, sources, stock, stock_audio, store, video, websearch, yt_page
 
 STAGES = ["sources", "brief", "script", "critique", "storyboard", "assemble", "package", "review", "approved"]
 STAGE_LABEL = {
@@ -200,10 +200,25 @@ def st_sources(ep: dict) -> bool:
         failed = "抓取失敗" in txt
         fetched.append({"url": u, "text": "" if failed else txt, "failed": failed})
         parts.append(f"## 來源：{u}\n{txt}\n")
-    if not ep.get("source_urls"):
-        parts.append("（沒有提供連結）\n")
-    store.write_text(eid, "sources.md", "\n".join(parts))
+    # pages an earlier auto search found readable are fetched again without a new search
+    for u in ep.get("auto_source_urls") or []:
+        if u in (ep.get("source_urls") or []):
+            continue
+        txt = fetch_text(u)
+        if "抓取失敗" not in txt:
+            fetched.append({"url": u, "text": txt, "failed": False, "auto": True})
+            parts.append(f"## 來源（智能體自動搜尋）：{u}\n{txt}\n")
     verdict = editorial.source_verdict(ep, fetched, cfg)
+    search = None
+    if not verdict["ok"] and cfg.get("source_auto_search", True) and not ep.get("sources_accepted"):
+        search = _auto_search(ep, fetched, verdict, cfg, parts)
+        if search["kept"]:
+            verdict = editorial.source_verdict(ep, fetched, cfg)
+    if not fetched:
+        parts.append("（沒有提供連結，自動搜尋也沒有找到可讀的網頁）\n" if search else "（沒有提供連結）\n")
+    store.write_text(eid, "sources.md", "\n".join(parts))
+    if search:
+        verdict["search"] = search
     store.update_episode(eid, checks={**ep.get("checks", {}), "sources": verdict})
     if verdict["ok"]:
         store.log(eid, f"來源足夠：{verdict['value']}")
@@ -213,6 +228,48 @@ def st_sources(ep: dict) -> bool:
             wait(eid, "sources")
             return False
     return True
+
+
+def _auto_search(ep: dict, fetched: list[dict], verdict: dict, cfg: dict, parts: list[str]) -> dict:
+    """Search the web for the topic before asking the owner for links.
+
+    Readable hits are appended to `fetched` and `parts` (labelled as auto-found) and remembered
+    in `auto_source_urls`; every URL tried is remembered in `auto_tried` so a rerun after the
+    owner adds material does not fetch the same dead pages again.
+    """
+    eid = ep["id"]
+    limit = max(1, min(8, int(cfg.get("source_search_max") or 3)))
+    tried = list(dict.fromkeys(list(ep.get("source_urls") or []) + [f["url"] for f in fetched]
+                               + list(ep.get("auto_tried") or [])))
+    store.log(eid, "來源不足，智能體先自己上網搜尋")
+    try:
+        res = websearch.search(ep, verdict.get("gaps") or [], tried, limit,
+                               cfg.get("source_search_engine") or "auto")
+    except Exception as e:  # a broken search must not break the stage: fall back to the gate
+        res = {"engine": "", "results": [], "errors": [f"搜尋失敗：{e}"]}
+    kept: list[str] = []
+    new_tried: list[str] = []
+    for r in res.get("results") or []:
+        if len(kept) >= limit:
+            break
+        u = r["url"]
+        new_tried.append(u)
+        store.log(eid, f"抓取（自動搜尋）{u}")
+        txt = fetch_text(u)
+        if "抓取失敗" in txt or len(txt.strip()) < 200:
+            continue
+        kept.append(u)
+        fetched.append({"url": u, "text": txt, "failed": False, "auto": True})
+        why = f"（{r['why']}）" if r.get("why") else ""
+        parts.append(f"## 來源（智能體自動搜尋）：{u}{why}\n{txt}\n")
+    store.update_episode(eid, auto_source_urls=list(dict.fromkeys(list(ep.get("auto_source_urls") or []) + kept)),
+                         auto_tried=list(dict.fromkeys(list(ep.get("auto_tried") or []) + new_tried))[-60:])
+    engine = res.get("engine") or ""
+    if kept:
+        store.log(eid, f"自動搜尋（{engine}）找到 {len(kept)} 個可讀網頁")
+    else:
+        store.log(eid, "自動搜尋沒有找到可讀網頁：" + "；".join(res.get("errors") or ["沒有結果"])[:200])
+    return {"engine": engine, "tried": len(new_tried), "kept": kept, "errors": (res.get("errors") or [])[:4]}
 
 
 def _source_state(ep: dict) -> dict | None:

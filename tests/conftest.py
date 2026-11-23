@@ -178,6 +178,8 @@ def fakes(data_dir) -> Fakes:
     mp.setattr(video, "render", f.remotion_render)
     # nothing in the smoke test may reach a real web page
     mp.setattr(pipeline, "fetch_text", lambda url, limit=6000: "（測試：不抓網頁）")
+    mp.setattr(pipeline.websearch, "search",
+               lambda ep, gaps=None, tried=None, limit=3, choice="auto": {"engine": "", "results": [], "errors": []})
     yield f
     mp.undo()
 

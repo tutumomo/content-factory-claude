@@ -205,6 +205,7 @@ class SourcesStageTests(unittest.TestCase):
         s = copy.deepcopy(store.DEFAULT_SETTINGS)
         s["pipeline"]["source_gate"] = gate
         s["pipeline"]["source_audit"] = False
+        s["pipeline"]["source_auto_search"] = False  # gate behaviour only; auto search has its own tests
         return s
 
     def test_st_sources_gates_and_does_not_report_ok(self):
@@ -245,6 +246,101 @@ class SourcesStageTests(unittest.TestCase):
         self.assertTrue(ok)
         waited.assert_not_called()
         self.assertFalse(updated.call_args.kwargs["checks"]["sources"]["ok"])
+
+
+class AutoSearchTests(unittest.TestCase):
+    def settings(self, auto=True):
+        s = copy.deepcopy(store.DEFAULT_SETTINGS)
+        s["pipeline"]["source_audit"] = False
+        s["pipeline"]["source_auto_search"] = auto
+        return s
+
+    def run_stage(self, ep, hits, page="材料" * 200, auto=True):
+        found = {"engine": "bing", "results": [{"url": u, "title": "", "why": ""} for u in hits], "errors": []}
+        with patch.object(pipeline.store, "get_settings", return_value=self.settings(auto)), \
+             patch.object(pipeline.websearch, "search", return_value=found) as searched, \
+             patch.object(pipeline, "fetch_text", side_effect=lambda u: page if "ok" in u else "（抓取失敗：HTTP 404）"), \
+             patch.object(pipeline.store, "write_text") as wrote, \
+             patch.object(pipeline.store, "log"), \
+             patch.object(pipeline.store, "update_episode") as updated, \
+             patch.object(pipeline, "wait") as waited:
+            ok = pipeline.st_sources(ep)
+        return ok, searched, wrote, updated, waited
+
+    def test_search_finds_sources_so_no_gate(self):
+        ep = {"id": "ep-test", "topic": "測試", "notes": "", "source_urls": []}
+        ok, searched, wrote, updated, waited = self.run_stage(ep, ["https://ok.example/a", "https://bad.example/b"])
+        self.assertTrue(ok)
+        waited.assert_not_called()
+        searched.assert_called_once()
+        checks = updated.call_args.kwargs["checks"]["sources"]
+        self.assertTrue(checks["ok"])
+        self.assertEqual(checks["search"]["kept"], ["https://ok.example/a"])
+        self.assertIn("自動搜尋", checks["value"])
+        self.assertIn("智能體自動搜尋", wrote.call_args.args[2])
+        saved = [c.kwargs for c in updated.call_args_list if "auto_source_urls" in c.kwargs][0]
+        self.assertEqual(saved["auto_source_urls"], ["https://ok.example/a"])
+        self.assertIn("https://bad.example/b", saved["auto_tried"])
+
+    def test_gate_only_after_search_fails(self):
+        ep = {"id": "ep-test", "topic": "測試", "notes": "", "source_urls": []}
+        ok, searched, _, updated, waited = self.run_stage(ep, ["https://bad.example/b"])
+        self.assertFalse(ok)
+        searched.assert_called_once()
+        waited.assert_called_once_with("ep-test", "sources")
+        self.assertEqual(updated.call_args.kwargs["checks"]["sources"]["search"]["tried"], 1)
+
+    def test_no_search_when_owner_material_is_enough(self):
+        ep = {"id": "ep-test", "topic": "測試", "notes": "", "source_urls": ["https://ok.example/mine"]}
+        ok, searched, *_ = self.run_stage(ep, [])
+        self.assertTrue(ok)
+        searched.assert_not_called()
+
+    def test_setting_off_goes_straight_to_gate(self):
+        ep = {"id": "ep-test", "topic": "測試", "notes": "", "source_urls": []}
+        ok, searched, _, _, waited = self.run_stage(ep, ["https://ok.example/a"], auto=False)
+        self.assertFalse(ok)
+        searched.assert_not_called()
+        waited.assert_called_once()
+
+    def test_earlier_hits_are_reused_and_tried_urls_skipped(self):
+        ep = {"id": "ep-test", "topic": "測試", "notes": "", "source_urls": [],
+              "auto_source_urls": ["https://ok.example/old"], "auto_tried": ["https://bad.example/x"]}
+        ok, searched, *_ = self.run_stage(ep, [])
+        self.assertTrue(ok)
+        searched.assert_not_called()  # the remembered page is still readable
+
+
+class WebSearchTests(unittest.TestCase):
+    def test_unwrap_bing_redirect(self):
+        from app import websearch
+        href = ("https://www.bing.com/ck/a?!&amp;&amp;p=x&amp;u=a1aHR0cHM6Ly96aC53aWtpcGVkaWEub3JnL3poLyVFNSVCRCVBOSVFOCU5OSVCOQ"
+                "&amp;ntb=1")
+        self.assertEqual(websearch._unwrap_bing(href), "https://zh.wikipedia.org/zh/%E5%BD%A9%E8%99%B9")
+
+    def test_engine_chain(self):
+        from app import websearch
+        s = copy.deepcopy(store.DEFAULT_SETTINGS)
+        with patch.object(websearch.store, "get_settings", return_value=s), \
+             patch.object(websearch.shutil, "which", return_value="/usr/bin/claude") as which:
+            s["llm"]["provider"] = "openai"
+            self.assertEqual(websearch.engines("auto"), ["claude", "bing", "wikipedia"])
+            which.return_value = None
+            self.assertEqual(websearch.engines("auto"), ["bing", "wikipedia"])
+            s["llm"]["provider"] = "mock"
+            self.assertEqual(websearch.engines("auto"), [])
+            self.assertEqual(websearch.engines("wikipedia"), ["wikipedia", "bing"])
+
+    def test_search_skips_tried_and_shell_pages(self):
+        from app import websearch
+        rows = [{"url": "https://www.bing.com/x", "title": "", "why": ""},
+                {"url": "https://a.example/1", "title": "", "why": ""},
+                {"url": "https://b.example/2", "title": "", "why": ""}]
+        with patch.object(websearch, "engines", return_value=["bing"]), \
+             patch.object(websearch, "_bing", return_value=rows):
+            got = websearch.search({"topic": "測試"}, tried=["https://a.example/1"])
+        self.assertEqual([r["url"] for r in got["results"]], ["https://b.example/2"])
+        self.assertEqual(got["engine"], "bing")
 
 
 class LegacyIdeaTests(unittest.TestCase):

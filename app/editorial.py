@@ -268,7 +268,9 @@ def source_verdict(ep: dict, fetched: list[dict], cfg: dict | None = None,
     min_readable = max(1, int(cfg.get("source_min_readable") or 1))
     sufficient = len(readable) >= min_readable or notes_ok
     if fetched:
-        value = f"{len(readable)}/{len(fetched)} 個連結可讀" + ("，另有使用者筆記" if notes_ok else "")
+        auto = sum(1 for f in readable if f.get("auto"))
+        value = (f"{len(readable)}/{len(fetched)} 個連結可讀" + (f"（含自動搜尋 {auto} 個）" if auto else "")
+                 + ("，另有使用者筆記" if notes_ok else ""))
     else:
         value = "沒有提供來源連結" + ("，只有使用者筆記" if notes_ok else "")
     gaps: list[str] = [] if sufficient else ["沒有可讀的一手來源，內容只能標註需求證"]

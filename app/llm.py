@@ -35,16 +35,20 @@ def _extract_json(text: str):
     raise LLMError("模型回覆不是合法 JSON：" + text[:300])
 
 
-def _claude_cli(system: str, prompt: str, cfg: dict) -> str:
+def _claude_cli(system: str, prompt: str, cfg: dict, tools: str = "", timeout: float | None = None) -> str:
+    """Run `claude -p` in an empty temp dir. `tools` names built-in tools to allow (e.g. "WebSearch");
+    the default "" gives the model no tools at all."""
     cmd = [
         "claude", "-p", prompt,
         "--output-format", "json",
         "--system-prompt", system,
-        "--tools", "",
+        "--tools", tools,
         "--no-session-persistence",
         "--disable-slash-commands",
         "--setting-sources", "project",  # temp dir has no project settings: keeps user hooks/plugins out of the output
     ]
+    if tools:  # -p cannot ask for permission, so the named tools must be pre-approved
+        cmd += ["--allowedTools", tools]
     if cfg.get("claude_model"):
         cmd += ["--model", cfg["claude_model"]]
     # Drop variables inherited from a parent Claude Code / desktop session (model routing, host auth,
@@ -54,7 +58,7 @@ def _claude_cli(system: str, prompt: str, cfg: dict) -> str:
     with tempfile.TemporaryDirectory(prefix="cf-llm-") as cwd:
         try:
             r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True,
-                               timeout=cfg.get("timeout_s", 600), stdin=subprocess.DEVNULL)
+                               timeout=timeout or cfg.get("timeout_s", 600), stdin=subprocess.DEVNULL)
         except FileNotFoundError as e:
             raise LLMError("找不到 claude 指令") from e
         except subprocess.TimeoutExpired as e:
@@ -99,6 +103,17 @@ def complete(task: str, system: str, prompt: str) -> str:
     if p == "openai":
         return _openai(system, prompt, cfg)
     return _claude_cli(system, prompt, cfg)
+
+
+def claude_web_search(system: str, prompt: str, timeout: float = 300):
+    """One `claude -p` run with only the WebSearch tool, returning parsed JSON.
+
+    Used by the source stage regardless of the configured LLM provider, so it is called only
+    when the caller decided the Claude CLI is the search engine.
+    """
+    cfg = store.get_settings()["llm"]
+    sys2 = system + "\n\n最後只輸出一個 JSON 物件，不要任何其他文字或 Markdown 圍欄。"
+    return _extract_json(_claude_cli(sys2, prompt, cfg, tools="WebSearch", timeout=timeout))
 
 
 def complete_json(task: str, system: str, prompt: str):

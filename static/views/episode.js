@@ -17,7 +17,10 @@ function gateDirection(brief) {
 function gateSources(ep) {
   const s = (ep.checks || {}).sources || {};
   const gaps = s.gaps || [];
+  const sr = s.search;
+  const searched = sr ? `<p class="muted">智能體已先自己上網搜尋${sr.engine ? `（${esc(sr.engine)}）` : ""}：試了 ${sr.tried || 0} 個網頁，${(sr.kept || []).length ? `可讀 ${sr.kept.length} 個，但還不夠` : "沒有找到可讀的網頁"}。${(sr.errors || []).length ? `<br>${sr.errors.map(esc).join("；")}` : ""}</p>` : "";
   return `<div class="card gate"><h2>來源不足，先補資料</h2>
+    ${searched}
     <p class="muted">${esc(s.value || "沒有抓到可讀的一手來源")}。依照防幻覺規則，沒有材料就不該硬寫；你可以補連結或補上你已知的一手資訊，也可以明確選擇在標註需求證的情況下繼續。</p>
     ${gaps.length ? `<div class="warn">需求證或待補：<ul>${gaps.map((g) => `<li>${esc(g)}</li>`).join("")}</ul></div>` : ""}
     ${s.note ? `<div class="muted">${esc(s.note)}</div>` : ""}
