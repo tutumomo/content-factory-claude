@@ -13,7 +13,7 @@ import httpx
 from . import store
 
 PUNCT = "，。！？；：、,.!?;:…—「」『』（）()\"'"
-_CC = None  # lazily built OpenCC converter (tw2sp); False when the package is missing
+_CC = None  # lazily built OpenCC converter (tw2s); False when the package is missing
 
 
 class MediaError(RuntimeError):
@@ -245,14 +245,18 @@ def split_for_tts(text: str, limit: int = 110) -> list[str]:
 
 
 def to_simplified(text: str) -> str:
-    """audio.cpp 的 TTS 對繁體字常讀錯，送進去前先轉簡體（台灣用詞一併轉，例如 軟體→软件）。字幕仍用原文。"""
+    """audio.cpp 的 TTS 對繁體字常讀錯，送進去前先轉簡體字形。
+
+    只換字形、不換用詞（OpenCC `tw2s`，例如 記憶體→记忆体、模擬器→模拟器），念出來才會跟
+    繁體字幕逐字對得上；`tw2sp` 會把用詞換成大陸說法（記憶體→内存、模擬器→仿真器），不能用。
+    """
     global _CC
     if not text:
         return text
     if _CC is None:
         try:
             from opencc import OpenCC
-            _CC = OpenCC("tw2sp")
+            _CC = OpenCC("tw2s")  # glyphs only; never tw2sp (it swaps Taiwan terms for mainland ones)
         except ImportError:
             _CC = False
     if _CC is False:

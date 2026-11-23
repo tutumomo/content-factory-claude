@@ -232,7 +232,15 @@ def test_health_flags_missing_reference_voice(client, monkeypatch):
 # ---------- 繁轉簡 toggle ----------
 
 ZH = "臺灣的軟體發展與網路資訊"
-ZH_SIMPLIFIED = "台湾的软件发展与网络信息"
+ZH_SIMPLIFIED = "台湾的软体发展与网路资讯"  # glyphs only: 軟體 stays 软体, not 软件
+
+
+def test_to_simplified_keeps_taiwan_terms():
+    # spoken words must match the Traditional subtitles word for word
+    got = media.to_simplified("記憶體不足時模擬器會當機，伺服器的程式碼與資料庫")
+    assert got == "记忆体不足时模拟器会当机，伺服器的程式码与资料库"
+    for mainland in ("内存", "仿真器", "服务器", "代码", "数据库"):
+        assert mainland not in got
 
 
 def test_convert_simplified_on_converts_request_input(client, monkeypatch, tmp_path):
