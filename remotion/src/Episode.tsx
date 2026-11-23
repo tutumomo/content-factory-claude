@@ -152,10 +152,12 @@ const Captions: React.FC<{captions: Caption[]}> = ({captions}) => {
   if (!active) return null;
   const local = frame - active.from;
   const dur = Math.max(1, active.to - active.from);
-  const a = interpolate(local, [0, 4, dur - 4, dur], [0, 1, 1, 0], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
+  // Fade length must keep [0, f, dur - f, dur] strictly increasing: a 2–7 frame cue
+  // (aligner gives very short words) used to crash the render with [0,4,-2,2].
+  const f = Math.min(4, Math.floor((dur - 1) / 2));
+  const a = f >= 1
+    ? interpolate(local, [0, f, dur - f, dur], [0, 1, 1, 0], {extrapolateLeft: "clamp", extrapolateRight: "clamp"})
+    : 1;
   const rise = interpolate(local, [0, 6], [10, 0], {extrapolateRight: "clamp"});
   return (
     <div
