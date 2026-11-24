@@ -171,6 +171,18 @@ def delete(sid: str) -> bool:
         return len(kept) != len(rows)
 
 
+def reset_running(note: str) -> None:
+    """Any source still marked running when a restart happened: it is not running any more."""
+    with _lock:
+        rows = _load()
+        hit = [r for r in rows if r.get("last_status") == "running"]
+        for r in hit:
+            r["last_status"] = "error"
+            r["last_message"] = note
+        if hit:
+            _save(rows)
+
+
 def mark(sid: str, status: str, message: str = "", **extra) -> None:
     with _lock:
         rows = _load()

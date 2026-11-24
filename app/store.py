@@ -146,7 +146,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "openai_model": "",
         "openai_key_env": "",              # name of env var holding the key, never the key
         "timeout_s": 1800,                 # 單次呼叫的上限；本機模型慢，預設放寬到 30 分鐘
-        "task_timeout_s": {},              # {"brief": 3600}：個別任務再放寬
+        "task_timeout_s": {"prefilter": 180, "selection_score": 180, "group_batch": 240,
+            "radar_candidates": 240, "sources_audit": 180},   # {"brief": 3600}：個別任務再放寬
         "suggest_timeout_s": 180,          # 建集對話框的背景判讀；與上面的上限互不影響
         "task_routes": {},                 # {"script": "openai"}：某個任務改用別的 provider
     },

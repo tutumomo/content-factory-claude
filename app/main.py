@@ -27,6 +27,7 @@ def _startup() -> None:
     cur = store.get_insights_summary()  # a restart in the middle of an analysis leaves this flag set
     if cur.get("analyzing"):
         store.save_insights_summary({**cur, "analyzing": False, "error": "上次分析被伺服器重啟中斷，請重新分析"})
+    watch.reset_running("上次掃描被伺服器重啟中斷，請重新掃描。")  # watch scan running at restart
     radar = store.get_radar_state()  # same for a radar scan that was running at restart
     if radar.get("status") == "running":
         store.save_radar_state({**radar, "status": "error", "finished": time.time(), "error": "上次掃描被伺服器重啟中斷",
