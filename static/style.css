@@ -338,6 +338,15 @@ label { display: block; font-size: 12.5px; color: var(--muted); margin: 10px 0 4
 .switch span::after { content: ""; position: absolute; width: 14px; height: 14px; border-radius: 50%; background: #fff; top: 3px; left: 3px; transition: transform .15s; }
 .switch input:checked + span { background: var(--ok); }
 .switch input:checked + span::after { transform: translateX(16px); }
+/* the header toggle: the label text sits beside the track, and a locked switch says so */
+.switch .switch-text { width: auto; height: auto; background: none; border-radius: 0; font-size: 12px;
+  margin-left: 6px; color: #5c5a54; white-space: nowrap; }
+.switch .switch-text::after { display: none; }
+.switch input:checked ~ .switch-text { color: #2f6b3f; font-weight: 600; }
+.switch input:disabled ~ .switch-text { color: #9b978d; }
+.switch input:disabled ~ span:first-of-type { opacity: .45; }
+.app.layout-side .switch .switch-text { color: #b9b7b0; }
+.app.layout-side .switch input:checked ~ .switch-text { color: #7fd694; }
 
 /* ---------- Episode Gate Workflow (Preserved) ---------- */
 .steps { display: flex; gap: 4px; margin: 12px 0 14px; flex-wrap: wrap; }

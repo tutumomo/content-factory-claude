@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>內容工廠</title>
-<link rel="stylesheet" href="/static/style.css?v=20261125b">
+<link rel="stylesheet" href="/static/style.css?v=20261125c">
 </head>
 <body>
 <div id="app" class="app layout-top">
@@ -30,6 +30,11 @@ try {
     <div class="shell-controls">
       <div class="shell-status" id="status"></div>
       <div class="shell-actions">
+        <label class="switch" id="nsfw-switch-label" title="限制級內容總開關">
+          <input type="checkbox" id="nsfw-switch">
+          <span></span>
+          <span class="switch-text">NSFW</span>
+        </label>
         <button type="button" class="btn primary btn-sm" id="btn-new">＋ 新集數</button>
         <button type="button" class="btn icon-btn" id="btn-layout" title="切換導覽列位置（頂部 / 左側）"></button>
         <button type="button" class="btn icon-btn" id="btn-settings" title="系統設定">⚙</button>
@@ -40,6 +45,6 @@ try {
 </div>
 <div id="modal-root"></div>
 <div id="toast"></div>
-<script type="module" src="/static/app.js?v=20261125b"></script>
+<script type="module" src="/static/app.js?v=20261125c"></script>
 </body>
 </html>

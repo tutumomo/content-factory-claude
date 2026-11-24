@@ -1,12 +1,12 @@
-// v=20261125b busts the browser module cache after UI changes
-import { $, $$, api, applyNavLayout, esc, getNavLayout, state } from "./lib.js?v=20261125b";
-import { openNewEpisodeModal, openSettingsModal } from "./modals.js?v=20261125b";
-import { viewContent } from "./views/content.js?v=20261125b";
-import { viewEpisode } from "./views/episode.js?v=20261125b";
-import { viewIdeas } from "./views/ideas.js?v=20261125b";
-import { viewInsights } from "./views/insights.js?v=20261125b";
-import { viewSchedule } from "./views/schedule.js?v=20261125b";
-import { viewStyle } from "./views/style.js?v=20261125b";
+// v=20261125c busts the browser module cache after UI changes
+import { $, $$, api, applyNavLayout, esc, getNavLayout, state, toast } from "./lib.js?v=20261125c";
+import { openNewEpisodeModal, openSettingsModal } from "./modals.js?v=20261125c";
+import { viewContent } from "./views/content.js?v=20261125c";
+import { viewEpisode } from "./views/episode.js?v=20261125c";
+import { viewIdeas } from "./views/ideas.js?v=20261125c";
+import { viewInsights } from "./views/insights.js?v=20261125c";
+import { viewSchedule } from "./views/schedule.js?v=20261125c";
+import { viewStyle } from "./views/style.js?v=20261125c";
 
 const main = $("#main");
 
@@ -110,6 +110,43 @@ state.onStatusRefresh = refreshStatus;
 
 $("#btn-new").onclick = () => openNewEpisodeModal();
 $("#btn-settings").onclick = () => openSettingsModal();
+
+// The NSFW switch, one click from anywhere. Flipping it reloads the view: every list, card and
+// form was fetched under the old state, so re-rendering is the only honest way to show the result.
+let nsfwBusy = false;
+async function refreshNsfwSwitch() {
+  try {
+    const s = await api("/api/nsfw");
+    const box = $("#nsfw-switch");
+    box.checked = Boolean(s.enabled);
+    // CF_NSFW=0 locks it closed; the API would refuse the flip, so disable the control too
+    box.disabled = Boolean(s.forced_off);
+    $("#nsfw-switch-label").title = s.forced_off
+      ? "這台機器用 CF_NSFW=0 強制關閉，無法從介面開啟"
+      : (s.enabled ? "限制級內容：開啟（點一下全部隱藏）" : "限制級內容：關閉（點一下開啟）");
+  } catch { /* server restarting */ }
+}
+
+$("#nsfw-switch").onchange = async (e) => {
+  if (nsfwBusy) return;
+  nsfwBusy = true;
+  const want = e.target.checked;
+  e.target.disabled = true;
+  try {
+    const s = await api("/api/nsfw", { method: "PUT", body: { enabled: want } });
+    toast(s.enabled ? "限制級內容已開啟" : "限制級內容已關閉");
+    // re-read the metadata too: the card list and critic sets depend on the switch
+    state.META = await api("/api/meta");
+    await route();          // every list was fetched under the old state: re-render
+  } catch (err) {
+    toast(err.message || "切換失敗");
+    e.target.checked = !want;
+  } finally {
+    nsfwBusy = false;
+    e.target.disabled = false;
+    refreshNsfwSwitch();
+  }
+};
 $("#btn-layout").onclick = () => {
   const next = getNavLayout() === "top" ? "side" : "top";
   applyNavLayout(next, true);
@@ -127,5 +164,7 @@ $("#btn-layout").onclick = () => {
 
   window.addEventListener("hashchange", route);
   await route();
+  refreshNsfwSwitch();          // the header toggle must show the real state on first paint
   setInterval(refreshStatus, 5000);
+  setInterval(refreshNsfwSwitch, 30000);   // another tab may have flipped it
 })();

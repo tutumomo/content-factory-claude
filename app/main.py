@@ -72,7 +72,9 @@ def meta():
         "form_label": store.FORM_LABEL,
         "form_desc": store.FORM_DESC,
         "nsfw_topics": list(store.NSFW_TOPICS),
-        "max_rating": store.get_channel().get("max_rating") or "general",
+        # the effective ceiling: the channel's own limit, capped to `general` when the NSFW
+        # switch is off, so every consumer (dialog, card picker, create API) inherits the cap
+        "max_rating": store.effective_max_rating(),
         "pref_cats": store.PREF_CATS,
         "style_categories": store.style_categories(),
         "sfx_tags": sfx.vocab(),
@@ -296,7 +298,9 @@ def remove_pref(pid: str):
 
 @app.get("/api/nsfw")
 def nsfw_state():
-    return {"enabled": store.nsfw_enabled()}
+    forced = (os.environ.get("CF_NSFW") or "").strip().lower()
+    return {"enabled": store.nsfw_enabled(),
+            "forced_off": forced in ("0", "false", "off", "no")}
 
 
 @app.put("/api/nsfw")

@@ -266,7 +266,7 @@ def refine(topic: str, notes: str = "", urls: list[str] | None = None, timeout: 
 def suggest(topic: str, notes: str = "", urls: list[str] | None = None,
             idea_format: str | None = None, deep: bool = False) -> dict:
     """The settings to pre-fill: instant rules, optionally refined by the model."""
-    ceiling = (store.get_channel().get("max_rating") or "general").strip().lower()
+    ceiling = store.effective_max_rating()
     base = heuristic(topic, notes, ceiling)
     if idea_format in ("short", "long"):
         base["format"] = idea_format

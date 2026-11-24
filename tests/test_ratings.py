@@ -152,10 +152,12 @@ def test_api_writes_mode_and_rating_and_reads_them_back(client, ceiling):
 
 
 def test_rating_above_the_channel_ceiling_is_refused(data):
-    assert store.get_channel()["max_rating"] == "general"
+    store.save_channel({**store.get_channel(), "max_rating": "general"})
+    store.set_nsfw(True)          # open the switch, so the *channel* ceiling is the reason
     with pytest.raises(ValueError) as e:
         store.new_episode("測試題目", "short", mode="narrative", rating="suggestive")
     assert "上限" in str(e.value)
+    assert "NSFW" not in str(e.value)
 
 
 def test_raising_the_ceiling_allows_a_restricted_episode(data):
@@ -1007,3 +1009,52 @@ def test_the_switch_api_refuses_to_open_when_the_env_forbids_it(client, ceiling,
     r = client.put("/api/nsfw", json={"enabled": True})
     assert r.status_code == 409
     assert "CF_NSFW" in r.json()["detail"]
+
+
+def test_the_switch_caps_the_effective_rating_everywhere(data):
+    store.save_channel({**store.get_channel(), "max_rating": "adult"})
+    store.set_nsfw(True)
+    assert store.effective_max_rating() == "adult"
+    store.set_nsfw(False)
+    assert store.effective_max_rating() == "general", "開關關閉時上限必須降到一般"
+
+
+def test_creating_a_restricted_episode_with_the_switch_off_is_refused(data):
+    store.save_channel({**store.get_channel(), "max_rating": "adult"})
+    store.set_nsfw(False)
+    with pytest.raises(ValueError) as e:
+        store.new_episode("成人題目", "short", mode="fiction", rating="adult")
+    assert "NSFW" in str(e.value), "訊息要指向開關，不是頻道設定"
+
+
+def test_the_suggestion_does_not_offer_a_rating_the_switch_forbids(data):
+    store.save_channel({**store.get_channel(), "max_rating": "adult"})
+    store.set_nsfw(False)
+    assert suggest.suggest("情慾小說：深夜")["rating"] == "general"
+    store.set_nsfw(True)
+    assert suggest.suggest("情慾小說：深夜")["rating"] == "adult"
+
+
+def test_meta_reports_the_capped_ceiling(client, ceiling):
+    assert client.get("/api/meta").json()["max_rating"] == "adult"
+    store.set_nsfw(False)
+    assert client.get("/api/meta").json()["max_rating"] == "general"
+
+
+def test_the_switch_state_api_says_when_it_is_forced(client, ceiling, monkeypatch):
+    assert client.get("/api/nsfw").json()["forced_off"] is False
+    monkeypatch.setenv("CF_NSFW", "0")
+    body = client.get("/api/nsfw").json()
+    assert body["enabled"] is False and body["forced_off"] is True
+
+
+def test_the_header_carries_the_one_click_switch():
+    """The control must exist in the served shell, not only in the settings modal."""
+    html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text("utf-8")
+    assert 'id="nsfw-switch"' in html
+    assert 'id="nsfw-switch-label"' in html
+    app_js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text("utf-8")
+    # it must talk to the API and re-render, not just flip a checkbox
+    assert '/api/nsfw' in app_js
+    assert 'method: "PUT"' in app_js
+    assert "await route()" in app_js

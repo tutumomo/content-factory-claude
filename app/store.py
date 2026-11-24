@@ -1023,8 +1023,12 @@ def new_episode(
     why = rating_conflict(mode, rating)
     if why:
         raise ValueError(why)
-    ceiling = (get_channel().get("max_rating") or "general").strip().lower()
+    ceiling = effective_max_rating()
     if not rating_at_or_below(rating, ceiling):
+        if not nsfw_enabled():
+            raise ValueError(
+                f"限制級內容目前已關閉，不能建立 {rating} 分級的集數。"
+                f"請先在右上角把 NSFW 開關打開。")
         raise ValueError(
             f"這個頻道的分級上限是 {ceiling}，{rating} 超過上限。"
             f"請到設定頁把頻道上限調高，或改用較低的分級。")
@@ -1099,6 +1103,20 @@ def set_nsfw(on: bool) -> bool:
     else:
         path.unlink(missing_ok=True)
     return nsfw_enabled()
+
+
+def effective_max_rating() -> str:
+    """The highest rating this channel may create right now.
+
+    The channel ceiling caps it; with the NSFW switch off the cap is `general` no matter what the
+    channel says. Routing every consumer through this keeps the UI and the create API agreeing.
+    """
+    ceiling = (get_channel().get("max_rating") or "general").strip().lower()
+    if not rating_at_or_below(ceiling, "adult"):
+        ceiling = "general"
+    if not nsfw_enabled():
+        return "general"
+    return ceiling
 
 
 def is_restricted(ep: dict | None) -> bool:
