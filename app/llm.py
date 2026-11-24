@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 
 import httpx
 
@@ -102,11 +103,13 @@ def _claude_cli(system: str, prompt: str, cfg: dict, tools: str = "", timeout: f
     with tempfile.TemporaryDirectory(prefix="cf-llm-") as cwd:
         try:
             r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True,
-                               timeout=timeout or cfg.get("timeout_s", 600), stdin=subprocess.DEVNULL)
+                               timeout=timeout or cfg.get("timeout_s", 1800), stdin=subprocess.DEVNULL)
         except FileNotFoundError as e:
             raise LLMError("找不到 claude 指令") from e
         except subprocess.TimeoutExpired as e:
-            raise LLMError("claude 逾時") from e
+            tmo = timeout or cfg.get("timeout_s", 1800)
+            raise LLMError(f"claude 逾時：等了 {float(tmo):.0f} 秒還沒回覆。"
+                           f"到設定頁把「LLM 逾時」調大，或換小一點的模型。") from e
     try:
         d = json.loads(r.stdout)
     except json.JSONDecodeError as e:
@@ -116,7 +119,7 @@ def _claude_cli(system: str, prompt: str, cfg: dict, tools: str = "", timeout: f
     return d.get("result") or ""
 
 
-def _openai(system: str, prompt: str, cfg: dict) -> str:
+def _openai(system: str, prompt: str, cfg: dict, timeout: float | None = None) -> str:
     headers = {}
     env = cfg.get("openai_key_env")
     if env:
@@ -130,11 +133,18 @@ def _openai(system: str, prompt: str, cfg: dict) -> str:
         "temperature": 0.7,
     }
     url = cfg["openai_base_url"].rstrip("/") + "/chat/completions"
+    tmo = float(timeout or cfg.get("timeout_s") or 600)
+    started = time.monotonic()
     try:
-        r = httpx.post(url, json=body, headers=headers, timeout=cfg.get("timeout_s", 600))
+        r = httpx.post(url, json=body, headers=headers, timeout=tmo)
         r.raise_for_status()
+    except httpx.TimeoutException as e:
+        raise LLMError(
+            f"模型逾時：等了 {tmo:.0f} 秒還沒回覆（{type(e).__name__}）。本機模型慢的時候很常見——"
+            f"到設定頁「LLM 逾時」調大它（目前 {tmo:.0f} 秒），或換小一點的模型。") from e
     except httpx.HTTPError as e:
-        raise LLMError(f"OpenAI 相容端點錯誤：{e}") from e
+        waited = time.monotonic() - started
+        raise LLMError(f"OpenAI 相容端點錯誤（{url}，等了 {waited:.0f} 秒）：{e}") from e
     content = r.json()["choices"][0]["message"]["content"] or ""
     return re.sub(r"<think>.*?</think>", "", content, flags=re.S)
 
@@ -154,14 +164,29 @@ def provider_for(task: str, cfg: dict | None = None) -> str:
     return str(cfg.get("provider") or "claude_cli").strip().lower()
 
 
+def timeout_for(task: str, cfg: dict | None = None) -> float:
+    """How long this task may take. `llm.task_timeout_s` overrides per task, then `llm.timeout_s`.
+
+    A local model can take minutes on a long prompt, so the ceiling is deliberately generous;
+    the point of the value is to fail eventually, not to police speed.
+    """
+    cfg = cfg or store.get_settings()["llm"]
+    per = (cfg.get("task_timeout_s") or {}).get(task)
+    try:
+        return float(per or cfg.get("timeout_s") or 1800)
+    except (TypeError, ValueError):
+        return 1800.0
+
+
 def complete(task: str, system: str, prompt: str) -> str:
     cfg = store.get_settings()["llm"]
     p = provider_for(task, cfg)
     if p == "mock":
         return mock_llm.respond(task, prompt)
+    tmo = timeout_for(task, cfg)
     if p == "openai":
-        return _openai(system, prompt, cfg)
-    return _claude_cli(system, prompt, cfg)
+        return _openai(system, prompt, cfg, timeout=tmo)
+    return _claude_cli(system, prompt, cfg, timeout=tmo)
 
 
 def claude_web_search(system: str, prompt: str, timeout: float = 300):

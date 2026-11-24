@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from app import characters, comfy, llm, prompts, sources, store, youtube
@@ -154,6 +155,35 @@ def test_meta_exposes_modes_ratings_and_each_mode_critic_set(client):
     assert meta["critics_by_mode"]["news"] != meta["critics_by_mode"]["narrative"]
 
 
+def test_timeout_is_generous_by_default_and_overridable_per_task(monkeypatch):
+    cfg = {"timeout_s": 1800}
+    assert llm.timeout_for("script", cfg) == 1800
+    cfg2 = {"timeout_s": 900, "task_timeout_s": {"brief": 3600}}
+    assert llm.timeout_for("brief", cfg2) == 3600
+    assert llm.timeout_for("script", cfg2) == 900
+    # a bad value must not crash the call path
+    assert llm.timeout_for("script", {"timeout_s": "slow"}) == 1800
+
+
+def test_a_timed_out_local_model_says_how_long_it_waited(monkeypatch):
+    def boom(*a, **kw):
+        raise httpx.TimeoutException("timed out")
+
+    monkeypatch.setattr(llm.httpx, "post", boom)
+    cfg = {"openai_base_url": "http://127.0.0.1:1/v1", "openai_model": "m", "timeout_s": 2400,
+           "openai_key_env": ""}
+    with pytest.raises(llm.LLMError) as e:
+        llm._openai("sys", "prompt", cfg, timeout=2400)
+    msg = str(e.value)
+    assert "2400" in msg, msg
+    assert "逾時" in msg
+    assert "timed out" not in msg      # the bare httpx wording is what confused the owner
+
+
+def test_the_default_llm_timeout_is_thirty_minutes():
+    assert store.DEFAULT_SETTINGS["llm"]["timeout_s"] == 1800
+
+
 def test_health_reports_comfyui_and_whether_the_chain_needs_it(client, monkeypatch):
     monkeypatch.setattr(comfy, "status", lambda **kw: {"ok": False, "detail": "ComfyUI 連不上"})
     monkeypatch.setattr(sources, "chain", lambda kind, rating="general": ["slides"] if kind == "visuals" else [])
@@ -244,8 +274,8 @@ def test_a_task_can_be_routed_to_another_provider(monkeypatch):
         seen["cli"] = True
         return "cli"
 
-    def fake_openai(system, prompt, cfg):
-        seen["openai"] = True
+    def fake_openai(system, prompt, cfg, timeout=None):
+        seen["openai"] = (timeout,)
         return "openai"
 
     monkeypatch.setattr(llm, "_claude_cli", fake_cli)
@@ -256,6 +286,7 @@ def test_a_task_can_be_routed_to_another_provider(monkeypatch):
         "openai_key_env": "", "timeout_s": 5}})
     assert llm.complete("script", "s", "p") == "openai"
     assert seen.get("openai") and not seen.get("cli")
+    assert seen["openai"][0] == 5      # the configured timeout reaches the provider
     # an unrouted task still uses the default provider
     seen.clear()
     assert llm.complete("brief", "s", "p") == "cli"

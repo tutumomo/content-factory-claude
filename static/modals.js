@@ -1,4 +1,4 @@
-import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261124b";
+import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261124c";
 
 export async function openSettingsModal() {
   const s = await api("/api/settings");
@@ -49,6 +49,9 @@ export async function openSettingsModal() {
           <div><label>模型名稱</label><input id="s-openai_model" value="${esc(s.llm.openai_model)}"></div>
           <div><label>API key 環境變數名稱（只填名稱）</label><input id="s-openai_key_env" value="${esc(s.llm.openai_key_env)}" placeholder="例如 STRATA_API_KEY"></div>
         </div>
+        <label>LLM 逾時（秒）</label>
+        <input id="s-timeout_s" type="number" min="30" step="30" value="${esc(String(s.llm.timeout_s ?? 1800))}">
+        <div class="muted" style="font-size:12px;margin-top:-4px">單次呼叫最多等多久。本機模型跑長講稿要好幾分鐘，預設 1800 秒（30 分鐘）；逾時會回報等了多久而不是只說 timed out。</div>
         <div class="row" style="margin-top:12px">
           <button type="button" class="btn" id="s-test">測試 LLM 連線</button>
           <span class="muted" id="s-test-out"></span>
@@ -307,6 +310,7 @@ export async function openSettingsModal() {
           for (const k of ["provider", "claude_model", "openai_base_url", "openai_model", "openai_key_env"]) {
             s.llm[k] = $(`#s-${k}`, root).value;
           }
+          s.llm.timeout_s = Math.max(30, +($("#s-timeout_s", root).value || 1800));
           for (const k of ["base_url", "model", "voice", "instruct", "voice_ref", "emotion"]) {
             s.tts[k] = $(`#t-${k}`, root).value;
           }

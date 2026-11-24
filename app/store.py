@@ -38,7 +38,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "openai_base_url": "http://127.0.0.1:1234/v1",
         "openai_model": "",
         "openai_key_env": "",              # name of env var holding the key, never the key
-        "timeout_s": 600,
+        "timeout_s": 1800,                 # 單次呼叫的上限；本機模型慢，預設放寬到 30 分鐘
+        "task_timeout_s": {},              # {"brief": 3600}：個別任務再放寬
         "task_routes": {},                 # {"script": "openai"}：某個任務改用別的 provider
     },
     "tts": {
