@@ -309,6 +309,28 @@ def test_a_card_with_an_attestation_is_usable_at_a_restricted_rating(data):
     assert [c["id"] for c in ok] == [card["id"]] and bad == []
 
 
+def test_creating_a_restricted_episode_with_an_unattested_character_is_refused(data):
+    _raise_ceiling(data)
+    card = characters.save({"name": "無宣告", "description": "x"})
+    with pytest.raises(ValueError) as e:
+        store.new_episode("測試題目", "short", mode="narrative", rating="adult",
+                          characters=[card["id"]])
+    assert "成年宣告" in str(e.value)
+    # a general episode may still use the same card
+    ep = store.new_episode("測試題目", "short", characters=[card["id"]])
+    assert ep["characters"] == [card["id"]]
+
+
+def test_a_restricted_episode_with_a_real_person_photo_is_refused(data):
+    _raise_ceiling(data)
+    card = characters.save({"name": "真人", "adult_attested": True,
+                             "ref_image": "/tmp/face.png", "model_release": ""})
+    with pytest.raises(ValueError) as e:
+        store.new_episode("測試題目", "short", mode="narrative", rating="adult",
+                          characters=[card["id"]])
+    assert "同意文件" in str(e.value)
+
+
 def test_the_same_character_gets_the_same_description_and_seed_in_every_scene(data):
     card = characters.save({"name": "角色A", "adult_attested": True,
                              "description": "a woman with short black hair", "seed_base": 4242})

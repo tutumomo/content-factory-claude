@@ -525,6 +525,9 @@ def st_assemble(ep: dict) -> bool:
     stock_shots: dict[int, list[dict]] = {}
     # characters: the episode's cast, each with a fixed appearance and a stable seed offset
     ep_cards, card_errors = characters.usable_cards(list(ep.get("characters") or []), rating)
+    if card_errors and rating != "general":
+        # a restricted episode may not go on with a character that fails the attestations
+        raise media.MediaError("角色卡有問題，這一集不能繼續：" + "；".join(card_errors))
     for why in card_errors:
         store.log(eid, f"角色：{why}")
     used_cards: dict[int, list[dict]] = {}

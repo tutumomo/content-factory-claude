@@ -197,8 +197,6 @@ def rating_conflict(mode: str, rating: str) -> str | None:
         return f"分級只能是 {'／'.join(RATINGS)}"
     if mode == "news" and rating == "adult":
         return "新聞模式不支援 adult 分級：成人向必須是虛構敘事（mode=narrative），新聞要的是可查證的事實與來源。"
-    if mode == "narrative" and rating == "general":
-        return None
     return None
 
 
@@ -877,6 +875,12 @@ def new_episode(
         raise ValueError(
             f"這個頻道的分級上限是 {ceiling}，{rating} 超過上限。"
             f"請到設定頁把頻道上限調高，或改用較低的分級。")
+    if rating != "general" and characters:
+        # a restricted episode may only use characters that carry the attestations
+        from . import characters as _chars   # late import: characters imports store
+        ok, bad = _chars.usable_cards(list(characters), rating)
+        if bad:
+            raise ValueError("角色卡有問題：" + "；".join(bad))
     with _lock:
         eid = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + slugify(topic)
         styles = get_styles()
