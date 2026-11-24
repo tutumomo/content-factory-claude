@@ -93,6 +93,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; background: #888; flex: none; }
 .dot.ok { background: #51cf66; }
 .dot.bad { background: #ff6b6b; }
+/* the status bar's parenthetical hints must not inherit the page's dark .muted colour */
+.shell-status .muted { color: inherit; opacity: .7; font-size: inherit; }
 
 /* ---------- Typography & Common ---------- */
 h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.2px; }

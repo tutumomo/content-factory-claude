@@ -154,6 +154,18 @@ def test_meta_exposes_modes_ratings_and_each_mode_critic_set(client):
     assert meta["critics_by_mode"]["news"] != meta["critics_by_mode"]["narrative"]
 
 
+def test_health_reports_comfyui_and_whether_the_chain_needs_it(client, monkeypatch):
+    monkeypatch.setattr(comfy, "status", lambda **kw: {"ok": False, "detail": "ComfyUI 連不上"})
+    monkeypatch.setattr(sources, "chain", lambda kind, rating="general": ["slides"] if kind == "visuals" else [])
+    h = client.get("/api/health").json()
+    assert h["comfy"]["ok"] is False
+    assert h["comfy"]["needed"] is False          # slides only: a red dot would be misleading
+    monkeypatch.setattr(sources, "chain", lambda kind, rating="general": ["comfy", "slides"] if kind == "visuals" else [])
+    h2 = client.get("/api/health").json()
+    assert h2["comfy"]["needed"] is True
+    assert h2["comfy"]["chain"] == ["comfy", "slides"]
+
+
 # ---------- criterion 2: rating gates the sources and the platforms ----------
 
 def test_general_chain_is_unchanged_by_the_rating_filter(data):

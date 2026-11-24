@@ -74,10 +74,25 @@ def meta():
 
 @app.get("/api/health")
 def health(llm_check: bool = False):
-    out = {"tts": media.tts_health(), "worker": pipeline.busy(), "provider": store.get_settings()["llm"]["provider"]}
+    out = {"tts": media.tts_health(), "worker": pipeline.busy(), "provider": store.get_settings()["llm"]["provider"],
+           "comfy": _comfy_status()}
     if llm_check:
         out["llm"] = llm.health()
     return out
+
+
+def _comfy_status() -> dict:
+    """ComfyUI's health, plus whether the current visuals chain would actually use it.
+
+    The status bar shows one dot per service. ComfyUI being down is not an error when the
+    chain does not use it (slides only), so the UI needs to know that difference.
+    """
+    st = comfy.status()
+    chain = sources.chain("visuals")
+    needed = [s for s in chain if s in ("comfy", "h3video")]
+    return {**st, "needed": bool(needed), "chain": chain,
+            "h3_enabled": bool(store.get_settings()["h3video"].get("enabled", True))}
+
 
 
 @app.get("/api/settings")

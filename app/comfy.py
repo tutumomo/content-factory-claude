@@ -105,6 +105,29 @@ def health(timeout: float = 4) -> dict:
         return {"ok": False, "detail": f"ComfyUI 連不上：{e}（請先執行 ./start_comfyui.sh）"}
 
 
+_STATUS: tuple[float, dict] | None = None
+
+
+def status(ttl: float = 5.0, timeout: float = 2.0) -> dict:
+    """Cached health for the status bar: it polls every few seconds and must not hammer the server."""
+    global _STATUS
+    now = time.monotonic()
+    if _STATUS is not None and now - _STATUS[0] < ttl:
+        return dict(_STATUS[1])
+    try:
+        out = health(timeout=timeout)
+    except Exception as e:  # noqa: BLE001 - a status probe must never break the endpoint
+        out = {"ok": False, "detail": f"探測失敗：{type(e).__name__}: {e}"}
+    _STATUS = (now, dict(out))
+    return out
+
+
+def forget_status() -> None:
+    """Drop the cached health (after starting or stopping the server)."""
+    global _STATUS
+    _STATUS = None
+
+
 def presets() -> dict:
     """Preset list plus whether each file shows up in ComfyUI's loader enums."""
     enum: dict[str, set[str]] = {}

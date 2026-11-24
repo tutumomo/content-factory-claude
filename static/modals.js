@@ -1,4 +1,4 @@
-import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261124a";
+import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261124b";
 
 export async function openSettingsModal() {
   const s = await api("/api/settings");

@@ -1,12 +1,12 @@
-// v=20261124a busts the browser module cache after UI changes
-import { $, $$, api, applyNavLayout, esc, getNavLayout, state } from "./lib.js?v=20261124a";
-import { openNewEpisodeModal, openSettingsModal } from "./modals.js?v=20261124a";
-import { viewContent } from "./views/content.js?v=20261124a";
-import { viewEpisode } from "./views/episode.js?v=20261124a";
-import { viewIdeas } from "./views/ideas.js?v=20261124a";
-import { viewInsights } from "./views/insights.js?v=20261124a";
-import { viewSchedule } from "./views/schedule.js?v=20261124a";
-import { viewStyle } from "./views/style.js?v=20261124a";
+// v=20261124b busts the browser module cache after UI changes
+import { $, $$, api, applyNavLayout, esc, getNavLayout, state } from "./lib.js?v=20261124b";
+import { openNewEpisodeModal, openSettingsModal } from "./modals.js?v=20261124b";
+import { viewContent } from "./views/content.js?v=20261124b";
+import { viewEpisode } from "./views/episode.js?v=20261124b";
+import { viewIdeas } from "./views/ideas.js?v=20261124b";
+import { viewInsights } from "./views/insights.js?v=20261124b";
+import { viewSchedule } from "./views/schedule.js?v=20261124b";
+import { viewStyle } from "./views/style.js?v=20261124b";
 
 const main = $("#main");
 
@@ -30,6 +30,22 @@ const ROUTE_ALIASES = {
   channel: "style",
 };
 
+function comfyItem(c) {
+  // ComfyUI only matters when the visuals chain actually uses it; a red dot with nothing
+  // asking for it reads as a defect, so say "not used" instead.
+  const detail = esc(c?.detail || "");
+  if (!c) return `<div class="st-item" title="未回報狀態"><span class="dot"></span>ComfyUI <b>未知</b></div>`;
+  if (c.ok) {
+    const h3 = c.h3_enabled ? ` <span class="muted">· H3</span>` : "";
+    return `<div class="st-item" title="${detail}"><span class="dot ok"></span>ComfyUI <b>就緒</b>${h3}</div>`;
+  }
+  if (!c.needed) {
+    return `<div class="st-item" title="${detail}"><span class="dot"></span>ComfyUI <b>未使用</b></div>`;
+  }
+  const what = c.chain?.includes("h3video") ? "影片與生圖" : "生圖";
+  return `<div class="st-item" title="${detail}"><span class="dot bad"></span>ComfyUI <b>未就緒</b> <span class="muted">（${what}會退回字卡）</span></div>`;
+}
+
 async function refreshStatus() {
   try {
     const [h, eps] = await Promise.all([api("/api/health"), api("/api/episodes")]);
@@ -40,6 +56,7 @@ async function refreshStatus() {
     const qTxt = h.worker.queued ? `（排隊 ${h.worker.queued}）` : "";
     $("#status").innerHTML = `
       <div class="st-item" title="${esc(h.tts.detail || "")}"><span class="dot ${h.tts.ok ? "ok" : "bad"}"></span>配音 <b>${h.tts.needs_voice_ref ? "缺參考聲音" : (h.tts.ok ? "就緒" : "未就緒")}</b></div>
+      ${comfyItem(h.comfy)}
       <div class="st-item"><span class="dot ok"></span>LLM <b>${esc(PROVIDER_LABEL[h.provider] || h.provider)}</b></div>
       <div class="st-item">agent：<b>${cur}</b>${qTxt}</div>`;
   } catch { /* server restarting */ }
