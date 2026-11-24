@@ -1,5 +1,5 @@
-import { $, $$, api, compactNum, esc, fileUrl, fmtName, fmtShortDate, miniSteps, state, statusPill, when } from "../lib.js?v=20261125d";
-import { openNewEpisodeModal } from "../modals.js?v=20261125d";
+import { $, $$, api, compactNum, esc, fileUrl, fmtName, fmtShortDate, miniSteps, state, statusPill, when } from "../lib.js?v=20261125g";
+import { openNewEpisodeModal } from "../modals.js?v=20261125g";
 
 let contentQuery = "";
 let contentFormat = "all";

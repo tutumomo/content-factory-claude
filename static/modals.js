@@ -1,4 +1,4 @@
-import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261125d";
+import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261125g";
 
 export async function openSettingsModal() {
   const s = await api("/api/settings");
@@ -52,6 +52,9 @@ export async function openSettingsModal() {
         <label>LLM 逾時（秒）</label>
         <input id="s-timeout_s" type="number" min="30" step="30" value="${esc(String(s.llm.timeout_s ?? 1800))}">
         <div class="muted" style="font-size:12px;margin-top:-4px">單次呼叫最多等多久。本機模型跑長講稿要好幾分鐘，預設 1800 秒（30 分鐘）；逾時會回報等了多久而不是只說 timed out。</div>
+        <label>建集判讀逾時（秒）</label>
+        <input id="s-suggest_timeout_s" type="number" min="15" step="15" value="${esc(String(s.llm.suggest_timeout_s ?? 180))}">
+        <div class="muted" style="font-size:12px;margin-top:-4px">在「做一支新的」對話框裡，agent 依題目先判格式／模式／分級／形態的時間。這段只影響那個建議，逾時不影響製作；與上面的 LLM 逾時互相獨立。</div>
         <div class="row" style="margin-top:12px">
           <button type="button" class="btn" id="s-test">測試 LLM 連線</button>
           <span class="muted" id="s-test-out"></span>
@@ -311,6 +314,7 @@ export async function openSettingsModal() {
             s.llm[k] = $(`#s-${k}`, root).value;
           }
           s.llm.timeout_s = Math.max(30, +($("#s-timeout_s", root).value || 1800));
+          s.llm.suggest_timeout_s = Math.max(15, +($("#s-suggest_timeout_s", root).value || 180));
           for (const k of ["base_url", "model", "voice", "instruct", "voice_ref", "emotion"]) {
             s.tts[k] = $(`#t-${k}`, root).value;
           }

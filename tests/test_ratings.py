@@ -8,6 +8,7 @@ Run:  .venv/bin/python -m pytest tests/test_ratings.py -q
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -272,7 +273,8 @@ def test_verify_has_a_rating_check(offline, ceiling, fakes):
 # ---------- criterion 3: the writing layer survives a refusing provider ----------
 
 def test_refusal_is_reported_as_a_refusal_not_a_json_error(monkeypatch):
-    monkeypatch.setattr(llm, "complete", lambda task, system, prompt: "抱歉，我無法協助這個請求。")
+    monkeypatch.setattr(llm, "complete",
+                        lambda task, system, prompt, timeout=None: "抱歉，我無法協助這個請求。")
     with pytest.raises(llm.LLMRefusal) as e:
         llm.complete_json("script", "sys", "prompt")
     msg = str(e.value)
@@ -834,11 +836,13 @@ def test_a_poem_topic_picks_the_poem_form_and_a_narrative_mode(data):
     assert s["mode"] == "fiction"
 
 
-def test_the_guess_never_exceeds_the_channel_ceiling(data):
+def test_the_guess_marks_what_the_ceiling_forbids(data):
+    """The rating says what the topic is; `allowed` says whether it may be created."""
     assert store.get_channel()["max_rating"] == "general"
     s = suggest.suggest("情慾小說：深夜的公寓")
-    assert s["rating"] == "general", "a general-capped channel must not be offered adult"
-    assert not s["style_id"].startswith("nsfw-")
+    assert s["rating"] == "adult", "判斷要如實反映題目"
+    assert s["allowed"] is False, "但一般頻道不能建"
+    assert not s["style_id"].startswith("nsfw-"), "不能配成人風格卡"
 
 
 def test_urls_already_in_the_topic_are_pre_filled(data):
@@ -1027,12 +1031,15 @@ def test_creating_a_restricted_episode_with_the_switch_off_is_refused(data):
     assert "NSFW" in str(e.value), "訊息要指向開關，不是頻道設定"
 
 
-def test_the_suggestion_does_not_offer_a_rating_the_switch_forbids(data):
+def test_the_suggestion_reports_the_rating_and_whether_it_may_be_created(data):
     store.save_channel({**store.get_channel(), "max_rating": "adult"})
     store.set_nsfw(False)
-    assert suggest.suggest("情慾小說：深夜")["rating"] == "general"
+    off = suggest.suggest("情慾小說：深夜")
+    assert off["rating"] == "adult", "判斷要如實反映題目"
+    assert off["allowed"] is False, "但開關關閉時不能建立"
     store.set_nsfw(True)
-    assert suggest.suggest("情慾小說：深夜")["rating"] == "adult"
+    on = suggest.suggest("情慾小說：深夜")
+    assert on["rating"] == "adult" and on["allowed"] is True
 
 
 def test_meta_reports_the_capped_ceiling(client, ceiling):
@@ -1194,3 +1201,162 @@ def test_the_marker_helper_is_case_insensitive_and_specific():
     assert store.nsfw_marker("限制級電影") == "限制級"
     assert store.nsfw_marker("黃仁勳回應 AI 泡沫") == ""
     assert store.nsfw_marker("") == ""
+
+
+# ---------- the dialog's timeout must not leak into the episode's ----------
+
+def test_the_suggest_timeout_defaults_to_three_minutes(data):
+    assert suggest.suggest_timeout() == 180.0
+
+
+def test_the_suggest_timeout_is_configurable_and_independent(data):
+    s = store.get_settings()
+    store.save_settings({**s, "llm": {**s["llm"], "timeout_s": 3600, "suggest_timeout_s": 90}})
+    assert suggest.suggest_timeout() == 90
+    # the episode ceiling must not cap it, and it must not cap the episode
+    s = store.get_settings()
+    store.save_settings({**s, "llm": {**s["llm"], "timeout_s": 30, "suggest_timeout_s": 240}})
+    assert suggest.suggest_timeout() == 240
+
+
+def test_refining_does_not_rewrite_the_global_timeout(data, monkeypatch):
+    """Regression: the dialog used to shrink llm.timeout_s while it ran, so a concurrent
+    episode inherited 45 s and failed with "waited 45 seconds"."""
+    s = store.get_settings()
+    store.save_settings({**s, "llm": {**s["llm"], "timeout_s": 3600, "suggest_timeout_s": 180}})
+    seen = []
+
+    def spy(task, system, prompt, timeout=None):
+        seen.append(timeout)
+        # while the dialog call is in flight, an episode's call must still read 3600
+        seen.append(llm.timeout_for("script"))
+        return {"format": "short", "mode": "news", "rating": "general", "form": "video"}
+
+    monkeypatch.setattr(llm, "complete_json", spy)
+    suggest.refine("測試題目", "")
+    assert seen[0] == 180.0, "對話框要用自己的上限"
+    assert seen[1] == 3600.0, "同時進行的製作不能繼承對話框的短上限"
+    assert store.get_settings()["llm"]["timeout_s"] == 3600
+
+
+def test_complete_takes_an_explicit_timeout(monkeypatch):
+    seen = {}
+
+    def fake_openai(system, prompt, cfg, timeout=None):
+        seen["t"] = timeout
+        return "ok"
+
+    monkeypatch.setattr(llm, "_openai", fake_openai)
+    s = store.get_settings()
+    store.save_settings({**s, "llm": {**s["llm"], "provider": "openai", "timeout_s": 3600}})
+    llm.complete("script", "sys", "prompt", timeout=120)
+    assert seen["t"] == 120
+    llm.complete("script", "sys", "prompt")
+    assert seen["t"] == 3600
+
+
+def test_the_settings_modal_offers_both_timeouts():
+    js = (Path(__file__).resolve().parent.parent / "static" / "modals.js").read_text("utf-8")
+    assert 'id="s-timeout_s"' in js
+    assert 'id="s-suggest_timeout_s"' in js
+    assert "s.llm.suggest_timeout_s" in js
+
+
+# ---------- the ideas page respects the switch too ----------
+
+def test_an_idea_carries_a_rating(data):
+    adult = store.add_idea({"title": "情慾小說：雨夜的旅館", "kind": "note"})
+    plain = store.add_idea({"title": "黃仁勳回應 AI 泡沫", "kind": "note"})
+    assert adult["rating"] == "adult"
+    assert plain["rating"] == "general"
+
+
+def test_the_rating_judgement_is_not_capped_by_the_channel_ceiling(data):
+    """The ceiling decides what may be created, not what a topic is.
+
+    Conflating the two meant an adult idea was filed as general on a general channel, and the
+    switch then had nothing to hide.
+    """
+    assert store.get_channel()["max_rating"] == "general"
+    rating, _ = suggest.judge_rating("情慾小說：雨夜的旅館", "")
+    assert rating == "adult"
+    out = suggest.suggest("情慾小說：雨夜的旅館")
+    assert out["rating"] == "adult"
+    assert out["allowed"] is False, "一般頻道不能建，但題目本身仍是成人"
+
+
+def test_restricted_ideas_disappear_when_the_switch_is_off(data):
+    store.add_idea({"title": "情慾小說：雨夜的旅館", "kind": "note"})
+    store.add_idea({"title": "黃仁勳回應 AI 泡沫", "kind": "note"})
+    store.set_nsfw(True)
+    assert len(store.list_ideas()) == 2
+    store.set_nsfw(False)
+    titles = [i["title"] for i in store.list_ideas()]
+    assert "黃仁勳回應 AI 泡沫" in titles
+    assert "情慾小說：雨夜的旅館" not in titles
+
+
+def test_hidden_ideas_survive_a_write_while_the_switch_is_off(data):
+    """Regression: the write paths read the visible list, so saving would delete the hidden
+    ideas for good."""
+    store.set_nsfw(True)
+    store.add_idea({"title": "情慾小說：雨夜的旅館", "kind": "note"})
+    store.set_nsfw(False)
+    store.add_idea({"title": "新的普通靈感", "kind": "note"})
+    store.set_nsfw(True)
+    titles = [i["title"] for i in store.list_ideas()]
+    assert "情慾小說：雨夜的旅館" in titles, "關閉時新增的東西不能把藏起來的刪掉"
+    assert "新的普通靈感" in titles
+
+
+def test_deleting_an_idea_while_hidden_does_not_delete_the_others(data):
+    store.set_nsfw(True)
+    hidden = store.add_idea({"title": "情慾小說：雨夜的旅館", "kind": "note"})
+    store.add_idea({"title": "黃仁勳回應 AI 泡沫", "kind": "note"})
+    store.set_nsfw(False)
+    store.delete_idea(hidden["id"])       # deleting a hidden idea is still allowed
+    store.set_nsfw(True)
+    assert [i["title"] for i in store.list_ideas()] == ["黃仁勳回應 AI 泡沫"]
+
+
+def test_the_ideas_api_hides_restricted_ideas(client, ceiling):
+    client.post("/api/ideas", json={"title": "開關測試用的情慾小說", "kind": "note"})
+    client.post("/api/ideas", json={"title": "開關測試用的一般靈感", "kind": "note"})
+    store.set_nsfw(True)
+    on = {i["title"] for i in client.get("/api/ideas").json()}
+    assert "開關測試用的情慾小說" in on and "開關測試用的一般靈感" in on
+    store.set_nsfw(False)
+    off = {i["title"] for i in client.get("/api/ideas").json()}
+    assert "開關測試用的一般靈感" in off
+    assert "開關測試用的情慾小說" not in off
+
+
+def test_a_scanned_topic_gets_a_rating(data):
+    store.set_nsfw(True)
+    pipeline.add_radar_cards([{"title": "黃仁勳回應 AI 泡沫"}, {"title": "情慾小說：深夜的旅館"}])
+    by_title = {i["title"]: i["rating"] for i in store.list_ideas()}
+    assert by_title["黃仁勳回應 AI 泡沫"] == "general"
+    assert by_title["情慾小說：深夜的旅館"] == "adult"
+
+
+def test_every_frontend_file_that_uses_state_imports_it():
+    """A view using `state` without importing it fails at runtime, not at build time.
+
+    The ideas page did exactly that (the rating badge), and the page only showed
+    "載入失敗：state is not defined" once the switch was on and a rated idea appeared.
+    """
+    static = Path(__file__).resolve().parent.parent / "static"
+    for f in sorted(static.rglob("*.js")):
+        text = f.read_text("utf-8")
+        if not re.search(r"\bstate\b", text):
+            continue
+        if re.search(r"export\s+(const|let|var)\s+state\b", text):
+            continue          # lib.js defines it; everyone else imports it
+        head = "\n".join(text.splitlines()[:6])
+        assert re.search(r"import[^;]*\bstate\b", head), f"{f.name} 用了 state 但沒有匯入"
+
+
+def test_the_ideas_page_renders_the_rating_badge():
+    """The badge reads state.META, so the import above is what keeps the page alive."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "views" / "ideas.js").read_text("utf-8")
+    assert "state.META?.rating_label" in js

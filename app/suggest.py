@@ -82,21 +82,30 @@ def _hits(text: str, words: tuple[str, ...]) -> list[str]:
     return [w for w in words if w.lower() in low]
 
 
+def judge_rating(topic: str, notes: str = "") -> tuple[str, list[str]]:
+    """What rating this topic reads as, independent of what the channel may create.
+
+    The ceiling answers "may I make this?"; this answers "what is it?". Conflating them meant an
+    adult idea was filed as general on a general channel, and therefore never hidden.
+    """
+    text = f"{topic} {notes}".strip()
+    adult = _hits(text, _ADULT_WORDS)
+    soft = _hits(text, _SUGGESTIVE_WORDS)
+    if adult:
+        return "adult", [f"提到「{adult[0]}」，判為成人分級"]
+    if soft:
+        return "suggestive", [f"提到「{soft[0]}」，判為暗示分級"]
+    return "general", []
+
+
 def heuristic(topic: str, notes: str = "", allowed_rating: str = "adult") -> dict:
     """A fast, explainable first guess. Pure: same input, same output, no I/O."""
     text = f"{topic} {notes}".strip()
     reasons: list[str] = []
 
     # rating
-    adult = _hits(text, _ADULT_WORDS)
-    soft = _hits(text, _SUGGESTIVE_WORDS)
-    rating = "adult" if adult else ("suggestive" if soft else "general")
-    if not store.rating_at_or_below(rating, allowed_rating):
-        rating = allowed_rating if store.rating_at_or_below(allowed_rating, "adult") else "general"
-    if adult:
-        reasons.append(f"提到「{adult[0]}」，判為成人分級")
-    elif soft:
-        reasons.append(f"提到「{soft[0]}」，判為暗示分級")
+    rating, rating_reasons = judge_rating(topic, notes)
+    reasons.extend(rating_reasons)
 
     # form first: several forms only make sense for invented content, and mode depends on that
     form = "video"
@@ -133,13 +142,20 @@ def heuristic(topic: str, notes: str = "", allowed_rating: str = "adult") -> dic
             "source_urls": extract_urls(topic, notes), "reasons": reasons, "by": "rules"}
 
 
-def _valid(ep: dict, ceiling: str) -> list[str]:
-    """Drop anything that would be rejected at creation."""
+def _valid(ep: dict, ceiling: str, clamp_rating: bool = True) -> list[str]:
+    """Drop anything that would be rejected at creation.
+
+    `clamp_rating=False` keeps the rating as it was judged (the ceiling only gates creation), which
+    is what the ideas page needs to know whether an idea must be hidden.
+    """
     bad: list[str] = []
     if ep.get("mode") not in store.MODES:
         ep["mode"] = "news"
         bad.append("mode")
-    if ep.get("rating") not in store.RATINGS or not store.rating_at_or_below(ep["rating"], ceiling):
+    if ep.get("rating") not in store.RATINGS:
+        ep["rating"] = "general"
+        bad.append("rating")
+    elif clamp_rating and not store.rating_at_or_below(ep["rating"], ceiling):
         ep["rating"] = ceiling if store.rating_at_or_below(ceiling, "adult") else "general"
         bad.append("rating")
     if store.rating_conflict(ep["mode"], ep["rating"]):
@@ -224,10 +240,18 @@ def pick_style(styles: list[dict], rating: str, form: str, text: str,
     return best, f"最接近的風格卡：{best_why}"
 
 
-def refine(topic: str, notes: str = "", urls: list[str] | None = None, timeout: float = 45.0) -> dict | None:
+# How long the dialog waits for the model. Configurable (`llm.suggest_timeout_s`) because a
+# local model can take two or three minutes on this prompt; the rules answer is on screen either
+# way, so a timeout costs a nicer guess and nothing else.
+SUGGEST_TIMEOUT_DEFAULT = 180.0
+
+
+def refine(topic: str, notes: str = "", urls: list[str] | None = None,
+           timeout: float | None = None) -> dict | None:
     """Ask the model to judge the topic. Returns None when it cannot or is too slow.
 
-    A short timeout is deliberate: this runs while the owner is looking at the dialog.
+    The timeout is passed per call rather than by rewriting the global setting: doing the latter
+    let a concurrently running episode inherit this short bound and fail with "waited 45 seconds".
     """
     if not (topic or "").strip():
         return None
@@ -248,19 +272,29 @@ def refine(topic: str, notes: str = "", urls: list[str] | None = None, timeout: 
 "form":"<form>","source_urls":["..."],"reasons":["..."]}}"""
     prompt = f"# 題目\n{topic}\n\n# 使用者筆記\n{notes or '（無）'}\n\n# 已知連結\n" + "\n".join(urls or []) or "（無）"
     cfg = store.get_settings()["llm"]
-    prev = cfg.get("timeout_s")
+    tmo = float(timeout) if timeout else suggest_timeout(cfg)
     try:
-        # bound this call without touching the saved setting
-        store.save_settings({**store.get_settings(), "llm": {**cfg, "timeout_s": timeout}})
-        data = llm.complete_json("suggest", sys, prompt)
+        data = llm.complete_json("suggest", sys, prompt, timeout=tmo)
     except (llm.LLMError, ValueError, KeyError):
         return None
-    finally:
-        cur = store.get_settings()
-        store.save_settings({**cur, "llm": {**cur["llm"], "timeout_s": prev}})
     if not isinstance(data, dict):
         return None
     return data
+
+
+def suggest_timeout(cfg: dict | None = None) -> float:
+    """How long the dialog's model pass may take.
+
+    Deliberately independent of `llm.timeout_s`: the dialog is a small, optional convenience and
+    the owner can see the rules answer meanwhile, so it must not inherit an episode's 30-minute
+    budget, and an episode must not inherit its short one.
+    """
+    cfg = cfg or store.get_settings()["llm"]
+    try:
+        want = float(cfg.get("suggest_timeout_s") or SUGGEST_TIMEOUT_DEFAULT)
+    except (TypeError, ValueError):
+        want = SUGGEST_TIMEOUT_DEFAULT
+    return want if want > 0 else SUGGEST_TIMEOUT_DEFAULT
 
 
 def suggest(topic: str, notes: str = "", urls: list[str] | None = None,
@@ -284,14 +318,17 @@ def suggest(topic: str, notes: str = "", urls: list[str] | None = None,
             if isinstance(got.get("reasons"), list):
                 merged["reasons"] = [str(r)[:120] for r in got["reasons"]][:3]
             merged["by"] = "model"
-            _valid(merged, ceiling)
+            _valid(merged, ceiling, clamp_rating=False)
             if merged.get("source_urls") is None:
                 merged["source_urls"] = base["source_urls"]
             extra = [u for u in (got.get("source_urls") or []) if str(u).startswith("http")]
             merged["source_urls"] = list(dict.fromkeys(base["source_urls"] + extra))
             out = merged
 
-    _valid(out, ceiling)
+    # The judgement says what the topic is; the ceiling only decides what may be created.
+    # Clamping here would file an adult topic as general on a general channel, and then the
+    # NSFW switch would have nothing to hide.
+    out["allowed"] = store.rating_at_or_below(out["rating"], ceiling)
     styles = store.get_styles()["items"]
     style_id, why = pick_style(styles, out["rating"], out["form"], f"{topic} {notes}")
     out["style_id"] = style_id

@@ -500,7 +500,7 @@ def watch_run(sid: str):
 
 @app.delete("/api/radar/{idx}")
 def radar_delete(idx: int):
-    items = store.get_radar()
+    items = store.all_ideas()
     if 0 <= idx < len(items):
         items.pop(idx)
         store.save_radar(items)

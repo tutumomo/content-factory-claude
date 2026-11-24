@@ -1,5 +1,5 @@
-import { $, $$, api, esc, state, toast } from "../lib.js?v=20261125d";
-import { openExtractStyleModal, openStyleEditorModal, openVideoStyleModal } from "../modals.js?v=20261125d";
+import { $, $$, api, esc, state, toast } from "../lib.js?v=20261125g";
+import { openExtractStyleModal, openStyleEditorModal, openVideoStyleModal } from "../modals.js?v=20261125g";
 
 let styleCatFilter = "全部";
 let styleQuery = "";

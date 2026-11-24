@@ -1402,13 +1402,17 @@ def radar_rows(text: str) -> list[dict]:
 
 def add_radar_cards(rows: list[dict], kind: str = "radar", source: str = "") -> None:
     with store._lock:
-        items = store.get_radar()
+        items = store.all_ideas()
         now = time.time()
         for t in reversed(rows):  # keep the ranking with the best on top
             t["found"] = now
             t["kind"] = kind
             if source and not str(t.get("source") or "").strip():
                 t["source"] = source
+            # a scanned topic needs its rating too, or the switch would not hide it
+            if not str(t.get("rating") or "").strip():
+                from . import suggest as _suggest
+                t["rating"] = _suggest.judge_rating(str(t.get("title") or ""), str(t.get("why") or ""))[0]
             items.insert(0, t)
         store.save_radar(items)
 

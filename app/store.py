@@ -147,6 +147,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "openai_key_env": "",              # name of env var holding the key, never the key
         "timeout_s": 1800,                 # 單次呼叫的上限；本機模型慢，預設放寬到 30 分鐘
         "task_timeout_s": {},              # {"brief": 3600}：個別任務再放寬
+        "suggest_timeout_s": 180,          # 建集對話框的背景判讀；與上面的上限互不影響
         "task_routes": {},                 # {"script": "openai"}：某個任務改用別的 provider
     },
     "tts": {
@@ -664,8 +665,15 @@ def _norm_idea(item: dict, idx: int = 0) -> dict | None:
         kind = "radar"
     fmt = item.get("format") if item.get("format") in ("long", "short") else "short"
     tags = [str(t).strip() for t in (item.get("tags") or []) if str(t).strip()]
+    # An idea's rating decides whether the switch hides it. Older ideas have none: they are
+    # judged by their text, so an explicit adult idea is not silently shown.
+    rating = str(item.get("rating") or "").strip().lower()
+    if rating not in RATINGS:
+        from . import suggest as _suggest      # late import: suggest imports store
+        rating = _suggest.judge_rating(title, notes)[0]
     return {
         "id": iid,
+        "rating": rating,
         "kind": kind,
         "title": title,
         "why": str(item.get("why") or "").strip(),
@@ -736,10 +744,27 @@ def _norm_idea_list(items: list[dict]) -> list[dict]:
     return sorted(manual + radar + watch, key=lambda x: x["found"], reverse=True)
 
 
-def get_radar() -> list[dict]:
+def all_ideas() -> list[dict]:
+    """Every idea on disk, restricted ones included.
+
+    The write paths must use this: reading the filtered list and writing it back would delete the
+    hidden ideas for good the moment anything touched radar.json while the switch was off.
+    """
     with _lock:
         raw = _read(DATA / "radar.json", [])
         return _norm_idea_list(raw if isinstance(raw, list) else [])
+
+
+def get_radar() -> list[dict]:
+    """Every idea the owner collected, radar hits and watch scans included.
+
+    Restricted ideas are hidden while the NSFW switch is off, so the ideas page shows the same
+    world the rest of the app does.
+    """
+    items = all_ideas()
+    if nsfw_enabled():
+        return items
+    return [i for i in items if (i.get("rating") or "general") == "general"]
 
 
 list_ideas = get_radar
@@ -776,7 +801,7 @@ def get_idea(iid: str) -> dict | None:
 
 def add_idea(data: dict) -> dict:
     with _lock:
-        items = get_radar()
+        items = all_ideas()
         candidate = dict(data)
         candidate.setdefault("id", f"idea-{uuid.uuid4().hex[:8]}")
         candidate.setdefault("found", time.time())
@@ -790,7 +815,7 @@ def add_idea(data: dict) -> dict:
 
 def update_idea(iid: str, patch: dict) -> dict | None:
     with _lock:
-        items = get_radar()
+        items = all_ideas()
         for idx, item in enumerate(items):
             if item["id"] == iid:
                 merged = {**item, **patch, "id": iid}
@@ -805,7 +830,7 @@ def update_idea(iid: str, patch: dict) -> dict | None:
 
 def delete_idea(iid: str) -> bool:
     with _lock:
-        items = get_radar()
+        items = all_ideas()
         kept = [item for item in items if item["id"] != iid]
         if len(kept) == len(items):
             return False
