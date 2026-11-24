@@ -30,13 +30,20 @@ def data(tmp_path, monkeypatch):
 
 @pytest.fixture
 def ceiling(client):
-    """Raise the channel's rating ceiling for one test, then put it back where it was."""
+    """Raise the rating ceiling and switch restricted content on, then restore both.
+
+    A fresh data folder has the NSFW switch off, so a restricted episode would be invisible to
+    every read path; tests that exercise restricted episodes must state that they want them.
+    """
     ch = client.get("/api/channel").json()
     old = ch.get("max_rating") or "general"
+    was_on = store.nsfw_enabled()
     client.put("/api/channel", json={**ch, "max_rating": "adult"})
+    store.set_nsfw(True)
     yield "adult"
     ch2 = client.get("/api/channel").json()
     client.put("/api/channel", json={**ch2, "max_rating": old})
+    store.set_nsfw(was_on)
 
 
 @pytest.fixture
@@ -49,6 +56,7 @@ def offline(client):
 def _raise_ceiling(data, level: str = "adult") -> None:
     """Let the channel make restricted episodes (the default ceiling is general)."""
     store.save_channel({**store.get_channel(), "max_rating": level})
+    store.set_nsfw(True)   # a restricted episode is hidden while the switch is off
 
 
 def _use_stock_visuals(data) -> None:
@@ -880,3 +888,122 @@ def test_the_suggest_endpoint_reads_the_idea_it_was_given(client, ceiling):
     assert "旅館" in body["topic"]
     assert "https://example.com/ref" in body["source_urls"]
     assert body["form"] == "novel"
+
+
+# ---------- regressions: the card list must not collapse to one entry ----------
+
+def test_a_general_card_stored_with_a_stale_form_list_is_repaired(data):
+    """A shipped preset gains/clears fields over time; the stored copy must follow."""
+    import json
+    _raise_ceiling(data, "adult")
+    store.get_styles()
+    path = data / "styles.json"
+    raw = json.loads(path.read_text("utf-8"))
+    for c in raw["items"]:
+        if c["id"] in ("preset-tech-decode", "nsfw-narr-slowburn"):
+            c["forms"] = ["video"]        # the value an older build wrote
+    path.write_text(json.dumps(raw, ensure_ascii=False), "utf-8")
+    by_id = {c["id"]: c for c in store.get_styles()["items"]}
+    assert by_id["preset-tech-decode"]["forms"] == []      # general card: every form
+    assert "novel" in by_id["nsfw-narr-slowburn"]["forms"]  # adult card: its shipped list
+
+
+def test_a_general_card_works_for_every_form(data):
+    for c in store.get_styles()["items"]:
+        if not c.get("nsfw"):
+            assert c["forms"] == [], f"{c['id']} 應該適用全部形態"
+
+
+def test_the_guide_form_still_offers_many_cards(data):
+    _raise_ceiling(data, "adult")
+    styles = store.get_styles()["items"]
+    ok = [c for c in styles if (not c.get("forms") or "guide" in c["forms"])]
+    assert len(ok) > 10, "只有一張卡代表 forms 過濾壞了"
+
+
+def test_an_idiom_about_desire_is_judged_suggestive(data):
+    _raise_ceiling(data, "adult")
+    s = suggest.suggest("女人30如狼、40如虎，男人該如何面對")
+    assert s["rating"] == "suggestive"
+    assert s["mode"] in ("fiction", "narrative"), "受限分級不能留在新聞模式"
+    assert s["style_id"].startswith("nsfw-"), "暗示題材應該拿到成人向的卡"
+
+
+def test_a_neutral_topic_is_not_pulled_into_a_rated_one(data):
+    s = suggest.suggest("黃仁勳回應 AI 泡沫")
+    assert s["rating"] == "general"
+    assert s["mode"] == "news"
+    assert not s["style_id"].startswith("nsfw-")
+
+
+# ---------- the NSFW switch ----------
+
+def test_the_switch_is_off_by_default_in_a_fresh_data_dir(data):
+    assert store.nsfw_enabled() is False
+
+
+def test_the_switch_is_a_file_so_it_can_be_forced_closed(data, monkeypatch):
+    store.set_nsfw(True)
+    assert store.nsfw_enabled() is True
+    monkeypatch.setenv("CF_NSFW", "0")
+    assert store.nsfw_enabled() is False, "the environment must win over the file"
+
+
+def test_a_restricted_episode_disappears_from_the_list_when_the_switch_is_off(data):
+    _raise_ceiling(data)
+    plain = store.new_episode("一般", "short")
+    adult = store.new_episode("成人", "short", mode="fiction", rating="adult")
+    assert {e["id"] for e in store.list_episodes()} == {plain["id"], adult["id"]}
+    store.set_nsfw(False)
+    assert {e["id"] for e in store.list_episodes()} == {plain["id"]}
+
+
+def test_visible_episode_hides_the_restricted_one_but_get_episode_still_works(data):
+    _raise_ceiling(data)
+    adult = store.new_episode("成人", "short", mode="fiction", rating="adult")
+    store.set_nsfw(False)
+    assert store.visible_episode(adult["id"]) is None
+    # the worker must still be able to read and resume the record
+    assert store.get_episode(adult["id"])["id"] == adult["id"]
+
+
+def test_the_episode_api_returns_404_for_a_hidden_episode(client, ceiling):
+    eid = _restricted_episode(client, "隱藏測試")
+    store.set_nsfw(False)
+    assert client.get(f"/api/episodes/{eid}").status_code == 404
+    assert eid not in {e["id"] for e in client.get("/api/episodes").json()}
+
+
+def test_the_file_route_does_not_serve_a_hidden_episode(client, ceiling):
+    """Knowing the path must not be enough: this was an open hole."""
+    eid = _restricted_episode(client, "檔案直連測試")
+    path = f"/files/episodes/{eid}/episode.json"
+    assert client.get(path).status_code == 200
+    store.set_nsfw(False)
+    assert client.get(path).status_code == 404
+    # and a general episode is unaffected
+    r = client.post("/api/episodes", json={"topic": "一般檔案", "format": "short"})
+    gid = r.json()["id"]
+    assert client.get(f"/files/episodes/{gid}/episode.json").status_code == 200
+
+
+def test_the_switch_hides_adult_style_cards(client, ceiling):
+    on = client.get("/api/styles").json()["items"]
+    assert any(c.get("nsfw") for c in on)
+    store.set_nsfw(False)
+    off = client.get("/api/styles").json()["items"]
+    assert not any(c.get("nsfw") for c in off), "成人風格卡必須消失，不只是隱藏"
+
+
+def test_the_switch_api_reports_and_flips(client, ceiling):
+    assert client.get("/api/nsfw").json()["enabled"] is True
+    assert client.put("/api/nsfw", json={"enabled": False}).json()["enabled"] is False
+    assert client.get("/api/nsfw").json()["enabled"] is False
+    assert client.put("/api/nsfw", json={"enabled": True}).json()["enabled"] is True
+
+
+def test_the_switch_api_refuses_to_open_when_the_env_forbids_it(client, ceiling, monkeypatch):
+    monkeypatch.setenv("CF_NSFW", "0")
+    r = client.put("/api/nsfw", json={"enabled": True})
+    assert r.status_code == 409
+    assert "CF_NSFW" in r.json()["detail"]

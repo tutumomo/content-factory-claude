@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import html
 import io
+import os
 import shutil
 import time
 from contextlib import contextmanager
@@ -41,7 +42,7 @@ def _startup() -> None:
 
 def _ep(eid: str) -> dict:
     try:
-        ep = store.get_episode(eid)
+        ep = store.visible_episode(eid)
     except ValueError:
         ep = None
     if not ep:
@@ -293,16 +294,37 @@ def remove_pref(pid: str):
 
 # ---------- styles ----------
 
+@app.get("/api/nsfw")
+def nsfw_state():
+    return {"enabled": store.nsfw_enabled()}
+
+
+@app.put("/api/nsfw")
+def set_nsfw_state(body: dict = Body(...)):
+    """Flip the switch. With it off, restricted episodes disappear from every read path."""
+    on = bool(body.get("enabled"))
+    forced = (os.environ.get("CF_NSFW") or "").strip().lower()
+    if forced in ("0", "false", "off", "no") and on:
+        raise HTTPException(409, "這台機器用 CF_NSFW=0 強制關閉，不能從介面打開")
+    return {"enabled": store.set_nsfw(on)}
+
+
 @app.get("/api/styles")
 def list_styles():
-    return store.get_styles()
+    data = store.get_styles()
+    if not store.nsfw_enabled():
+        data = {**data, "items": [c for c in data["items"] if not c.get("nsfw")]}
+    return data
 
 
 # ---------- character cards ----------
 
 @app.get("/api/characters")
 def list_characters():
-    return {"items": characters.list_all()}
+    items = characters.list_all()
+    if not store.nsfw_enabled():
+        items = [c for c in items if not c.get("ref_image") and not c.get("adult_attested")]
+    return {"items": items}
 
 
 @app.post("/api/characters")
@@ -934,13 +956,26 @@ def youtube_upload(eid: str):
 _FILES_ROOTS = ("episodes", "music", "sfx", "stock", "tmp")  # settings.json / youtube token / cost stay private
 
 
+def _episode_id_from_path(rel: Path) -> str:
+    """`episodes/<id>/...` -> `<id>`; anything else -> ""."""
+    parts = rel.parts
+    return parts[1] if len(parts) >= 3 and parts[0] == "episodes" else ""
+
+
 @app.get("/files/{path:path}")
 def files(path: str):
     p = (store.DATA / path).resolve()
     root = store.DATA.resolve()
     if root not in p.parents or not p.is_file():
         raise HTTPException(404)
-    if p.relative_to(root).parts[0] not in _FILES_ROOTS:
+    rel = p.relative_to(root)
+    if rel.parts[0] not in _FILES_ROOTS:
+        raise HTTPException(404)
+    # A per-episode file inherits that episode's visibility: an episode hidden by the NSFW switch
+    # must not be reachable by knowing its path. Checking only the top-level folder let anyone
+    # fetch /files/episodes/<id>/brief.json for a restricted episode.
+    eid = _episode_id_from_path(rel)
+    if eid and not store.visible_episode(eid):
         raise HTTPException(404)
     return FileResponse(p)
 

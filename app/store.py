@@ -891,12 +891,12 @@ def get_styles() -> dict:
             # in styles.json would otherwise keep the old values forever, so refresh the fields
             # the preset owns while leaving the owner's edits alone.
             cur = by_id[preset["id"]]
+            want = _norm_style(preset)
             for key in _PRESET_OWNED:
-                if key not in preset:
-                    continue
-                want = _norm_style(preset)[key]
-                if cur.get(key) != want:
-                    cur[key] = want
+                # read the value from the normalised preset: `forms: []` means "every form",
+                # and an omitted key in the source dict must still overwrite a stale stored value
+                if cur.get(key) != want[key]:
+                    cur[key] = want[key]
                     changed = True
         active_id = raw.get("active_id")
         if active_id not in by_id:
@@ -1068,6 +1068,58 @@ def new_episode(
         return ep
 
 
+# ---------- the NSFW switch ----------
+
+# The switch lives in its own file rather than in settings.json: the file existing *is* the
+# state, so it can be removed to force a closed switch, and nothing about the setting leaks
+# into a file the UI already renders.
+NSFW_LOCK = "nsfw.lock"
+
+
+def nsfw_enabled() -> bool:
+    """Whether restricted content may be shown and generated.
+
+    `CF_NSFW=0` in the environment always wins, so one machine can be locked closed without
+    touching its data. Otherwise the switch is on when the lock file exists.
+    """
+    forced = (os.environ.get("CF_NSFW") or "").strip().lower()
+    if forced in ("0", "false", "off", "no"):
+        return False
+    if forced in ("1", "true", "on", "yes"):
+        return True
+    return (DATA / NSFW_LOCK).exists()
+
+
+def set_nsfw(on: bool) -> bool:
+    """Flip the switch. Returns the new state."""
+    path = DATA / NSFW_LOCK
+    if on:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("on\n", "utf-8")
+    else:
+        path.unlink(missing_ok=True)
+    return nsfw_enabled()
+
+
+def is_restricted(ep: dict | None) -> bool:
+    """An episode above `general` — the thing the switch hides."""
+    return bool(ep) and (ep.get("rating") or "general").strip().lower() != "general"
+
+
+def visible_episode(eid: str) -> dict | None:
+    """The episode, or None when it must stay hidden (missing, or restricted with the switch off).
+
+    Every read path goes through this so there is one place to reason about. `get_episode`
+    stays unfiltered on purpose: the worker needs the real record to resume a paused job.
+    """
+    ep = get_episode(eid)
+    if ep is None:
+        return None
+    if is_restricted(ep) and not nsfw_enabled():
+        return None
+    return ep
+
+
 def get_episode(eid: str) -> dict:
     with _lock:
         ep = _read(ep_dir(eid) / "episode.json", None)
@@ -1186,9 +1238,10 @@ def _episode_thumb(eid: str, ep: dict) -> str | None:
     return thumbs[0].get("file")
 
 
-def list_episodes() -> list[dict]:
+def list_episodes(include_hidden: bool = False) -> list[dict]:
     with _lock:
         out = []
+        show_nsfw = include_hidden or nsfw_enabled()
         if EPISODES.exists():
             for d in EPISODES.iterdir():
                 f = d / "episode.json"
@@ -1199,6 +1252,8 @@ def list_episodes() -> list[dict]:
                     ep.setdefault("rating", "general")
                     ep.setdefault("characters", [])
                     ep.setdefault("form", default_form(ep["mode"], ep["rating"]))
+                    if is_restricted(ep) and not show_nsfw:
+                        continue
                     eid = ep["id"]
                     ep["thumb"] = _episode_thumb(eid, ep)
                     metrics_path = d / "metrics.json"

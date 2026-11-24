@@ -30,7 +30,11 @@ _ADULT_WORDS = (
 )
 _SUGGESTIVE_WORDS = (
     "曖昧", "情慾", "誘惑", "挑逗", "親密", "慾望", "性感", "偷情", "外遇", "一夜", "激情",
-    "禁忌", "關係", "身體", "親吻",
+    "禁忌", "身體", "親吻",
+    # idioms and everyday phrasings about desire: a keyword list has to know how people actually
+    # write, or a plainly suggestive topic gets filed as a neutral one
+    "如狼", "似虎", "如虎", "三十如狼", "四十如虎", "性慾", "性需求", "房事", "性生活",
+    "性事", "生理需求", "情趣", "情事", "床事", "私密", "慾火", "求歡", "性趣",
 )
 
 # form keywords, most specific first
@@ -203,9 +207,13 @@ def pick_style(styles: list[dict], rating: str, form: str, text: str,
             score += 4.0
         if category and cat == category:
             score += 3.0
-        # an adult card only wins on an adult topic; a general topic keeps a general card
+        # a card for adult material should only win when the topic actually is one; how strong
+        # the match is scales with the rating (suggestive topics get a milder card)
         if cat in _RACY_CATEGORIES:
-            score += 6.0 if want >= 2 else -5.0
+            score += (0.0, 4.0, 6.0)[want]
+        elif want >= 1 and not card.get("nsfw"):
+            # on a rated topic, a plain card has to earn it
+            score -= 1.0
         if card.get("id") == active:
             score += 0.5
         if score > best_score:
