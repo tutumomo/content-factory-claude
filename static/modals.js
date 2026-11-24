@@ -610,10 +610,16 @@ function styleOptionsHtml(styles, selectedId, query) {
 }
 
 export async function openNewEpisodeModal(prefill = {}) {
-  const [ch, stylesRes] = await Promise.all([api("/api/channel"), api("/api/styles")]);
+  const [ch, stylesRes, meta] = await Promise.all([api("/api/channel"), api("/api/styles"), api("/api/meta")]);
   const styles = stylesRes.items || [];
   const defaultStyle = prefill.style_id || stylesRes.active_id || (styles[0]?.id ?? "");
   const urls = Array.isArray(prefill.source_urls) ? prefill.source_urls.join("\n") : (prefill.source_urls || "");
+  const modes = meta.modes || ["news", "narrative"];
+  const ratings = meta.ratings || ["general", "suggestive", "adult"];
+  const ratingLabel = meta.rating_label || {};
+  const modeLabel = meta.mode_label || {};
+  const maxRating = meta.max_rating || "general";
+  const ratingAllowed = (r) => ratings.indexOf(r) <= ratings.indexOf(maxRating);
 
   openModal({
     title: "做一支新的",
@@ -637,6 +643,21 @@ export async function openNewEpisodeModal(prefill = {}) {
           <select id="ne-style">${styleOptionsHtml(styles, defaultStyle, "")}</select>
         </div>
       </div>
+      <div class="grid-2">
+        <div>
+          <label>內容模式</label>
+          <select id="ne-mode">
+            ${modes.map((m) => `<option value="${esc(m)}">${esc(modeLabel[m] || m)}</option>`).join("")}
+          </select>
+        </div>
+        <div>
+          <label>分級</label>
+          <select id="ne-rating">
+            ${ratings.filter(ratingAllowed).map((r) => `<option value="${esc(r)}">${esc(ratingLabel[r] || r)}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+      <div id="ne-rating-note" class="muted" style="margin:-4px 0 8px"></div>
       <label>參考連結（一行一個；官方公告、對標影片頁、社群討論）</label>
       <textarea id="ne-urls" placeholder="https://...">${esc(urls)}</textarea>
       <label>你的觀點與想強調的點（選填）</label>
@@ -648,6 +669,21 @@ export async function openNewEpisodeModal(prefill = {}) {
         const sel = $("#ne-style", root);
         sel.innerHTML = styleOptionsHtml(styles, sel.value, e.target.value);
       };
+      const ratingNote = () => {
+        const mode = $("#ne-mode", root).value;
+        const rating = $("#ne-rating", root).value;
+        const box = $("#ne-rating-note", root);
+        if (rating === "general") {
+          box.textContent = "";
+          return;
+        }
+        box.innerHTML = mode === "news"
+          ? "新聞模式只到「暗示」分級；成人向必須是虛構敘事（敘事模式）。"
+          : "受限分級：不用免費實拍素材、不自動上傳任何平台、發布包只留本機。";
+      };
+      $("#ne-mode", root).onchange = ratingNote;
+      $("#ne-rating", root).onchange = ratingNote;
+      ratingNote();
       $("#ne-topic", root).focus();
       $("#ne-cancel", root).onclick = closeModal;
       $("#ne-go", root).onclick = async () => {
@@ -657,6 +693,8 @@ export async function openNewEpisodeModal(prefill = {}) {
             body: {
               topic: $("#ne-topic", root).value,
               format: $("#ne-format", root).value,
+              mode: $("#ne-mode", root).value,
+              rating: $("#ne-rating", root).value,
               style_id: $("#ne-style", root).value || null,
               idea_id: prefill.idea_id || null,
               source_urls: $("#ne-urls", root).value.split("\n"),

@@ -24,6 +24,13 @@ PREF_CATS = ["選題", "方向與觀點", "講稿語氣", "開頭與節奏", "�
 # the first five are the original categories (old cards use them); the rest group the newer built-in cards
 STYLE_CATEGORIES = ["科技數碼", "新聞快評", "知識科普", "觀點深度", "生活工具", *NEW_CATEGORIES]
 
+# 內容模式：news = 新聞事實查核；narrative = 虛構敘事（不做來源求證）
+MODES = ("news", "narrative")
+# 分級，由低到高；受限來源與發布限制都看它
+RATINGS = ("general", "suggestive", "adult")
+RATING_LABEL = {"general": "一般", "suggestive": "暗示", "adult": "成人"}
+MODE_LABEL = {"news": "新聞", "narrative": "敘事"}
+
 DEFAULT_SETTINGS: dict[str, Any] = {
     "llm": {
         "provider": "claude_cli",          # claude_cli | openai | mock
@@ -32,6 +39,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "openai_model": "",
         "openai_key_env": "",              # name of env var holding the key, never the key
         "timeout_s": 600,
+        "task_routes": {},                 # {"script": "openai"}：某個任務改用別的 provider
     },
     "tts": {
         "base_url": "http://127.0.0.1:8090",
@@ -176,7 +184,36 @@ DEFAULT_CHANNEL: dict[str, Any] = {
     "formats": ["long", "short", "carousel"],
     "platforms": ["YouTube", "Instagram", "Facebook"],
     "taboo": "",
+    "max_rating": "general",      # 頻道上限：這個頻道最多做到哪一級（成人集必須另外開關）
 }
+
+# 分級合法組合：新聞要可查證的事實，成人向必須是虛構敘事，兩者不能同時成立。
+# 回傳值是給使用者看的拒絕理由；None 代表合法。
+def rating_conflict(mode: str, rating: str) -> str | None:
+    """mode × rating 的合法性。回傳可讀的拒絕理由，合法時回 None。"""
+    if mode not in MODES:
+        return f"內容模式只能是 {'／'.join(MODES)}"
+    if rating not in RATINGS:
+        return f"分級只能是 {'／'.join(RATINGS)}"
+    if mode == "news" and rating == "adult":
+        return "新聞模式不支援 adult 分級：成人向必須是虛構敘事（mode=narrative），新聞要的是可查證的事實與來源。"
+    if mode == "narrative" and rating == "general":
+        return None
+    return None
+
+
+def rating_rank(rating: str) -> int:
+    """分級高低，數字越大限制越多。"""
+    try:
+        return RATINGS.index(rating)
+    except ValueError:
+        return 0
+
+
+def rating_at_or_below(rating: str, ceiling: str) -> bool:
+    """分級是否在允許的上限之內（ceiling 之上的一律不行）。"""
+    return rating_rank(rating) <= rating_rank(ceiling)
+
 
 PRESET_STYLES: list[dict[str, Any]] = [
     {
@@ -824,7 +861,22 @@ def new_episode(
     sources: list[str] | None = None,
     style_id: str | None = None,
     idea_id: str | None = None,
+    mode: str = "news",
+    rating: str = "general",
+    characters: list[str] | None = None,
 ) -> dict:
+    """Create an episode. `mode` (news|narrative) and `rating` (general|suggestive|adult)
+    default to the current behaviour, so an episode without them is byte-identical to today."""
+    mode = (mode or "news").strip().lower()
+    rating = (rating or "general").strip().lower()
+    why = rating_conflict(mode, rating)
+    if why:
+        raise ValueError(why)
+    ceiling = (get_channel().get("max_rating") or "general").strip().lower()
+    if not rating_at_or_below(rating, ceiling):
+        raise ValueError(
+            f"這個頻道的分級上限是 {ceiling}，{rating} 超過上限。"
+            f"請到設定頁把頻道上限調高，或改用較低的分級。")
     with _lock:
         eid = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + slugify(topic)
         styles = get_styles()
@@ -838,6 +890,9 @@ def new_episode(
             "source_urls": sources or [],
             "style_id": chosen_style,
             "idea_id": idea_id or None,
+            "mode": mode,                  # news | narrative
+            "rating": rating,              # general | suggestive | adult
+            "characters": list(characters or []),
             "stage": "sources",
             "status": "queued",            # queued | running | waiting | done | error
             "waiting_for": None,           # direction | script | package | approval
@@ -856,7 +911,13 @@ def new_episode(
 
 def get_episode(eid: str) -> dict:
     with _lock:
-        return _read(ep_dir(eid) / "episode.json", None)
+        ep = _read(ep_dir(eid) / "episode.json", None)
+        if ep is not None:
+            # old episodes predate mode/rating: fill in the defaults so every reader sees them
+            ep.setdefault("mode", "news")
+            ep.setdefault("rating", "general")
+            ep.setdefault("characters", [])
+        return ep
 
 
 def save_episode(ep: dict) -> None:
@@ -974,6 +1035,9 @@ def list_episodes() -> list[dict]:
                 if f.exists():
                     ep = json.loads(f.read_text("utf-8"))
                     ep.pop("log", None)
+                    ep.setdefault("mode", "news")
+                    ep.setdefault("rating", "general")
+                    ep.setdefault("characters", [])
                     eid = ep["id"]
                     ep["thumb"] = _episode_thumb(eid, ep)
                     metrics_path = d / "metrics.json"

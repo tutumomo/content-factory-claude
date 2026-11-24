@@ -112,8 +112,20 @@ def _legacy(kind: str) -> list[str]:
 
 SECTION = {"visuals": "visuals", "voice": "tts", "music": "music", "sfx": "sfx"}
 
+# 分級 → 該分級下不能用的來源。免費實拍素材（Pexels／Pixabay）的授權不涵蓋成人或暗示性用途，
+# 而且那兩個庫是公開可搜尋的，所以 suggestive 以上一律排除。
+RATING_BLOCKED = {
+    "suggestive": {"stock"},
+    "adult": {"stock"},
+}
 
-def chain(kind: str) -> list[str]:
+
+def rating_allowed(src: str, rating: str) -> bool:
+    """這個來源在這個分級下能不能用。"""
+    return src not in RATING_BLOCKED.get((rating or "general").strip().lower(), set())
+
+
+def _raw_chain(kind: str) -> list[str]:
     """The configured chain, with paid sources kept out unless the owner allowed them.
 
     Accepted places for the list: `sources.<kind>.chain` (settings page), `sources.chains.<kind>`,
@@ -131,6 +143,17 @@ def chain(kind: str) -> list[str]:
     if kind == "visuals" and not out:
         out = ["slides"]           # slides always works: Pillow needs no service
     return out
+
+
+def chain(kind: str, rating: str = "general") -> list[str]:
+    """The chain for one category at one rating: configured sources minus the ones this rating blocks."""
+    return [s for s in _raw_chain(kind) if rating_allowed(s, rating)]
+
+
+def excluded_by_rating(kind: str, rating: str) -> list[str]:
+    """Which configured sources this rating removes from the chain (recorded in the episode's plan)."""
+    return [s for s in _raw_chain(kind) if not rating_allowed(s, rating)]
+
 
 
 # ---------- probes ----------
@@ -281,9 +304,12 @@ class Breaker:
 class Plan:
     """What was probed at start-up and which source each category will try first."""
 
-    def __init__(self, chains: dict[str, list[str]], probes: dict[str, dict[str, dict]]):
+    def __init__(self, chains: dict[str, list[str]], probes: dict[str, dict[str, dict]],
+                 excluded: dict[str, list[str]] | None = None):
         self.chains = chains
         self.probes = probes
+        # sources the episode's rating removed from the chain (recorded so the plan shows why)
+        self.excluded = excluded or {}
 
     def usable(self, kind: str) -> list[str]:
         pr = self.probes.get(kind) or {}
@@ -297,15 +323,21 @@ class Plan:
         pr = self.probes.get(kind) or {}
         rows = [f"{LABEL.get(s, s)} {'✓' if (pr.get(s) or {}).get('ok') else '✗'}" for s in self.chains.get(kind, [])]
         c = self.chosen(kind)
-        return f"{KIND_LABEL[kind]}：" + (" → ".join(rows) or "（無來源）") + \
-               (f"；本集先用 {LABEL.get(c, c)}" if c else "；沒有可用來源")
+        out = f"{KIND_LABEL[kind]}：" + (" → ".join(rows) or "（無來源）") + \
+              (f"；本集先用 {LABEL.get(c, c)}" if c else "；沒有可用來源")
+        ex = self.excluded.get(kind) or []
+        if ex:
+            out += f"；分級限制排除 {'、'.join(LABEL.get(s, s) for s in ex)}"
+        return out
 
     def summary(self) -> str:
         return "；".join(self.line(k) for k in KINDS if self.chains.get(k))
 
     def to_dict(self) -> dict:
         return {k: {"chain": self.chains.get(k, []), "probe": self.probes.get(k, {}),
-                    "chosen": self.chosen(k)} for k in KINDS if self.chains.get(k)}
+                    "chosen": self.chosen(k), "excluded": self.excluded.get(k, [])}
+                for k in KINDS if self.chains.get(k)}
+
 
 
 class Report:
@@ -394,13 +426,19 @@ def _gemini_key() -> tuple[str, str]:
     return os.environ.get(name, ""), name
 
 
-def start(kinds: list[str] | None = None) -> tuple[Plan, Breaker]:
-    """Probe the chains once, before any expensive work. Returns the plan and a fresh breaker."""
+def start(kinds: list[str] | None = None, rating: str = "general") -> tuple[Plan, Breaker]:
+    """Probe the chains once, before any expensive work. Returns the plan and a fresh breaker.
+
+    `rating` removes the sources that rating may not use (free stock footage above general);
+    the removed ones are recorded in the plan so the episode shows why.
+    """
     kinds = kinds or KINDS
-    chains = {k: chain(k) for k in kinds}
+    chains = {k: chain(k, rating) for k in kinds}
+    excluded = {k: excluded_by_rating(k, rating) for k in kinds}
+    excluded = {k: v for k, v in excluded.items() if v}
     got = _probe_pairs([(k, s) for k in kinds for s in chains[k]])  # every category at once
     probes = {k: {s: got[(k, s)] for s in chains[k]} for k in kinds}
-    return Plan(chains, probes), Breaker(int(cfg().get("breaker_after") or BREAK_AFTER))
+    return Plan(chains, probes, excluded), Breaker(int(cfg().get("breaker_after") or BREAK_AFTER))
 
 
 def overview(probe_all: bool = False) -> dict:
@@ -411,8 +449,13 @@ def overview(probe_all: bool = False) -> dict:
         probes = {k: {s: got[(k, s)] for s in chains[k]} for k in KINDS}
     else:
         probes = {k: {} for k in KINDS}
-    kinds = {k: {"label": KIND_LABEL[k], "chain": chains[k], "allow_paid": allow_paid(k),
-                 "probe": probes[k]} for k in KINDS}
+    kinds = {}
+    for k in KINDS:
+        kinds[k] = {"label": KIND_LABEL[k], "chain": chains[k], "allow_paid": allow_paid(k),
+                    "probe": probes[k],
+                    # which sources this rating removes from the chain (per rating)
+                    "blocked_by_rating": {r: [s for s in chains[k] if s in RATING_BLOCKED.get(r, set())]
+                                          for r in store.RATINGS if RATING_BLOCKED.get(r)}}
     return {"kinds": kinds, "probe_timeout_s": _tmo(), "probe_ttl_s": _ttl(),
             "breaker_after": int(cfg().get("breaker_after") or BREAK_AFTER),
             "allow_paid_fallback": bool(cfg().get("allow_paid_fallback", False))}

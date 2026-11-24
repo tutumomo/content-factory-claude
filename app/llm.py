@@ -16,6 +16,46 @@ class LLMError(RuntimeError):
     pass
 
 
+class LLMRefusal(LLMError):
+    """The provider declined to write this content.
+
+    A refusal is not a broken JSON reply: the model answered, it just said no. Reporting it as
+    "模型回覆不是合法 JSON" hides the cause and sends the owner looking in the wrong place.
+    """
+
+
+# Refusal phrasings seen from the providers we support. Matched case-insensitively on the
+# whole reply; a refusal is a short, whole-message statement, so a hit means the model said no.
+REFUSAL_MARKERS = (
+    "i can't help with that",
+    "i cannot help with that",
+    "i can't assist with that",
+    "i cannot assist with that",
+    "i'm sorry, but i can't",
+    "i am unable to provide",
+    "i can't create",
+    "i cannot create",
+    "i'm not able to help with",
+    "unable to assist with",
+    "抱歉，我無法",
+    "我無法協助",
+    "無法協助這個",
+    "我不能協助",
+    "我不能幫你",
+    "無法幫你製作",
+    "這個請求我必須拒絕",
+    "我不能生成",
+)
+
+
+def looks_like_refusal(text: str) -> bool:
+    """True when the reply is a refusal rather than an answer (or a malformed answer)."""
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    return any(m in t for m in REFUSAL_MARKERS)
+
+
 def _extract_json(text: str):
     text = text.strip()
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
@@ -32,6 +72,10 @@ def _extract_json(text: str):
                 return json.loads(text[a : b + 1])
             except json.JSONDecodeError:
                 continue
+    if looks_like_refusal(text):
+        raise LLMRefusal(
+            "模型拒絕寫這個題材（provider 迴覆「" + text.strip()[:120] + "」）。"
+            "請在設定頁把這個任務改派給能寫的 provider（例如本機 OpenAI 相容端點），或改用其他分級。")
     raise LLMError("模型回覆不是合法 JSON：" + text[:300])
 
 
@@ -95,9 +139,24 @@ def _openai(system: str, prompt: str, cfg: dict) -> str:
     return re.sub(r"<think>.*?</think>", "", content, flags=re.S)
 
 
+def provider_for(task: str, cfg: dict | None = None) -> str:
+    """Which provider runs this task.
+
+    `llm.task_routes` maps a task name to a provider ("claude_cli" | "openai" | "mock"), so an
+    episode that needs a model willing to write a given subject can point that task elsewhere
+    without changing the channel's default. Unknown tasks fall back to the default provider.
+    """
+    cfg = cfg or store.get_settings()["llm"]
+    routes = cfg.get("task_routes") or {}
+    p = str(routes.get(task) or "").strip().lower()
+    if p in ("claude_cli", "openai", "mock"):
+        return p
+    return str(cfg.get("provider") or "claude_cli").strip().lower()
+
+
 def complete(task: str, system: str, prompt: str) -> str:
     cfg = store.get_settings()["llm"]
-    p = cfg["provider"]
+    p = provider_for(task, cfg)
     if p == "mock":
         return mock_llm.respond(task, prompt)
     if p == "openai":
@@ -121,6 +180,8 @@ def complete_json(task: str, system: str, prompt: str):
     text = complete(task, sys2, prompt)
     try:
         return _extract_json(text)
+    except LLMRefusal:
+        raise                      # a refusal is an answer, not a broken reply: do not retry it
     except LLMError:
         fix = complete(task, sys2, prompt + "\n\n（上一次輸出不是合法 JSON。請只輸出合法 JSON。）")
         return _extract_json(fix)

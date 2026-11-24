@@ -13,7 +13,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import comfy, cost, llm, media, music, pipeline, prompts, sfx, sources, stock, stock_audio, store, video, video_analysis, watch, youtube
+from . import characters, comfy, cost, llm, media, music, pipeline, prompts, sfx, sources, stock, stock_audio, store, video, video_analysis, watch, youtube
 
 app = FastAPI(title="內容工廠")
 STATIC = store.ROOT / "static"
@@ -59,6 +59,13 @@ def meta():
         "wait_label": pipeline.WAIT_LABEL,
         "styles": prompts.STYLES,
         "critics": {k: v[0] for k, v in prompts.CRITICS.items()},
+        "critics_by_mode": {m: {k: v[0] for k, v in prompts.critic_roles(m).items()}
+                             for m in store.MODES},
+        "modes": list(store.MODES),
+        "mode_label": store.MODE_LABEL,
+        "ratings": list(store.RATINGS),
+        "rating_label": store.RATING_LABEL,
+        "max_rating": store.get_channel().get("max_rating") or "general",
         "pref_cats": store.PREF_CATS,
         "style_categories": store.STYLE_CATEGORIES,
         "sfx_tags": sfx.vocab(),
@@ -270,6 +277,32 @@ def list_styles():
     return store.get_styles()
 
 
+# ---------- character cards ----------
+
+@app.get("/api/characters")
+def list_characters():
+    return {"items": characters.list_all()}
+
+
+@app.post("/api/characters")
+def create_character(body: dict = Body(...)):
+    card = characters.save(body)
+    return card
+
+
+@app.put("/api/characters/{cid}")
+def update_character(cid: str, body: dict = Body(...)):
+    body = {**body, "id": cid}
+    return characters.save(body)
+
+
+@app.delete("/api/characters/{cid}")
+def delete_character(cid: str):
+    if not characters.delete(cid):
+        raise HTTPException(404, "找不到這張角色卡")
+    return {"ok": True}
+
+
 @app.post("/api/styles")
 def create_style(body: dict = Body(...)):
     if not (body.get("name") or "").strip():
@@ -466,14 +499,21 @@ def create_episode(body: dict = Body(...)):
         raise HTTPException(400, "請輸入題目")
     fmt = body.get("format") if body.get("format") in ("long", "short") else "short"
     urls = [u.strip() for u in (body.get("source_urls") or []) if str(u).strip().startswith("http")]
-    ep = store.new_episode(
-        topic,
-        fmt,
-        body.get("notes", ""),
-        urls,
-        style_id=body.get("style_id") or None,
-        idea_id=body.get("idea_id") or None,
-    )
+    characters = [str(c).strip() for c in (body.get("characters") or []) if str(c).strip()]
+    try:
+        ep = store.new_episode(
+            topic,
+            fmt,
+            body.get("notes", ""),
+            urls,
+            style_id=body.get("style_id") or None,
+            idea_id=body.get("idea_id") or None,
+            mode=body.get("mode") or "news",
+            rating=body.get("rating") or "general",
+            characters=characters,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     pipeline.enqueue("episode", ep["id"])
     return ep
 
@@ -597,9 +637,12 @@ def package(eid: str, body: dict = Body(...)):
 
 
 @app.post("/api/episodes/{eid}/approve")
-def approve(eid: str):
+def approve(eid: str, body: dict = Body(default={})):
     with _gate(eid, "approval"):
-        pipeline.approve(eid)
+        try:
+            pipeline.approve(eid, confirm_rating=(body.get("confirm_rating") or ""))
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
     return {"ok": True}
 
 
@@ -836,6 +879,9 @@ def youtube_upload(eid: str):
         raise HTTPException(409, "成片核准後才能上傳")
     if (ep.get("youtube") or {}).get("status") in ("queued", "uploading"):
         raise HTTPException(409, "這一集已在上傳中")
+    blocked = youtube.upload_blocked_reason(ep)
+    if blocked:
+        raise HTTPException(409, blocked)
     if not youtube.status()["logged_in"]:
         raise HTTPException(401, "還沒登入 Google 帳號")
     store.update_episode(eid, youtube={"status": "queued", "progress": 0.0})

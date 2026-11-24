@@ -55,6 +55,11 @@ export async function viewStyle(main) {
           <div><label>發布平台（逗號分隔）</label><input id="c-platforms" value="${esc((ch.platforms || []).join(", "))}"></div>
           <div><label>對標帳號</label><textarea id="c-benchmarks" style="min-height:58px">${esc(ch.benchmarks)}</textarea></div>
           <div><label>禁區（不碰的題材、不用的說法）</label><textarea id="c-taboo" style="min-height:58px">${esc(ch.taboo)}</textarea></div>
+          <div><label>分級上限（這個頻道最多做到哪一級）</label>
+            <select id="c-max_rating">
+              ${["general", "suggestive", "adult"].map((r) => `<option value="${esc(r)}" ${(ch.max_rating || "general") === r ? "selected" : ""}>${esc({ general: "一般", suggestive: "暗示", adult: "成人" }[r])}</option>`).join("")}
+            </select>
+            <div class="muted" style="font-size:12px">預設「一般」。調高之後才能建受限分級的集數；受限分級不會自動上傳任何平台。</div></div>
         </div>
       </section>
 
@@ -160,6 +165,7 @@ export async function viewStyle(main) {
         body[k] = $(`#c-${k}`, main).value;
       }
       body.platforms = $("#c-platforms", main).value.split(/[,，]/).map((x) => x.trim()).filter(Boolean);
+      body.max_rating = $("#c-max_rating", main).value;
       await api("/api/channel", { method: "PUT", body });
       toast("已儲存頻道定位");
     };

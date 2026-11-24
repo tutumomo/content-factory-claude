@@ -83,16 +83,46 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 - **官方 H3 提示詞技能**：MiniMax 官方的 9 個 H3 skill（`h3-prompt-writing` 與 8 個風格生成器）放在 `.claude/skills/`，Claude 在專案內可直接引用；`h3-prompt-writing/references/base-en.txt` 是 T2VA／I2VA／FL2VA／L2VA 的三段式欄位規範，`app/h3video.py` 的提示詞模板照這份寫。
 - **GPU**：LM Studio、Strata、ComfyUI 共用同一塊記憶體，不要同時載入大模型。
 
+## 內容模式與分級
+
+每一集帶兩個欄位：**內容模式**（`mode`）與**分級**（`rating`）。未指定時是 `news` ＋ `general`，行為與以前完全一樣。
+
+| mode | rating | 意思 |
+|---|---|---|
+| `news` | `general` | 新聞：查證事實、有來源、有防幻覺規則。預設 |
+| `news` | `suggestive` | 新聞但帶暗示性主題 |
+| `narrative` | `general`／`suggestive`／`adult` | 虛構敘事：不做來源求證，改用敘事規則 |
+
+建集當下就會擋下不合法的組合：`mode=news` ＋ `rating=adult` 會回 400 並說明「成人向必須是虛構敘事」。
+
+**頻道上限**：風格頁「頻道基本定位」有「分級上限」，預設「一般」。要建受限分級的集數，先把上限調高；超出上限的建集請求會被拒絕並說明原因。
+
+**分級會擋住什麼**
+
+- **畫面來源**：`suggestive`／`adult` 的集數，畫面來源鏈會排除免費實拍素材（Pexels／Pixabay 的授權不涵蓋這個用途）。排除掉哪一個會寫進集數的來源計畫（`verify.json` 的 `sources.plan`）與 `分級` 檢查；若受限來源真的被用到，那項檢查會是失敗。
+- **自動上傳**：`suggestive`／`adult` 的集數**不支援自動上傳** YouTube。YouTube Data API 沒有可寫的 18+ 欄位（`contentDetails.contentRating.ytRating` 寫入會被忽略或拒絕），而且平台規範禁止這類內容——設年齡限制不等於允許上架。擋截在 API 入口與上傳工作階段兩處，訊息說得出原因。
+- **發布包**：受限分級的發布包只有影片、字幕、縮圖、`metadata.json`（含 `contentRating` 與 AI 生成揭露）與 `CHECKLIST.md`（合規檢查清單）。沒有 IG 輪播圖卡、沒有 Facebook 貼文、沒有 shorts 平台文案。
+- **核准**：受限分級的集數核准時要送出與集數分級相符的分級確認（`confirm_rating`），確認會記在集數的 `approvals`。
+
+**各模式的審稿角色不同**：新聞是「事實查核／觀眾理解／節奏／AI 腔獵人」；敘事是「界線與分級／情節連貫／情慾節奏／AI 腔獵人」。界線與分級給 0 分會直接中止這集（進錯誤狀態，不進閘門）。各模式的角色組可從 `GET /api/meta` 的 `critics_by_mode` 取得。
+
+**Provider 分流與拒寫**：預設用 `claude -p`。成人向題材常被雲端模型拒寫，這時回報的是「模型拒絕寫這個題材」而不是「輸出不是合法 JSON」。設定頁的 `llm.task_routes` 可以把某個任務改派給別的 provider（例如本機 OpenAI 相容端點），例如 `{"script": "openai", "critique_boundary": "openai"}`。
+
+**角色卡（`data/characters.json`）**：一張卡一個角色，帶固定外觀描述與穩定的種子偏移，讓同一個角色在每個畫面看起來是同一人。兩條硬規則寫在 `app/characters.py`：
+
+- 非 `general` 分級用到的角色，`adult_attested` 必須明確為 `true`；缺欄位或為 `false` 一律拒絕（不會預設為真）。
+- 用了真人照片（`ref_image`）就必須附同意文件（`model_release`）；沒有同意文件就拒絕。
+
 ## 測試
 
 一套測試、一個入口。`tests/conftest.py` 會把 `CF_DATA` 指到暫存目錄，並替換掉所有會碰網路或 GPU 的服務（TTS／對齊、素材庫、ComfyUI、H3、音樂、Remotion、LLM），所以不需要開任何本機服務，也不會寫到正式的 `data/`。
 
 ```bash
-.venv/bin/python -m pytest tests -q        # 全部 57 個測試（建議）
-.venv/bin/python -m unittest discover -s tests -t . -v   # 只跑 unittest 風格的模組（42 個）
+.venv/bin/python -m pytest tests -q        # 全部測試（建議）
+.venv/bin/python -m unittest discover -s tests -t . -v   # 只跑 unittest 風格的模組
 ```
 
-`pytest` 是三套測試的聯集：`tests/test_editorial.py`（雷達預篩／評分／聚類／求證）、`tests/test_sources.py`（來源鏈與降級）、`tests/test_smoke.py`（mock LLM、假服務、真 ffmpeg 的端到端矩陣與閘門回歸）。`unittest discover` 不會收集 `test_smoke.py` 這種 pytest 函式式測試，只用來跑前兩套；新測試請一律用 pytest 撰寫，並放進 `pytest tests` 會收集到的檔案。
+`pytest` 是四套測試的聯集：`tests/test_editorial.py`（雷達預篩／評分／聚類／求證）、`tests/test_sources.py`（來源鏈與降級）、`tests/test_smoke.py`（mock LLM、假服務、真 ffmpeg 的端到端矩陣與閘門回歸）、`tests/test_ratings.py`（mode／rating、來源鏈分級過濾、拒寫辨識、角色卡、負面提示、發布包分岔與稽核軌跡）。`unittest discover` 不會收集 `test_smoke.py` 這種 pytest 函式式測試，只用來跑前兩套；新測試請一律用 pytest 撰寫，並放進 `pytest tests` 會收集到的檔案。
 
 ## 沒做的事
 

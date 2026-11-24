@@ -258,6 +258,21 @@ def _set_state(eid: str, **kw) -> None:
     store.update_episode(eid, youtube=yt)
 
 
+def upload_blocked_reason(ep: dict) -> str:
+    """Why this episode may not be auto-uploaded to YouTube; empty string when it may.
+
+    YouTube's Data API has no writable 18+ field (`contentDetails.contentRating.ytRating`
+    is ignored or rejected), and the platform's rules forbid this kind of content outright:
+    an age restriction is not permission to publish. So the block is in code, not a setting.
+    """
+    rating = (ep.get("rating") or "general").strip().lower()
+    if rating == "general":
+        return ""
+    return ("這一集的分級是「成人」，不支援自動上傳 YouTube：YouTube Data API 沒有可寫的 18+ "
+            "欄位，而且平台規範禁止這類內容（設年齡限制不等於允許上架）。"
+            "請改用本機發布包自行處理。")
+
+
 def upload_episode(eid: str) -> None:
     """Worker task. Uploads publish/video.mp4 with metadata.json, then sets the thumbnail."""
     try:
@@ -268,6 +283,10 @@ def upload_episode(eid: str) -> None:
 
 
 def _upload(eid: str) -> None:
+    ep = store.get_episode(eid)
+    blocked = upload_blocked_reason(ep or {})
+    if blocked:
+        raise YouTubeError(blocked)
     pub = store.ep_dir(eid) / "publish"
     video = pub / "video.mp4"
     if not video.is_file():
