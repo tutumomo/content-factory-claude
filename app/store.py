@@ -1132,6 +1132,27 @@ def effective_max_rating() -> str:
     return ceiling
 
 
+# Words that mark text as restricted when it is about to leave the machine. A deliberate
+# over-approximation: a false positive only means one search is skipped, a false negative leaks.
+_NSFW_MARKERS = (
+    "情色", "色情", "情慾", "裸", "性愛", "性行為", "做愛", "高潮", "呻吟", "調教", "肉體",
+    "erotic", "nsfw", "18+", "限制級", "露點", "成人小說", "成人內容", "成人向",
+)
+
+
+def nsfw_marker(text: str) -> str:
+    """The first restricted-content marker found in `text`, or "" when there is none.
+
+    Returned as it appears in the text (not lowercased) so it can be quoted in an error message.
+    """
+    low = (text or "").lower()
+    for m in _NSFW_MARKERS:
+        i = low.find(m.lower())
+        if i != -1:
+            return (text or "")[i:i + len(m)]
+    return ""
+
+
 def is_restricted(ep: dict | None) -> bool:
     """An episode above `general` — the thing the switch hides."""
     return bool(ep) and (ep.get("rating") or "general").strip().lower() != "general"

@@ -152,6 +152,16 @@ CF_DATA=~/content-factory-sfw ./run.sh     # 完全看不到另一份資料
 | `effective_max_rating()` 收斂上限 | 完成 |
 | 標題列一鍵開關 | 完成 |
 | 佇列中的集數暫停 | 完成（`run_episode` 開頭檢查） |
+| 對外搜尋（`claude -p` + WebSearch、Bing、Wikipedia） | 完成（雙層） |
+
+對外搜尋是另一條會送出內容的路徑，用兩層擋：
+
+1. **依集數**：受限集數在開關關閉時完全不搜尋（`websearch.search()` 直接回空）。
+   `claude` 引擎會把題目交給雲端模型並開 WebSearch，Bing／Wikipedia 會把題目變成
+   查詢字串，三者都算外送。
+2. **依內容**：送出前掃一次 `store.nsfw_marker()`。這是為了「一般集數的筆記裡
+   引用了一段露骨文字」這種情況——集數本身不受限，但內容不該出去。命中就阻止送出
+   並記下命中詞。關閉時連 `_relevance()` 那趟（會把搜尋結果的標題送給 LLM）也跳過。
 
 **還沒做**：正在進行的 LLM 呼叫不會被中斷。暫停發生在「下一個階段開始前」，
 所以關閉開關後，已經在跑的那一次呼叫會先跑完。這是刻意的——中斷一個已經發出的
@@ -183,4 +193,5 @@ CF_DATA=~/content-factory-sfw ./run.sh     # 完全看不到另一份資料
 ## 未驗證
 
 - `/files` 直連已實測確認可行（見第 2 節），不是推論。
-- 各 LLM provider（`claude_cli` / `openai` / `mock`）的請求內容是否還有其他路徑會帶到 NSFW 素材，我只檢查了 `base_system` 與任務提示詞兩處，`claude_web_search` 那條沒有細看。
+- `claude_web_search` 已處理（見 6.5）。`openai` 那條只經過 `base_system` 與任務提示詞，已一併受 `prefs_text`／`style_block` 過濾；沒有其他獨立的外送路徑。
+- 「依內容」的掃描是關鍵詞比對，抓得到直白用語，抓不到純暗示的寫法。它是最後一道防線，不是主要防線。

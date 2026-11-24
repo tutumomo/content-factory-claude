@@ -61,6 +61,18 @@ def _usable(url: str, seen: set[str]) -> bool:
     return bool(host) and not any(h in host for h in SKIP_HOSTS)
 
 
+def _outbound_blocked(text: str) -> str:
+    """Why this text must not leave the machine, or "" when it may.
+
+    The switch already keeps restricted episodes from reaching here; this is the belt-and-braces
+    check for the case where a general episode's notes quote something explicit.
+    """
+    if store.nsfw_enabled():
+        return ""
+    hit = store.nsfw_marker(text)
+    return f"內容疑似限制級（命中「{hit}」），已阻止送出" if hit else ""
+
+
 def _claude(ep: dict, gaps: list[str], tried: list[str], limit: int) -> list[dict]:
     sys = """你是研究助理，替自媒體講稿找可以引用的公開網頁。用 WebSearch 搜尋，挑出最能支撐題目的頁面。
 規則：
@@ -78,8 +90,12 @@ def _claude(ep: dict, gaps: list[str], tried: list[str], limit: int) -> list[dic
     if tried:
         pr.append("# 已經試過、不用再給的網址\n" + "\n".join(tried[:10]))
     pr.append(f"請找 {limit} 個網址，最多 {limit + 2} 個。")
+    payload = "\n\n".join(pr)
+    blocked = _outbound_blocked(payload)
+    if blocked:
+        raise SearchError(blocked)
     try:
-        data = llm.claude_web_search(sys, "\n\n".join(pr))
+        data = llm.claude_web_search(sys, payload)
     except llm.LLMError as e:
         raise SearchError(f"Claude 搜尋失敗：{e}") from e
     rows = data.get("urls") if isinstance(data, dict) else data
@@ -159,6 +175,8 @@ def _relevance(ep: dict, gaps: list[str] | None, rows: list[dict], limit: int) -
     if gaps:
         prompt += "# 目前缺的證據\n" + "\n".join(f"- {g}" for g in gaps) + "\n"
     prompt += "# 候選\n" + json.dumps(cand, ensure_ascii=False)
+    if _outbound_blocked(prompt):
+        return rows     # do not ship candidate titles out while restricted content is off
     try:
         keep = llm.complete_json("relevance", _RELEVANCE_SYS, prompt).get("keep")
         keep = {int(i) for i in keep or [] if isinstance(i, (int, str)) and str(i).isdigit()}
@@ -174,7 +192,13 @@ def search(ep: dict, gaps: list[str] | None = None, tried: list[str] | None = No
 
     Collects usable links from every engine in the chain (they are re-ranked by relevance at the
     end); `tried` URLs are never returned again.
+
+    A restricted episode never searches while the NSFW switch is off: every engine here sends the
+    topic to a third party (the `claude` engine hands it to a cloud model with WebSearch, and the
+    query goes to Bing/Wikipedia as a URL), so searching would leak what the switch is hiding.
     """
+    if store.is_restricted(ep) and not store.nsfw_enabled():
+        return {"engine": "", "results": [], "errors": ["限制級內容已關閉，不對外搜尋"]}
     seen = set(tried or [])
     errors: list[str] = []
     used: list[str] = []

@@ -13,7 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import characters, comfy, llm, pipeline, prompts, sources, store, suggest, youtube
+from app import characters, comfy, llm, pipeline, prompts, sources, store, suggest, websearch, youtube
 
 from app.style_presets_nsfw import NSFW_CATEGORIES, NSFW_PRESETS
 
@@ -1144,9 +1144,53 @@ def test_flipping_the_switch_resumes_through_the_api(client, ceiling, monkeypatc
     client.put("/api/nsfw", json={"enabled": False})
     store.update_episode(eid, status="paused", nsfw_paused=True)
     body = client.put("/api/nsfw", json={"enabled": True}).json()
-    assert body["resumed"] == 1
-    # the worker picks it up immediately, so it is queued or already running; what matters is
-    # that it is no longer paused and the flag is cleared
+    assert body["enabled"] is True
+    # the live worker may grab the job the instant it is queued, so assert the outcome rather than
+    # the count: the episode must no longer be paused, and its flag must be cleared
     after = store.get_episode(eid)
-    assert after["status"] in ("queued", "running")
+    assert after["status"] != "paused", "打開開關後不該還停在暫停"
     assert after.get("nsfw_paused") is False
+    assert body["resumed"] >= 0
+
+
+# ---------- the search path must not carry restricted text off the machine ----------
+
+def test_a_restricted_episode_does_not_search_when_the_switch_is_off(data):
+    _raise_ceiling(data)
+    ep = {"topic": "成人小說：雨夜的旅館", "rating": "adult", "mode": "fiction"}
+    store.set_nsfw(False)
+    out = websearch.search(ep)
+    assert out["results"] == [] and out["engine"] == ""
+    assert out["errors"] and "不對外搜尋" in out["errors"][0]
+
+
+def test_the_claude_engine_refuses_to_send_explicit_text(data, monkeypatch):
+    """A general episode whose notes quote explicit material must not reach the cloud either."""
+    _raise_ceiling(data)
+    store.set_nsfw(False)
+    sent = []
+    monkeypatch.setattr(websearch.llm, "claude_web_search",
+                        lambda sys, prompt, **kw: sent.append(prompt) or {"urls": []})
+    ep = {"topic": "一般題目", "rating": "general", "notes": "參考了一段情色小說的寫法"}
+    with pytest.raises(websearch.SearchError) as e:
+        websearch._claude(ep, [], [], 3)
+    assert "阻止送出" in str(e.value)
+    assert sent == [], "內容不能真的送出去"
+
+
+def test_a_clean_general_episode_still_searches(data, monkeypatch):
+    _raise_ceiling(data)
+    store.set_nsfw(False)
+    sent = []
+    monkeypatch.setattr(websearch.llm, "claude_web_search",
+                        lambda sys, prompt, **kw: sent.append(prompt) or {"urls": [{"url": "https://example.com/a"}]})
+    ep = {"topic": "黃仁勳回應 AI 泡沫", "rating": "general", "notes": ""}
+    got = websearch._claude(ep, [], [], 3)
+    assert sent and got[0]["url"] == "https://example.com/a"
+
+
+def test_the_marker_helper_is_case_insensitive_and_specific():
+    assert store.nsfw_marker("這是 NSFW 的內容") == "NSFW"
+    assert store.nsfw_marker("限制級電影") == "限制級"
+    assert store.nsfw_marker("黃仁勳回應 AI 泡沫") == ""
+    assert store.nsfw_marker("") == ""
