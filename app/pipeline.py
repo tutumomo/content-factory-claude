@@ -1309,11 +1309,27 @@ RUNNERS = {"sources": st_sources, "brief": st_brief, "script": st_script, "criti
            "assemble": st_assemble, "package": st_package, "review": st_review, "approved": st_approved}
 
 
+# statuses that mean "waiting on the NSFW switch", not on a person
+PAUSED = "paused"
+
+
+def _paused_by_nsfw(ep: dict) -> bool:
+    """A restricted episode does not run while the switch is off."""
+    return store.is_restricted(ep) and not store.nsfw_enabled()
+
+
 def run_episode(eid: str) -> None:
     ep = store.get_episode(eid)
     stage = ep["stage"]
+    if _paused_by_nsfw(ep):
+        _pause_for_nsfw(eid)
+        return
     while True:
         ep = store.get_episode(eid)
+        if _paused_by_nsfw(ep):
+            # the switch was flipped mid-run: stop before the next stage does any work
+            _pause_for_nsfw(eid)
+            return
         # a text-only form has nothing to storyboard, voice or assemble as a video
         if stage == "storyboard" and not _form_needs(ep, "visual"):
             store.log(eid, f"{store.FORM_LABEL.get(store.form_of(ep), '')}形態：跳過分鏡")
@@ -1327,6 +1343,28 @@ def run_episode(eid: str) -> None:
         if i + 1 >= len(STAGES):
             return
         stage = STAGES[i + 1]
+
+
+def _pause_for_nsfw(eid: str) -> None:
+    """Stop a restricted episode without losing where it was, so turning the switch back on resumes it."""
+    ep = store.get_episode(eid)
+    if ep.get("status") == PAUSED:
+        return
+    store.update_episode(eid, status=PAUSED, waiting_for=None, nsfw_paused=True)
+    store.log(eid, f"限制級內容已關閉，暫停在「{STAGE_LABEL.get(ep.get('stage'), ep.get('stage'))}」；"
+                   f"打開 NSFW 開關後會從這裡繼續")
+
+
+def resume_paused() -> int:
+    """Re-queue every episode the switch paused. Returns how many were resumed."""
+    n = 0
+    for ep in store.list_episodes(include_hidden=True):
+        if ep.get("status") == PAUSED and ep.get("nsfw_paused"):
+            store.update_episode(ep["id"], status="queued", nsfw_paused=False)
+            store.log(ep["id"], "NSFW 開關已打開，繼續執行")
+            enqueue("episode", ep["id"])
+            n += 1
+    return n
 
 
 def _form_needs(ep: dict, what: str) -> bool:

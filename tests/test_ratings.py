@@ -1058,3 +1058,95 @@ def test_the_header_carries_the_one_click_switch():
     assert '/api/nsfw' in app_js
     assert 'method: "PUT"' in app_js
     assert "await route()" in app_js
+
+
+# ---------- the switch reaches the prompt layer ----------
+
+def test_an_adult_taste_rule_never_reaches_the_prompt_when_off(data):
+    _raise_ceiling(data)
+    store.add_pref("講稿語氣", "成人場景要寫感官細節", nsfw=True)
+    store.add_pref("講稿語氣", "開頭三秒要有鉤子")
+    on = store.prefs_text()
+    assert "感官細節" in on and "鉤子" in on
+    store.set_nsfw(False)
+    off = store.prefs_text()
+    assert "感官細節" not in off, "關閉後成人規則不能出現在提示詞裡"
+    assert "鉤子" in off, "一般規則要留著"
+
+
+def test_an_adult_style_card_is_not_described_to_the_model_when_off(data):
+    _raise_ceiling(data)
+    assert "慢熱情慾敘事" in store.style_block("nsfw-narr-slowburn")
+    store.set_nsfw(False)
+    assert store.style_block("nsfw-narr-slowburn") == "（無）"
+
+
+def test_base_system_carries_nothing_restricted_when_off(data):
+    _raise_ceiling(data)
+    store.add_pref("講稿語氣", "成人場景要寫感官細節", nsfw=True)
+    sys_on = prompts.base_system("nsfw-narr-slowburn")
+    assert "慢熱情慾敘事" in sys_on and "感官細節" in sys_on
+    store.set_nsfw(False)
+    sys_off = prompts.base_system("nsfw-narr-slowburn")
+    assert "慢熱情慾敘事" not in sys_off
+    assert "感官細節" not in sys_off
+
+
+def test_the_channel_block_never_carries_restricted_settings(data):
+    """The channel block is part of every prompt, so it must stay free of adult settings."""
+    store.save_channel({**store.get_channel(), "max_rating": "adult", "taboo": ""})
+    for on in (True, False):
+        store.set_nsfw(on)
+        block = prompts.channel_block()
+        assert "adult" not in block and "NSFW" not in block
+
+
+# ---------- pausing instead of erroring ----------
+
+def test_a_restricted_episode_pauses_instead_of_running_when_off(data):
+    _raise_ceiling(data)
+    ep = store.new_episode("成人測試", "short", mode="fiction", rating="adult")
+    store.set_nsfw(False)
+    pipeline.run_episode(ep["id"])
+    got = store.get_episode(ep["id"])
+    assert got["status"] == "paused"
+    assert got.get("nsfw_paused") is True
+    assert got["stage"] == "sources", "暫停要留在原地，不能往下跑"
+
+
+def test_a_general_episode_is_not_paused_when_off(data):
+    _raise_ceiling(data)
+    ep = store.new_episode("一般測試", "short")
+    store.set_nsfw(False)
+    assert pipeline._paused_by_nsfw(store.get_episode(ep["id"])) is False
+
+
+def test_resuming_requeues_the_paused_episode(data, monkeypatch):
+    _raise_ceiling(data)
+    ep = store.new_episode("成人測試", "short", mode="fiction", rating="adult")
+    store.set_nsfw(False)
+    pipeline.run_episode(ep["id"])
+    assert store.get_episode(ep["id"])["status"] == "paused"
+    queued = []
+    monkeypatch.setattr(pipeline, "enqueue", lambda kind, *a: queued.append((kind, a)))
+    store.set_nsfw(True)
+    n = pipeline.resume_paused()
+    assert n == 1
+    assert queued and queued[0][0] == "episode"
+    assert store.get_episode(ep["id"])["nsfw_paused"] is False
+
+
+def test_flipping_the_switch_resumes_through_the_api(client, ceiling, monkeypatch):
+    eid = _restricted_episode(client, "暫停測試")
+    queued = []
+    monkeypatch.setattr(pipeline, "enqueue", lambda kind, *a: queued.append((kind, a)))
+    # close it first, then park the episode the way the worker would have
+    client.put("/api/nsfw", json={"enabled": False})
+    store.update_episode(eid, status="paused", nsfw_paused=True)
+    body = client.put("/api/nsfw", json={"enabled": True}).json()
+    assert body["resumed"] == 1
+    # the worker picks it up immediately, so it is queued or already running; what matters is
+    # that it is no longer paused and the flag is cleared
+    after = store.get_episode(eid)
+    assert after["status"] in ("queued", "running")
+    assert after.get("nsfw_paused") is False

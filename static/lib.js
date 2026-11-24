@@ -74,6 +74,9 @@ export function statusPill(ep) {
   if (ep.status === "waiting") {
     return `<span class="pill waiting">等你：${esc(META?.wait_label?.[ep.waiting_for] || ep.waiting_for)}</span>`;
   }
+  if (ep.status === "paused") {
+    return `<span class="pill paused" title="限制級內容已關閉">NSFW 已暫停</span>`;
+  }
   const map = { queued: "排隊中", running: "agent 處理中", done: "已核准", error: "出錯" };
   return `<span class="pill ${esc(ep.status)}">${map[ep.status] || esc(ep.status)}</span>`;
 }

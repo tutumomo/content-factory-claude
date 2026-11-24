@@ -305,12 +305,20 @@ def nsfw_state():
 
 @app.put("/api/nsfw")
 def set_nsfw_state(body: dict = Body(...)):
-    """Flip the switch. With it off, restricted episodes disappear from every read path."""
+    """Flip the switch. Off hides restricted episodes everywhere; on resumes the ones it paused."""
     on = bool(body.get("enabled"))
     forced = (os.environ.get("CF_NSFW") or "").strip().lower()
     if forced in ("0", "false", "off", "no") and on:
         raise HTTPException(409, "這台機器用 CF_NSFW=0 強制關閉，不能從介面打開")
-    return {"enabled": store.set_nsfw(on)}
+    state = store.set_nsfw(on)
+    resumed = pipeline.resume_paused() if state else 0
+    return {"enabled": state, "resumed": resumed}
+
+
+@app.post("/api/nsfw/resume")
+def nsfw_resume():
+    """Re-queue the episodes a closed switch paused (idempotent)."""
+    return {"resumed": pipeline.resume_paused()}
 
 
 @app.get("/api/styles")

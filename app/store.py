@@ -521,6 +521,8 @@ def _norm_pref(p: dict, idx: int = 0) -> dict | None:
         "status": status,
         "source": source,
         "evidence": str(p.get("evidence") or "").strip(),
+        # a rule learned from a restricted episode; kept out of prompts when the switch is off
+        "nsfw": bool(p.get("nsfw", False)),
     }
 
 
@@ -553,6 +555,7 @@ def add_pref(
     status: str = "active",
     source: str = "manual",
     evidence: str = "",
+    nsfw: bool | None = None,
 ) -> dict:
     with _lock:
         clean_rule = (rule or "").strip()
@@ -580,6 +583,7 @@ def add_pref(
             "status": status,
             "source": source,
             "evidence": (evidence or "").strip(),
+            "nsfw": bool(nsfw),
         }
         if not clean_rule:
             return entry
@@ -617,10 +621,16 @@ def delete_pref(pid: str) -> bool:
 
 
 def prefs_text() -> str:
+    """The taste rules that go into every prompt.
+
+    Adult-marked rules are dropped when the NSFW switch is off: the prompt is assembled from
+    whatever is left, so nothing restricted is ever handed to the model.
+    """
+    show_nsfw = nsfw_enabled()
     lines = [
         f"- [{p['category']}] {p['rule']}"
         for p in get_prefs()
-        if p.get("status", "active") == "active"
+        if p.get("status", "active") == "active" and (show_nsfw or not p.get("nsfw"))
     ]
     return "\n".join(lines) if lines else "（尚無）"
 
@@ -973,6 +983,9 @@ def activate_style(sid: str) -> dict:
 
 def style_block(style_id: str | None = None) -> str:
     card = get_style(style_id) or get_style()
+    if card and card.get("nsfw") and not nsfw_enabled():
+        # never describe an adult card to the model while restricted content is off
+        card = None
     if not card:
         return "（無）"
     lines = [

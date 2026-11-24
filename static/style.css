@@ -91,6 +91,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 .app.layout-side .shell-main { flex: 1; min-width: 0; padding: 26px 32px 80px; max-width: 1320px; }
 
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; background: #888; flex: none; }
+.pill.paused { background: #efe6d0; color: #7a6533; }
 .dot.ok { background: #51cf66; }
 .dot.bad { background: #ff6b6b; }
 /* the status bar's parenthetical hints must not inherit the page's dark .muted colour */
