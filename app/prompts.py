@@ -105,17 +105,31 @@ def source_status_text(source_state: dict | None) -> str:
 
 
 def brief(ep: dict, sources: str, source_state: dict | None = None) -> tuple[str, str]:
-    sys = base_system(ep.get("style_id")) + "\n\n" + ANTI_HALLUCINATION + """
+    mode = ep.get("mode") or "news"
+    rating = ep.get("rating") or "general"
+    form = ep.get("form") or "video"
+    creative = mode in store.UNVERIFIED_MODES
+    sys = base_system(ep.get("style_id")) + "\n\n" + mode_block(mode, rating) + "\n\n" + form_block(form) + f"""
 
 # 任務：方向簡報
 同一個題目可以做成很不一樣的內容。給 3–4 個切入方向。
-輸出：{"directions":[{"id":"A","angle":"一句話切角","audience":"給誰看","why":"為什麼適合本頻道","outline":["段落1","段落2"],"include":["要講"],"exclude":["不講"],"title_feel":"標題感"}],"stale_warnings":["可能過時或需求證的資訊"]}"""
-    prompt = (
-        f"# 題目\n{ep['topic']}\n\n# 格式\n{fmt_desc(ep)}\n\n"
-        f"# 使用者筆記\n{ep.get('notes') or '（無）'}\n\n"
-        f"# 來源狀態\n{source_status_text(source_state)}\n\n"
-        f"# 蒐集到的資料\n{sources or '（無外部資料，請依常識並標註需求證之處）'}"
-    )
+{"這是創作，不需要查證：請大方設計不同的情境與衝突，不要因為「沒有資料」而退縮。" if creative else "方向要能靠手上的資料撐起來。"}
+輸出：{{"directions":[{{"id":"A","angle":"一句話切角","audience":"給誰看","why":"為什麼適合本頻道","outline":["段落1","段落2"],"include":["要講"],"exclude":["不講"],"title_feel":"標題感"}}]{"".join(["", ""]) + ",\"stale_warnings\":[\"可能過時或需求證的資訊\"]" if not creative else ""}}}"""
+    if rating_note(rating):
+        sys += "\n\n" + rating_note(rating)
+    if creative:
+        prompt = (
+            f"# 題目\n{ep['topic']}\n\n# 格式\n{fmt_desc(ep)}\n\n"
+            f"# 使用者筆記（最優先，當成創作brief）\n{ep.get('notes') or '（無）'}\n\n"
+            f"# 參考資料\n{sources or '（沒有參考資料，請完全自行發揮）'}"
+        )
+    else:
+        prompt = (
+            f"# 題目\n{ep['topic']}\n\n# 格式\n{fmt_desc(ep)}\n\n"
+            f"# 使用者筆記\n{ep.get('notes') or '（無）'}\n\n"
+            f"# 來源狀態\n{source_status_text(source_state)}\n\n"
+            f"# 蒐集到的資料\n{sources or '（無外部資料，請依常識並標註需求證之處）'}"
+        )
     return sys, prompt
 
 
@@ -158,26 +172,32 @@ music 是整支片子的背景音樂風格（純音樂、無人聲），例如 "
 def script(ep: dict, direction: dict, sources: str, source_state: dict | None = None) -> tuple[str, str]:
     mode = ep.get("mode") or "news"
     rating = ep.get("rating") or "general"
+    form = ep.get("form") or "video"
+    creative = mode in store.UNVERIFIED_MODES
     sys = (
         base_system(ep.get("style_id"))
-        + "\n\n# 任務：寫講稿\n依使用者選定的方向寫完整講稿，拆成畫面。\n"
+        + "\n\n# 任務：寫講稿\n依使用者選定的方向寫完整內容，依成品形態拆段。\n"
         + mode_block(mode, rating)
+        + "\n\n"
+        + form_block(form)
         + "\n\n"
         + SAFETY_BOUNDARY
         + "\n\n"
         + TERM_RULES
         + "\n"
-        + (SCRIPT_SHAPE_NARRATIVE if mode == "narrative" else SCRIPT_SHAPE)
+        + (SCRIPT_SHAPE_NARRATIVE if creative else SCRIPT_SHAPE)
     )
     if rating_note(rating):
         sys += "\n\n" + rating_note(rating)
+    data_note = ("（創作模式：不需要查證資料，參考資料只是可用的素材，不必逐句對應）" if creative
+                 else sources or "（無）")
     prompt = (
         f"# 題目\n{ep['topic']}\n\n# 格式\n{fmt_desc(ep)}\n\n"
         f"# 選定方向\n{json.dumps(direction, ensure_ascii=False)}\n\n"
         f"# 使用者補充（最優先）\n{ep.get('direction_notes') or '（無）'}\n\n"
-        + (f"# 角色（外觀描述要一致）\n{_character_block(ep)}\n\n" if _character_block(ep) else "")
-        + (f"# 來源狀態\n{source_status_text(source_state)}\n\n" if mode != "narrative" else "")
-        + (f"# 資料\n{sources or '（無）'}" if mode != "narrative" else "# 資料\n（敘事模式：這是虛構故事，不需要查證資料）")
+        + (f"# 角色（外觀與性格要一致）\n{_character_block(ep)}\n\n" if _character_block(ep) else "")
+        + ("" if creative else f"# 來源狀態\n{source_status_text(source_state)}\n\n")
+        + f"# 資料\n{data_note}"
     )
     return sys, prompt
 
@@ -210,9 +230,28 @@ CRITICS_NARRATIVE = {
 }
 
 
-def critic_roles(mode: str | None) -> dict:
-    """The review roles for a content mode. News keeps the factual set; narrative gets its own."""
-    return CRITICS_NARRATIVE if (mode or "news") == "narrative" else CRITICS
+# 文字形態的審稿角色：沒有畫面與節奏，改成文字本身、章節推進與聽感。
+CRITICS_TEXT = {
+    "boundary": ("界線與分級", "檢查是否越過本集分級、是否涉及未成年、是否寫入未經同意的真人；"
+                              "任何一項成立就給 0 分並說明是哪一句。"),
+    "prose": ("文字質地", "抓套語、翻譯腔、形容詞堆疊、說明書語氣，以及一眼看得出是模型寫的句子。"),
+    "coherence": ("情節連貫", "檢查角色動機、前後因果、時間線與細節是否自洽，抓矛盾與跳接。"),
+    "pull": ("閱讀推力", "檢查讀者會不會想往下讀：段落結尾有沒有留懸念、有沒有原地打轉的地方。"),
+}
+
+# MP3 小說多一個「聽感」角色：念出來順不順、聽一次能不能懂。
+CRITICS_AUDIOBOOK = {
+    **CRITICS_TEXT,
+    "listenability": ("聽感", "把句子念出來檢查：同音歧義、過長的插入語、指代不清、需要回頭聽一次的地方。"),
+}
+
+
+def critic_roles(mode: str | None, form: str | None = None) -> dict:
+    """The review roles for a mode × form. News keeps the factual set; text forms get their own."""
+    form = (form or "video").strip().lower()
+    if form in ("novel", "audiobook", "talk"):
+        return CRITICS_AUDIOBOOK if form == "audiobook" else CRITICS_TEXT
+    return CRITICS_NARRATIVE if (mode or "news") in store.UNVERIFIED_MODES else CRITICS
 
 
 # 敘事模式的規則區塊：把「每個數字都要有來源」換成「前後自洽、角色一致、不涉未成年與未經同意的真人」。
@@ -224,12 +263,52 @@ NARRATIVE_RULES = """【敘事規則 — 嚴格遵守】
 5. 情慾描寫要服務於情境與角色，不要變成沒有情節的器官清單；留白與推進要平衡。
 6. 說明欄與標題不要露骨到無法在公開平台顯示的程度。"""
 
+# 自由創作：不需要任何依據，允許原創世界觀。界線仍然是硬的，只是不再要求「不假裝引用」。
+FICTION_RULES = """【自由創作規則 — 嚴格遵守】
+1. 這是完全原創的虛構作品。不需要依據、不需要來源，也不必解釋「這是虛構的」以外的任何現實對應。
+2. 可以自由發明世界觀、角色、規則與衝突；一旦發明就要守住它，後面不能自己推翻。
+3. 允許留白與暗示，允許不把結局講完；但每一段都要推進情境或角色，不要原地打轉。
+4. 角色要有一致的慾望、習慣與說話方式；同一個角色換了場景也要是同一個人。
+5. 界線是硬線：不寫未成年角色、不寫未經同意的真人、不把侵犯寫成浪漫。
+6. 標題與說明用氣氛與懸念，不要用露骨的身體描述。"""
+
 
 def mode_block(mode: str | None, rating: str | None = None) -> str:
-    """The rule block for this episode: facts for news, narrative rules for stories."""
-    if (mode or "news") == "narrative":
+    """The rule block for this episode: facts for news, story rules for narrative, free rein for fiction."""
+    mode = mode or "news"
+    if mode == "fiction":
+        return FICTION_RULES
+    if mode == "narrative":
         return NARRATIVE_RULES
     return ANTI_HALLUCINATION
+
+
+# 各內容形態對「成品」的要求，會接在講稿規則後面。
+FORM_RULES = {
+    "video": """【成品形態：影片】
+每個畫面一句旁白，長度依格式；旁白要念得順、斷句自然。畫面文字不要跟旁白重複。""",
+    "novel": """【成品形態：小說／文字】
+這是給人讀的文字，不是旁白稿，不要寫「畫面」「這段我們來看」這類影片用語。
+分段推進：每段 120–300 字，段落之間要有時間或場景的推移。
+不要為每段寫 headline／bullets；scenes 的 narration 就是小說正文。
+可以寫章節標題，放在 headline。""",
+    "audiobook": """【成品形態：MP3 小說】
+正文跟小說一樣是連續文字，但每一段都要能獨立朗讀：不要依賴表格、清單或純視覺效果。
+句子短一點、少用括號與破折號插入語，因為這是給耳朵聽的。
+每段開頭避免用代名詞起頭，聽眾可能中途才開始聽。""",
+    "gallery": """【成品形態：圖片集】
+每個 scenes 項目是一張圖：narration 是這張圖的圖說（1–3 句），headline 是短標。
+圖說要能獨立看懂，不要依賴前後張。visual 要寫清楚畫面構成，因為這就是成品本身。""",
+    "talk": """【成品形態：話題評論】
+這是主持人口播，第一人稱、有立場。開場先講清楚「這件事的爭點是什麼」。
+可以引用資料，但要說明來源；沒有依據的判斷要明講「這是我的看法」。
+畫面是字卡，所以 headline 與 bullets 要能單獨表達重點。""",
+}
+
+
+def form_block(form: str | None) -> str:
+    """What the finished piece must look like, given the episode's content form."""
+    return FORM_RULES.get((form or "video").strip().lower(), FORM_RULES["video"])
 
 
 def rating_note(rating: str | None) -> str:
@@ -248,14 +327,14 @@ def rating_note(rating: str | None) -> str:
 def critique(role: str, ep: dict, scr: dict, sources: str) -> tuple[str, str]:
     mode = ep.get("mode") or "news"
     rating = ep.get("rating") or "general"
-    roles = critic_roles(mode)
+    roles = critic_roles(mode, ep.get("form"))
     name, job = roles[role]
     extra = ""
     if role == "fact":
         extra = "\n\n" + ANTI_HALLUCINATION + "\n\n" + SAFETY_BOUNDARY + "\n\n" + TERM_RULES
     elif role == "boundary":
         # the boundary role is a hard gate: it must be told what the episode's rating allows
-        extra = "\n\n" + NARRATIVE_RULES + "\n\n" + SAFETY_BOUNDARY
+        extra = "\n\n" + mode_block(mode, rating) + "\n\n" + SAFETY_BOUNDARY
         if rating_note(rating):
             extra += "\n\n" + rating_note(rating)
     sys = base_system(ep.get("style_id")) + f"""
@@ -269,7 +348,12 @@ def critique(role: str, ep: dict, scr: dict, sources: str) -> tuple[str, str]:
 
 
 def revise(ep: dict, scr: dict, reviews: dict, extra: str = "") -> tuple[str, str]:
-    sys = base_system(ep.get("style_id")) + "\n\n# 任務：依審稿意見修稿\n保留好的部分，只修被指出的問題。\n" + SCRIPT_SHAPE
+    mode = ep.get("mode") or "news"
+    sys = (base_system(ep.get("style_id"))
+           + "\n\n# 任務：依審稿意見修稿\n保留好的部分，只修被指出的問題。\n"
+           + mode_block(mode, ep.get("rating"))
+           + "\n\n" + form_block(ep.get("form"))
+           + "\n" + (SCRIPT_SHAPE_NARRATIVE if mode in store.UNVERIFIED_MODES else SCRIPT_SHAPE))
     prompt = (
         f"# 格式\n{fmt_desc(ep)}\n\n# 原講稿\n{json.dumps(scr, ensure_ascii=False)}\n\n"
         f"# 審稿意見\n{json.dumps(reviews, ensure_ascii=False)}\n\n# 使用者意見（最優先）\n{extra or '（無）'}"

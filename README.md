@@ -92,8 +92,25 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 | `news` | `general` | 新聞：查證事實、有來源、有防幻覺規則。預設 |
 | `news` | `suggestive` | 新聞但帶暗示性主題 |
 | `narrative` | `general`／`suggestive`／`adult` | 虛構敘事：不做來源求證，改用敘事規則 |
+| `fiction` | `general`／`suggestive`／`adult` | 自由創作：完全從零編，可以自由發明世界觀 |
 
 建集當下就會擋下不合法的組合：`mode=news` ＋ `rating=adult` 會回 400 並說明「成人向必須是虛構敘事」。
+
+**創作模式不查證。** `narrative` 與 `fiction` 兩者都直接跳過來源求證與來源閘門：不會停下來跟你要連結，也不會因為「資料不足」擋住。有給連結就當參考資料收進 `sources.md`，沒給就從零開始。`news` 的行為完全沒變。
+
+### 成品形態（form）
+
+同一個題材可以做成完全不同的東西，`form` 決定跑哪幾站、交付什麼：
+
+| form | 成品 | 配音 | 畫面 |
+|---|---|---|---|
+| `video` | 影片（預設） | ✓ | ✓ |
+| `novel` | 純文字小說（`novel.txt`＋`manuscript.md`） | ✗ | ✗ |
+| `audiobook` | MP3 小說（`audiobook.mp3`＋`chapters.json`＋文字稿） | ✓ | ✗ |
+| `gallery` | 圖片集（`image_*.jpg`＋`captions.json`＋`gallery.md`） | ✗ | ✓ |
+| `talk` | 話題評論（口播影片＋`script.txt`） | ✓ | ✗ |
+
+非影片形態不會跑分鏡，也不會渲染影片。審稿角色也跟著換：文字形態看「文字質地／情節連貫／閱讀推力」，MP3 小說再加一個「聽感」。
 
 **頻道上限**：風格頁「頻道基本定位」有「分級上限」，預設「一般」。要建受限分級的集數，先把上限調高；超出上限的建集請求會被拒絕並說明原因。
 
@@ -107,6 +124,8 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 **各模式的審稿角色不同**：新聞是「事實查核／觀眾理解／節奏／AI 腔獵人」；敘事是「界線與分級／情節連貫／情慾節奏／AI 腔獵人」。界線與分級給 0 分會直接中止這集（進錯誤狀態，不進閘門）。各模式的角色組可從 `GET /api/meta` 的 `critics_by_mode` 取得。
 
 **Provider 分流與拒寫**：預設用 `claude -p`。成人向題材常被雲端模型拒寫，這時回報的是「模型拒絕寫這個題材」而不是「輸出不是合法 JSON」。設定頁的 `llm.task_routes` 可以把某個任務改派給別的 provider（例如本機 OpenAI 相容端點），例如 `{"script": "openai", "critique_boundary": "openai"}`。
+
+**成人向風格卡。** 內建 10 張 NSFW 風格卡（情慾敘事／感官描寫／成人話題／角色關係），收在 `app/style_presets_nsfw.py`。每張卡帶 `rating_min`（最低適用分級）與 `forms`（適用形態），而且**受頻道上限管制**：頻道上限是「一般」時，這些卡完全不會出現在清單裡，不只是藏起來。每張卡的 `avoid` 都寫死三條硬線：未成年角色、未經同意的真人、把強迫寫成浪漫。
 
 **角色卡（`data/characters.json`）**：一張卡一個角色，帶固定外觀描述與穩定的種子偏移，讓同一個角色在每個畫面看起來是同一人。兩條硬規則寫在 `app/characters.py`：
 

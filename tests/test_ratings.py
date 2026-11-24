@@ -13,7 +13,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import characters, comfy, llm, prompts, sources, store, youtube
+from app import characters, comfy, llm, pipeline, prompts, sources, store, youtube
+
+from app.style_presets_nsfw import NSFW_CATEGORIES, NSFW_PRESETS
 
 from .conftest import set_settings, wait_for
 
@@ -62,6 +64,13 @@ def _restricted_episode(client, topic: str, rating: str = "adult") -> str:
     return r.json()["id"]
 
 
+def _restricted_episode_form(client, topic: str, form: str, rating: str = "adult") -> str:
+    r = client.post("/api/episodes", json={"topic": topic, "format": "short", "mode": "fiction",
+                                            "rating": rating, "form": form})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
 def _run_to_approval(client, eid: str, rating: str = "adult") -> None:
     """Drive an episode up to the approval gate (the last gate before the publish package)."""
     wait_for(client, eid)
@@ -87,7 +96,7 @@ def _run_to_approval(client, eid: str, rating: str = "adult") -> None:
             break
         wait_for(client, eid)
     ep = client.get(f"/api/episodes/{eid}").json()
-    assert ep["waiting_for"] == "approval", ep
+    assert ep["waiting_for"] == "approval", (ep.get("stage"), ep.get("error"), (ep.get("log") or [])[-3:])
 
 
 def _run_to_done(client, eid: str, rating: str | None = None) -> dict:
@@ -149,9 +158,9 @@ def test_raising_the_ceiling_allows_a_restricted_episode(data):
 
 def test_meta_exposes_modes_ratings_and_each_mode_critic_set(client):
     meta = client.get("/api/meta").json()
-    assert meta["modes"] == ["news", "narrative"]
+    assert meta["modes"] == list(store.MODES)
     assert meta["ratings"] == ["general", "suggestive", "adult"]
-    assert set(meta["critics_by_mode"]) == {"news", "narrative"}
+    assert set(meta["critics_by_mode"]) == set(store.MODES)
     assert meta["critics_by_mode"]["news"] != meta["critics_by_mode"]["narrative"]
 
 
@@ -508,3 +517,191 @@ def test_the_manifest_records_models_characters_seeds_and_prompt_hashes(offline,
     assert manifest["scenes"]
     for s in manifest["scenes"]:
         assert "seed" in s and "prompt_sha256" in s
+
+
+# ---------- creative modes: no verification, free invention ----------
+
+def test_fiction_is_an_allowed_mode_with_its_own_rules(data):
+    assert "fiction" in store.MODES
+    assert set(prompts.critic_roles("fiction")) != set(prompts.critic_roles("news"))
+    assert prompts.mode_block("fiction") == prompts.FICTION_RULES
+    assert "不需要依據" in prompts.FICTION_RULES
+
+
+def test_creative_modes_skip_the_source_gate(data, monkeypatch):
+    """A fiction episode with no links must not stop to ask for sources."""
+    _raise_ceiling(data)
+    ep = store.new_episode("憑空編的故事", "short", mode="fiction", rating="adult", form="novel")
+    monkeypatch.setattr(pipeline, "wait", lambda *a, **k: (_ for _ in ()).throw(AssertionError("gated")))
+    monkeypatch.setattr(pipeline, "fetch_text", lambda url, limit=6000: "（不抓）")
+    assert pipeline.st_sources(store.get_episode(ep["id"])) is True
+    verdict = store.get_episode(ep["id"])["checks"]["sources"]
+    assert verdict["ok"] is True and verdict.get("creative") is True
+    assert "不查證" in verdict["value"]
+
+
+def test_news_still_gates_without_sources(data, monkeypatch):
+    """The default news path keeps its old behaviour: no material means a gate."""
+    ep = store.new_episode("沒有來源的新聞", "short")
+    calls = {}
+
+    def fake_wait(eid, what):
+        calls["gated"] = what
+
+    monkeypatch.setattr(pipeline, "wait", fake_wait)
+    monkeypatch.setattr(pipeline, "fetch_text", lambda url, limit=6000: "（不抓）")
+    assert pipeline.st_sources(store.get_episode(ep["id"])) is False
+    assert calls.get("gated") == "sources"
+
+
+def test_the_rating_note_reaches_the_fiction_script_prompt(data):
+    _raise_ceiling(data)
+    ep = store.new_episode("故事", "short", mode="fiction", rating="adult", form="novel")
+    sys, _ = prompts.script(ep, {"id": "A"}, "")
+    assert prompts.FICTION_RULES in sys
+    assert "成人" in sys
+    assert "未成年" in sys       # the hard line survives even in free-invention mode
+
+
+# ---------- content forms ----------
+
+def test_the_five_forms_round_trip_through_the_store(data):
+    for form in store.FORMS:
+        ep = store.new_episode(f"測試 {form}", "short", form=form)
+        assert ep["form"] == form
+        assert store.get_episode(ep["id"])["form"] == form
+
+
+def test_an_unknown_form_falls_back_to_video(data):
+    ep = store.new_episode("測試", "short", form="podcast")
+    assert ep["form"] == "video"
+    assert store.form_of({}) == "video"          # old episodes predate the field
+
+
+def test_each_form_declares_what_it_needs():
+    assert store.FORM_NEEDS["novel"] == {"voice": False, "visual": False}
+    assert store.FORM_NEEDS["video"] == {"voice": True, "visual": True}
+    assert store.FORM_NEEDS["audiobook"] == {"voice": True, "visual": False}
+    assert store.FORM_NEEDS["gallery"] == {"voice": False, "visual": True}
+
+
+def test_text_forms_get_their_own_review_roles():
+    video = set(prompts.critic_roles("fiction", "video"))
+    novel = set(prompts.critic_roles("fiction", "novel"))
+    audio = set(prompts.critic_roles("fiction", "audiobook"))
+    assert novel != video
+    assert "prose" in novel and "pull" in novel
+    assert "listenability" in audio
+    assert "listenability" not in novel
+
+
+def test_each_form_tells_the_model_what_the_finished_piece_is():
+    for form in store.FORMS:
+        block = prompts.form_block(form)
+        assert block and block != prompts.form_block("video") or form == "video"
+    assert "不要寫「畫面」" in prompts.form_block("novel")
+    assert "給耳朵聽" in prompts.form_block("audiobook")
+    assert "一張圖" in prompts.form_block("gallery")
+
+
+def test_a_novel_episode_produces_text_and_no_video(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode_form(client, "小說成品", form="novel")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    assert (out / "novel.txt").is_file()
+    assert (out / "manuscript.md").is_file()
+    assert not (out / "video.mp4").exists()
+    assert not (out / "subtitles.srt").exists()
+    verify = ep["files"]["verify"]
+    assert verify["checks"]["成品形態"]["ok"] is True
+    assert "不配音" in verify["checks"]["成品形態"]["value"]
+
+
+def test_an_audiobook_episode_produces_an_mp3_and_chapters(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode_form(client, "MP3 小說成品", form="audiobook")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    assert (out / "audiobook.mp3").is_file()
+    assert (out / "audiobook.mp3").stat().st_size > 0
+    assert (out / "chapters.json").is_file()
+    chapters = json.loads((out / "chapters.json").read_text("utf-8"))
+    assert chapters and all("start" in c for c in chapters)
+    assert not (out / "video.mp4").exists()
+
+
+def test_a_gallery_episode_produces_images_and_captions(offline, ceiling, fakes, monkeypatch):
+    client = offline
+    monkeypatch.setattr(comfy, "health", lambda timeout=4: {"ok": True, "detail": "fake"})
+    sources._cache.clear()
+    eid = _restricted_episode_form(client, "圖集成品", form="gallery")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    images = sorted(out.glob("image_*.jpg"))
+    assert images, "gallery must ship images"
+    assert (out / "captions.json").is_file()
+    caps = json.loads((out / "captions.json").read_text("utf-8"))
+    assert len(caps) == len(images)
+    assert all(c["caption"] for c in caps)
+    assert not (out / "video.mp4").exists()
+
+
+def test_a_talk_episode_produces_a_script_and_no_video(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode_form(client, "話題評論成品", form="talk")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    assert (out / "script.txt").is_file()
+    assert (out / "manuscript.md").is_file()
+    assert not (out / "video.mp4").exists()
+
+
+# ---------- NSFW style cards ----------
+
+def test_nsfw_style_cards_exist_with_a_rating_floor():
+    assert len(NSFW_PRESETS) >= 8
+    for card in NSFW_PRESETS:
+        assert card["rating_min"] in ("suggestive", "adult"), card["id"]
+        assert card["category"] in NSFW_CATEGORIES
+        assert card["avoid"], "every adult card must carry its hard lines"
+        assert any("未成年" in a for a in card["avoid"]), card["id"]
+        assert "未經同意" in " ".join(card["avoid"]) or card["rating_min"] == "suggestive", card["id"]
+
+
+def test_a_general_channel_never_sees_the_adult_cards(data):
+    """The cards are gated by the channel ceiling: not hidden, simply absent."""
+    assert store.get_channel()["max_rating"] == "general"
+    ids = {c["id"] for c in store.preset_styles()}
+    assert not any(i.startswith("nsfw-") for i in ids)
+    assert "情慾敘事" not in store.style_categories()
+    _raise_ceiling(data, "adult")
+    ids = {c["id"] for c in store.preset_styles()}
+    assert "nsfw-narr-slowburn" in ids
+    assert "情慾敘事" in store.style_categories()
+
+
+def test_nsfw_cards_survive_the_store_round_trip(data):
+    _raise_ceiling(data, "adult")
+    styles = store.get_styles()
+    card = next(c for c in styles["items"] if c["id"] == "nsfw-narr-slowburn")
+    assert card["nsfw"] is True
+    assert card["rating_min"] == "adult"
+    assert card["forms"]
+    general = next(c for c in styles["items"] if not c["id"].startswith("nsfw-"))
+    assert general["nsfw"] is False
+    assert general["rating_min"] == "general"
+
+
+def test_the_nsfw_categories_are_declared_separately():
+    for cat in ("情慾敘事", "感官描寫", "成人話題", "角色關係"):
+        assert cat in NSFW_CATEGORIES
+        assert cat not in store.STYLE_CATEGORIES       # general list stays untouched
+
+
+def test_meta_exposes_forms_and_nsfw_topics(client):
+    meta = client.get("/api/meta").json()
+    assert meta["forms"] == list(store.FORMS)
+    assert set(meta["critics_by_form"]) == set(store.FORMS)
+    assert meta["nsfw_topics"]
+    assert meta["form_label"]["novel"] == "小說／文字"

@@ -1,4 +1,4 @@
-import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261124c";
+import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261124d";
 
 export async function openSettingsModal() {
   const s = await api("/api/settings");
@@ -596,20 +596,25 @@ async function setupYouTubePane(root, s, collect) {
 
 // One <select> with an <optgroup> per category, in the server's category order. The search box
 // only narrows the options; the selected card always stays in the list so the choice never changes silently.
-function styleOptionsHtml(styles, selectedId, query) {
+function styleOptionsHtml(styles, selectedId, query, rating = "general") {
   const q = (query || "").trim().toLowerCase();
   const match = (st) => !q || [st.name, st.category, st.summary, st.id].some((v) => (v || "").toLowerCase().includes(q));
+  const ratings = state.META?.ratings || ["general", "suggestive", "adult"];
+  const rank = (r) => ratings.indexOf(r || "general");
+  // an NSFW card is only offered when the episode's rating is at least what the card asks for
+  const fits = (st) => !st.nsfw || rank(rating) >= rank(st.rating_min || "suggestive");
   const order = state.META?.style_categories || [];
   const groups = new Map(order.map((c) => [c, []]));
   for (const st of styles) {
-    if (st.id !== selectedId && !match(st)) continue;
+    const keep = st.id === selectedId || (match(st) && fits(st));
+    if (!keep) continue;
     const cat = st.category || "其他";
     if (!groups.has(cat)) groups.set(cat, []);
     groups.get(cat).push(st);
   }
   return [...groups].filter(([, items]) => items.length).map(([cat, items]) =>
     `<optgroup label="${esc(cat)}">${items.map((st) =>
-      `<option value="${esc(st.id)}" ${st.id === selectedId ? "selected" : ""}>${esc(st.icon)} ${esc(st.name)}</option>`).join("")}</optgroup>`,
+      `<option value="${esc(st.id)}" ${st.id === selectedId ? "selected" : ""}>${esc(st.icon)} ${esc(st.name)}${st.nsfw ? " ⛔" : ""}</option>`).join("")}</optgroup>`,
   ).join("");
 }
 
@@ -661,6 +666,10 @@ export async function openNewEpisodeModal(prefill = {}) {
           </select>
         </div>
       </div>
+      <label>成品形態</label>
+      <select id="ne-form">
+        ${(meta.forms || ["video"]).map((f) => `<option value="${esc(f)}">${esc((meta.form_label || {})[f] || f)} — ${esc((meta.form_desc || {})[f] || "")}</option>`).join("")}
+      </select>
       <div id="ne-rating-note" class="muted" style="margin:-4px 0 8px"></div>
       <label>參考連結（一行一個；官方公告、對標影片頁、社群討論）</label>
       <textarea id="ne-urls" placeholder="https://...">${esc(urls)}</textarea>
@@ -671,22 +680,33 @@ export async function openNewEpisodeModal(prefill = {}) {
       $("#ne-format", root).value = prefill.format === "long" ? "long" : "short";
       $("#ne-style-q", root).oninput = (e) => {
         const sel = $("#ne-style", root);
-        sel.innerHTML = styleOptionsHtml(styles, sel.value, e.target.value);
+        sel.innerHTML = styleOptionsHtml(styles, sel.value, e.target.value, $("#ne-rating", root).value);
       };
       const ratingNote = () => {
         const mode = $("#ne-mode", root).value;
         const rating = $("#ne-rating", root).value;
+        const form = $("#ne-form", root).value;
         const box = $("#ne-rating-note", root);
-        if (rating === "general") {
-          box.textContent = "";
-          return;
+        const styleSel = $("#ne-style", root);
+        // the card list depends on the rating: repaint it and keep the pick if it still fits
+        const keep = styleSel.value;
+        styleSel.innerHTML = styleOptionsHtml(styles, keep, $("#ne-style-q", root).value, rating);
+        if (!styleSel.value) styleSel.value = keep;
+        const bits = [];
+        if (rating !== "general") {
+          bits.push(mode === "news"
+            ? "新聞模式只到「暗示」分級；成人向必須是虛構敘事。"
+            : "受限分級：不查證、不用免費實拍素材、不自動上傳任何平台、發布包只留本機。");
         }
-        box.innerHTML = mode === "news"
-          ? "新聞模式只到「暗示」分級；成人向必須是虛構敘事（敘事模式）。"
-          : "受限分級：不用免費實拍素材、不自動上傳任何平台、發布包只留本機。";
+        if (form === "novel") bits.push("小說：只出文字，不配音、不出畫面。");
+        else if (form === "audiobook") bits.push("MP3 小說：出文字稿＋mp3，不渲染影片。");
+        else if (form === "gallery") bits.push("圖片集：一張圖一段圖說，不配音也不合成影片。");
+        else if (form === "talk") bits.push("話題評論：口播＋字卡，會出影片與文字稿。");
+        box.innerHTML = bits.join("　");
       };
       $("#ne-mode", root).onchange = ratingNote;
       $("#ne-rating", root).onchange = ratingNote;
+      $("#ne-form", root).onchange = ratingNote;
       ratingNote();
       $("#ne-topic", root).focus();
       $("#ne-cancel", root).onclick = closeModal;
@@ -699,6 +719,7 @@ export async function openNewEpisodeModal(prefill = {}) {
               format: $("#ne-format", root).value,
               mode: $("#ne-mode", root).value,
               rating: $("#ne-rating", root).value,
+              form: $("#ne-form", root).value,
               style_id: $("#ne-style", root).value || null,
               idea_id: prefill.idea_id || null,
               source_urls: $("#ne-urls", root).value.split("\n"),

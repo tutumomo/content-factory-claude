@@ -61,13 +61,19 @@ def meta():
         "critics": {k: v[0] for k, v in prompts.CRITICS.items()},
         "critics_by_mode": {m: {k: v[0] for k, v in prompts.critic_roles(m).items()}
                              for m in store.MODES},
+        "critics_by_form": {f: {k: v[0] for k, v in prompts.critic_roles("fiction", f).items()}
+                             for f in store.FORMS},
         "modes": list(store.MODES),
         "mode_label": store.MODE_LABEL,
         "ratings": list(store.RATINGS),
         "rating_label": store.RATING_LABEL,
+        "forms": list(store.FORMS),
+        "form_label": store.FORM_LABEL,
+        "form_desc": store.FORM_DESC,
+        "nsfw_topics": list(store.NSFW_TOPICS),
         "max_rating": store.get_channel().get("max_rating") or "general",
         "pref_cats": store.PREF_CATS,
-        "style_categories": store.STYLE_CATEGORIES,
+        "style_categories": store.style_categories(),
         "sfx_tags": sfx.vocab(),
     }
 
@@ -526,6 +532,7 @@ def create_episode(body: dict = Body(...)):
             mode=body.get("mode") or "news",
             rating=body.get("rating") or "general",
             characters=characters,
+            form=body.get("form") or "",
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e

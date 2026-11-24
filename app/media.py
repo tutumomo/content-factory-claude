@@ -691,6 +691,14 @@ def mux_audio(video_in: Path, audio_in: Path, out: Path, total: float) -> Path:
     return out
 
 
+def to_mp3(wav_in: Path, out: Path, bitrate: str = "128k") -> Path:
+    """Encode a wav to mp3 for the audiobook form; loudness-normalised like the video track."""
+    run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav_in),
+         "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:a", "libmp3lame", "-b:a", bitrate,
+         "-metadata", "artist=內容工廠", str(out)])
+    return out
+
+
 def probe(p: Path) -> dict:
     out = run(["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height,codec_name",
                "-of", "json", str(p)])

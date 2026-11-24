@@ -190,11 +190,17 @@ def wait(eid: str, what: str) -> None:
 def st_sources(ep: dict) -> bool:
     """Fetch the links, then check whether there is enough first-hand material.
 
-    With `source_gate` on, an episode without a readable source (and without
-    substantial notes) stops here instead of silently writing from nothing.
+    With `source_gate` on, an episode without a readable source (and without substantial
+    notes) stops here instead of silently writing from nothing.
+
+    Creative modes (narrative / fiction) skip verification entirely: making things up is the
+    point, and there is nothing to cite for a story the model invents. Links the owner did
+    provide are still fetched and kept as reference — nothing is required, nothing is gated.
     """
     eid = ep["id"]
     cfg = store.get_settings()["pipeline"]
+    mode = (ep.get("mode") or "news").strip().lower()
+    creative = mode in store.UNVERIFIED_MODES
     parts = [
         prompts.SAFETY_BOUNDARY,
         f"# 題目\n{ep['topic']}\n",
@@ -215,6 +221,17 @@ def st_sources(ep: dict) -> bool:
         if "抓取失敗" not in txt:
             fetched.append({"url": u, "text": txt, "failed": False, "auto": True})
             parts.append(f"## 來源（智能體自動搜尋）：{u}\n{txt}\n")
+    if creative:
+        verdict = {
+            "ok": True,
+            "value": f"{store.MODE_LABEL.get(mode, mode)}模式：不查證"
+                     + (f"，參考資料 {len(fetched)} 份已收進 sources.md" if fetched else "，直接從零創作"),
+            "gaps": [], "note": "", "search": None, "creative": True,
+        }
+        store.write_text(eid, "sources.md", "\n".join(parts) or "（創作模式：沒有參考資料）")
+        store.update_episode(eid, checks={**ep.get("checks", {}), "sources": verdict})
+        store.log(eid, f"來源：{verdict['value']}")
+        return True
     verdict = editorial.source_verdict(ep, fetched, cfg)
     search = None
     if not verdict["ok"] and cfg.get("source_auto_search", True) and not ep.get("sources_accepted"):
@@ -334,7 +351,7 @@ def st_critique(ep: dict) -> bool:
     rounds = []
     scr = store.read_json(eid, "script.json")
     src = sources_text(eid)
-    roles = prompts.critic_roles(ep.get("mode"))
+    roles = prompts.critic_roles(ep.get("mode"), ep.get("form"))
     if ep.get("revise_feedback"):
         store.log(eid, "依使用者意見修稿")
         sys, pr = prompts.revise(ep, scr, {}, ep["revise_feedback"])
@@ -458,8 +475,155 @@ def _shot_seconds(ep: dict, vis: dict) -> float:
     return min(8.0, max(2.5, v))
 
 
+def _scene_text(scr: dict) -> list[dict]:
+    """The scenes as plain prose blocks: narration is the body, headline becomes a heading."""
+    return [{"headline": (sc.get("headline") or "").strip(),
+             "body": (sc.get("narration") or "").strip()} for sc in scr.get("scenes") or []]
+
+
+def _write_manuscript(eid: str, scr: dict, out: Path, form: str) -> Path:
+    """Write the text deliverable: one .md with chapter/scene headings plus a plain .txt."""
+    blocks = _scene_text(scr)
+    title = (scr.get("working_title") or "").strip() or "未命名"
+    md = [f"# {title}", ""]
+    for i, b in enumerate(blocks):
+        if b["headline"]:
+            md += [f"## {b['headline']}", ""]
+        md += [b["body"], ""]
+    txt = [title, ""]
+    for b in blocks:
+        if b["headline"]:
+            txt += [b["headline"], ""]
+        txt += [b["body"], ""]
+    (out / "manuscript.md").write_text("\n".join(md), "utf-8")
+    target = out / "novel.txt" if form == "novel" else out / "script.txt"
+    target.write_text("\n".join(txt), "utf-8")
+    store.write_json(eid, "assets/scenes.json", scr)
+    return target
+
+
+def _assemble_text(ep: dict, form: str) -> bool:
+    """Text-only deliverables (novel, talk): no voice, no pictures, no video render."""
+    eid = ep["id"]
+    d = store.ep_dir(eid)
+    assets, out = d / "assets", d / "output"
+    shutil.rmtree(assets, ignore_errors=True)
+    assets.mkdir(parents=True)
+    out.mkdir(exist_ok=True)
+    scr = store.read_json(eid, "script.json")
+    target = _write_manuscript(eid, scr, out, form)
+    chars = sum(len((sc.get("narration") or "")) for sc in scr.get("scenes") or [])
+    v = {"size": [0, 0], "duration": 0, "checks": {
+        "字數": {"ok": chars > 0, "value": f"{chars} 字"},
+        "分級": {"ok": True, "value": store.RATING_LABEL.get(ep.get("rating") or "general", "")},
+        "成品形態": {"ok": True, "value": store.FORM_LABEL.get(form, form) + "：不配音、不出畫面"},
+    }, "plan": {}, "sources": {}}
+    store.write_json(eid, "output/verify.json", v)
+    _write_manifest(eid, ep, (ep.get("rating") or "general"), [], [])
+    store.log(eid, f"{store.FORM_LABEL.get(form, form)}完成：{target.name}（{chars} 字）")
+    return True
+
+
+def _assemble_audiobook(ep: dict) -> bool:
+    """Novel text plus narration: one mp3, chapter markers, and the manuscript."""
+    eid = ep["id"]
+    d = store.ep_dir(eid)
+    assets, out = d / "assets", d / "output"
+    shutil.rmtree(assets, ignore_errors=True)
+    assets.mkdir(parents=True)
+    out.mkdir(exist_ok=True)
+    scr = store.read_json(eid, "script.json")
+    _write_manuscript(eid, scr, out, "novel")
+    plan, br = sources.start(["voice"], rating=(ep.get("rating") or "general"))
+    narrator = sources.Narrator(plan, br, store.log, eid,
+                                total_chars=sum(len(s.get("narration") or "") for s in scr.get("scenes") or []))
+    pieces, chapters, t0 = [], [], 0.0
+    for i, sc in enumerate(scr.get("scenes") or []):
+        store.log(eid, f"第 {i + 1} 段：配音中")
+        parts = []
+        for j, chunk in enumerate(media.split_for_tts(sc.get("narration") or "")):
+            _src, p = narrator.say(chunk, assets / f"s{i:02d}_{j:02d}.wav", emotion="")
+            parts.append(p)
+        wav = media.concat_wavs(parts, assets / f"s{i:02d}.wav") if len(parts) > 1 else parts[0]
+        dur = media.wav_duration(wav)
+        chapters.append({"index": i, "title": (sc.get("headline") or "").strip(), "start": round(t0, 2),
+                         "seconds": round(dur, 2)})
+        pieces.append(wav)
+        t0 += dur
+    track = media.concat_wavs(pieces, assets / "narration.wav")
+    mp3 = out / "audiobook.mp3"
+    media.to_mp3(track, mp3)
+    store.write_json(eid, "output/chapters.json", chapters)
+    v = {"size": [0, 0], "duration": round(t0, 2), "checks": {
+        "配音": {"ok": bool(pieces), "value": f"{len(pieces)} 段，{t0:.1f} 秒"},
+        "章節": {"ok": True, "value": f"{len(chapters)} 段"},
+        "分級": {"ok": True, "value": store.RATING_LABEL.get(ep.get("rating") or "general", "")},
+        "成品形態": {"ok": True, "value": "MP3 小說：有聲書＋文字稿"},
+    }, "plan": plan.to_dict(), "sources": {"plan": [plan.line("voice")]}}
+    store.write_json(eid, "output/verify.json", v)
+    _write_manifest(eid, ep, (ep.get("rating") or "general"), [], [])
+    store.log(eid, f"MP3 小說完成：{mp3.name}（{t0:.1f} 秒，{len(chapters)} 段）")
+    return True
+
+
+def _assemble_gallery(ep: dict) -> bool:
+    """Picture set: one image per scene, a caption file, no video render."""
+    eid = ep["id"]
+    d = store.ep_dir(eid)
+    assets, out = d / "assets", d / "output"
+    shutil.rmtree(assets, ignore_errors=True)
+    assets.mkdir(parents=True)
+    out.mkdir(exist_ok=True)
+    scr = store.read_json(eid, "script.json")
+    shots = (scr.get("scenes") or [])[:12]
+    rating = (ep.get("rating") or "general").strip().lower()
+    plan, br = sources.start(["visuals"], rating=rating)
+    vis = store.get_settings()["visuals"]
+    items: list[dict] = []
+    ep_cards, _card_errs = characters.usable_cards(list(ep.get("characters") or []), rating)
+    for i, sc in enumerate(shots):
+        desc = (sc.get("visual") or sc.get("headline") or "").strip()
+        cards = characters.scene_cards(sc, ep_cards)
+        frag = characters.prompt_fragments(cards)
+        if frag:
+            desc = f"{frag}, {desc}" if desc else frag
+        prompt = f"{desc}, {vis.get('style_hint')}, absolutely no text, no letters, no watermark"
+        seed = characters.scene_seed(1000, 0, i, cards)
+        p = comfy.generate(prompt, (1080, 1080), assets / f"img{i:02d}.jpg", seed=seed)
+        img_out = out / f"image_{i:02d}.jpg"
+        shutil.copy(p, img_out)
+        items.append({"index": i, "headline": (sc.get("headline") or "").strip(),
+                      "caption": (sc.get("narration") or "").strip(),
+                      "image": img_out.name, "visual": desc})
+    store.write_json(eid, "output/captions.json", items)
+    gallery = ["# 圖集", ""]
+    for c in items:
+        gallery += [f"## {c['headline'] or f'第 {c['index'] + 1} 張'}", "", c["caption"], "", f"![{c['headline']}]({c['image']})", ""]
+    (out / "gallery.md").write_text("\n".join(gallery), "utf-8")
+    v = {"size": [1080, 1080], "duration": 0, "checks": {
+        "圖片": {"ok": bool(items), "value": f"{len(items)} 張"},
+        "分級": {"ok": True, "value": store.RATING_LABEL.get(rating, rating)},
+        "成品形態": {"ok": True, "value": "圖片集：圖＋圖說"},
+    }, "plan": plan.to_dict(), "sources": {"plan": [plan.line("visuals")]}}
+    store.write_json(eid, "output/verify.json", v)
+    gen = [{"index": c["index"], "kind": "comfy", "seed": characters.scene_seed(1000, 0, c["index"],
+                                                                             characters.scene_cards(shots[c["index"]], ep_cards)),
+            "prompt_sha256": _prompt_hash(c["visual"]),
+            "characters": [x["id"] for x in characters.scene_cards(shots[c["index"]], ep_cards)]} for c in items]
+    _write_manifest(eid, ep, rating, gen, ep_cards)
+    store.log(eid, f"圖片集完成：{len(items)} 張")
+    return True
+
+
 def st_assemble(ep: dict) -> bool:
     eid = ep["id"]
+    form = store.form_of(ep)
+    if form in ("novel", "talk"):
+        return _assemble_text(ep, form)
+    if form == "audiobook":
+        return _assemble_audiobook(ep)
+    if form == "gallery":
+        return _assemble_gallery(ep)
     d = store.ep_dir(eid)
     assets, out = d / "assets", d / "output"
     shutil.rmtree(assets, ignore_errors=True)
@@ -971,9 +1135,30 @@ def st_approved(ep: dict) -> bool:
     ch = ep["package_choice"]
     rating = (ep.get("rating") or "general").strip().lower()
     restricted = rating != "general"
-    shutil.copy(d / "output" / "final.mp4", pub / "video.mp4")
-    shutil.copy(d / "output" / "subtitles.srt", pub / "subtitles.srt")
-    shutil.copy(store.DATA / pk["thumbnails"][ch["thumb"]]["file"], pub / "thumbnail.jpg")
+    form = store.form_of(ep)
+    # only a video form has a film and subtitles to ship; the others ship their own deliverables
+    if form == "video":
+        shutil.copy(d / "output" / "final.mp4", pub / "video.mp4")
+        shutil.copy(d / "output" / "subtitles.srt", pub / "subtitles.srt")
+    elif form == "audiobook":
+        shutil.copy(d / "output" / "audiobook.mp3", pub / "audiobook.mp3")
+        shutil.copy(d / "output" / "novel.txt", pub / "novel.txt")
+        shutil.copy(d / "output" / "manuscript.md", pub / "manuscript.md")
+        if (d / "output" / "chapters.json").exists():
+            shutil.copy(d / "output" / "chapters.json", pub / "chapters.json")
+    elif form == "novel":
+        shutil.copy(d / "output" / "novel.txt", pub / "novel.txt")
+        shutil.copy(d / "output" / "manuscript.md", pub / "manuscript.md")
+    elif form == "talk":
+        shutil.copy(d / "output" / "script.txt", pub / "script.txt")
+        shutil.copy(d / "output" / "manuscript.md", pub / "manuscript.md")
+    elif form == "gallery":
+        for img in sorted((d / "output").glob("image_*.jpg")):
+            shutil.copy(img, pub / img.name)
+        shutil.copy(d / "output" / "captions.json", pub / "captions.json")
+        shutil.copy(d / "output" / "gallery.md", pub / "gallery.md")
+    if pk.get("thumbnails"):
+        shutil.copy(store.DATA / pk["thumbnails"][ch["thumb"]]["file"], pub / "thumbnail.jpg")
     meta = {"title": ch["title"], "description": pk.get("description", ""), "hashtags": pk.get("hashtags", []),
             "fb_post": pk.get("fb_post", ""), "schedule": ep.get("schedule"),
             "platforms": store.get_channel()["platforms"]}
@@ -992,7 +1177,7 @@ def st_approved(ep: dict) -> bool:
         meta["distribution"] = "local-only"
         (pub / "CHECKLIST.md").write_text(_restricted_checklist(ep, rating), "utf-8")
         store.log(eid, f"分級 {store.RATING_LABEL.get(rating, rating)}：發布包不含輪播、貼文與 shorts 文案")
-    else:
+    elif form == "video":
         for c in pk.get("carousel", []):
             shutil.copy(store.DATA / c["file"], pub / Path(c["file"]).name)
         # short-form package: a 9:16 copy plus platform captions (upload is still manual)
@@ -1043,6 +1228,12 @@ def run_episode(eid: str) -> None:
     ep = store.get_episode(eid)
     stage = ep["stage"]
     while True:
+        ep = store.get_episode(eid)
+        # a text-only form has nothing to storyboard, voice or assemble as a video
+        if stage == "storyboard" and not _form_needs(ep, "visual"):
+            store.log(eid, f"{store.FORM_LABEL.get(store.form_of(ep), '')}形態：跳過分鏡")
+            stage = STAGES[STAGES.index(stage) + 1]
+            continue
         set_stage(eid, stage)
         ok = RUNNERS[stage](store.get_episode(eid))
         if not ok:
@@ -1051,6 +1242,11 @@ def run_episode(eid: str) -> None:
         if i + 1 >= len(STAGES):
             return
         stage = STAGES[i + 1]
+
+
+def _form_needs(ep: dict, what: str) -> bool:
+    """Whether this episode's content form needs voice / visual work."""
+    return bool(store.FORM_NEEDS.get(store.form_of(ep), {}).get(what, True))
 
 
 def _save_radar_state(status: str, message: str, *, started: float | None = None,

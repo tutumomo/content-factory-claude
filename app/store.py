@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .style_presets import EXTRA_PRESETS, NEW_CATEGORIES
+from .style_presets_nsfw import NSFW_CATEGORIES, NSFW_PRESETS
 
 ROOT = Path(__file__).resolve().parent.parent
 # CF_DATA lets a second instance (tests, smoke runs) use its own data folder instead of the live one.
@@ -24,12 +25,63 @@ PREF_CATS = ["選題", "方向與觀點", "講稿語氣", "開頭與節奏", "�
 # the first five are the original categories (old cards use them); the rest group the newer built-in cards
 STYLE_CATEGORIES = ["科技數碼", "新聞快評", "知識科普", "觀點深度", "生活工具", *NEW_CATEGORIES]
 
-# 內容模式：news = 新聞事實查核；narrative = 虛構敘事（不做來源求證）
-MODES = ("news", "narrative")
+
+def style_categories() -> list[str]:
+    """Every category the UI may offer. The adult ones appear only on a channel that allows them."""
+    allowed = rating_at_or_below("suggestive", (get_channel().get("max_rating") or "general").strip().lower())
+    return [*STYLE_CATEGORIES, *NSFW_CATEGORIES] if allowed else list(STYLE_CATEGORIES)
+
+# 內容模式。決定「事實」在這一集裡扮演什麼角色，也決定要不要來源閘門：
+#   news      = 新聞，每個主張都要有依據（預設；行為與以前完全一樣）
+#   narrative = 虛構敘事，內部自洽即可，不做來源求證
+#   fiction   = 虛構創作，可以完全從零編，允許自由想像與世界觀設定
+MODES = ("news", "narrative", "fiction")
 # 分級，由低到高；受限來源與發布限制都看它
 RATINGS = ("general", "suggestive", "adult")
 RATING_LABEL = {"general": "一般", "suggestive": "暗示", "adult": "成人"}
-MODE_LABEL = {"news": "新聞", "narrative": "敘事"}
+MODE_LABEL = {"news": "新聞", "narrative": "敘事", "fiction": "自由創作"}
+# 這些模式不需要外部資料：不查證、不擋來源、可以完全原創
+UNVERIFIED_MODES = ("narrative", "fiction")
+
+# 內容形態：同一個題材可以做成完全不同的成品，決定哪幾站要跑、交付什麼。
+# 這是「成品長什麼樣」，跟 mode（事實的角色）與 rating（尺度）是三個獨立的軸。
+FORMS = ("video", "novel", "audiobook", "gallery", "talk")
+FORM_LABEL = {
+    "video": "影片",
+    "novel": "小說／文字",
+    "audiobook": "MP3 小說",
+    "gallery": "圖片集",
+    "talk": "話題評論",
+}
+FORM_DESC = {
+    "video": "畫面＋旁白＋字幕的影片（預設）",
+    "novel": "純文字小說，輸出 txt／md，不配音、不出畫面",
+    "audiobook": "小說全文＋逐段配音，輸出 mp3 與章節文字",
+    "gallery": "多張圖＋圖說，輸出圖集與說明（可再加旁白）",
+    "talk": "主持人口播評論，畫面是字卡，輸出影片與文字稿",
+}
+# 這個形態要不要跑「配音」與「畫面」階段
+FORM_NEEDS = {
+    "video": {"voice": True, "visual": True},
+    "novel": {"voice": False, "visual": False},
+    "audiobook": {"voice": True, "visual": False},
+    "gallery": {"voice": False, "visual": True},
+    "talk": {"voice": True, "visual": False},
+}
+
+# NSFW 題材分類，給風格卡與選題用；不是限制，只是讓品味紀錄與提示詞可以分開調。
+NSFW_TOPICS = ("情慾小說", "成人話題", "視覺寫真", "角色扮演", "關係探索", "成人幽默")
+
+
+def default_form(mode: str, rating: str) -> str:
+    """Which content form an episode gets when the owner did not pick one (a plain video)."""
+    return "video"
+
+
+def form_of(ep: dict) -> str:
+    """The episode's content form, with old episodes falling back to a plain video."""
+    f = str(ep.get("form") or "").strip().lower()
+    return f if f in FORMS else "video"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "llm": {
@@ -294,6 +346,16 @@ PRESET_STYLES: list[dict[str, Any]] = [
 # The five cards above are the originals: never edit or remove them (styles.json and old episodes use their ids).
 # Newer built-in cards live in app/style_presets.py and are appended to existing styles.json by get_styles().
 PRESET_STYLES += EXTRA_PRESETS
+
+
+def preset_styles() -> list[dict[str, Any]]:
+    """Built-in cards for this channel: the general set, plus the adult cards when allowed.
+
+    A channel capped at `general` never sees the adult cards at all — not hidden by CSS,
+    simply not in the list.
+    """
+    allowed = rating_at_or_below("suggestive", (get_channel().get("max_rating") or "general").strip().lower())
+    return [*PRESET_STYLES, *NSFW_PRESETS] if allowed else list(PRESET_STYLES)
 
 
 def _read(path: Path, default: Any) -> Any:
@@ -700,14 +762,19 @@ def _norm_style(s: dict) -> dict:
         "words": _norm_list(s.get("words")),
         "avoid": _norm_list(s.get("avoid")),
         "visual": str(s.get("visual") or "").strip(),   # 畫面方向；舊卡沒有這欄就是空字串
+        # NSFW 相關欄位。舊卡沒有這幾欄，一律當成一般內容，不會被誤判成成人牌。
+        "nsfw": bool(s.get("nsfw", False)),
+        "rating_min": str(s.get("rating_min") or "general").strip().lower(),
+        "forms": _norm_list(s.get("forms")) or ["video"],
         "preset": bool(s.get("preset", False)),
         "source": str(s.get("source") or ("內建預設" if s.get("preset") else "自訂")).strip(),
     }
 
 
 def _bootstrap_styles() -> dict:
-    items = [_norm_style(p) for p in PRESET_STYLES]
-    active_id = PRESET_STYLES[0]["id"]
+    presets = preset_styles()
+    items = [_norm_style(p) for p in presets]
+    active_id = presets[0]["id"]
     ch = get_channel()
     if (ch.get("tone") or "").strip() or (ch.get("name") or "").strip():
         custom = _norm_style({
@@ -741,7 +808,7 @@ def get_styles() -> dict:
         items = [_norm_style(x) for x in raw.get("items", []) if isinstance(x, dict)]
         by_id = {x["id"]: x for x in items}
         changed = False
-        for preset in PRESET_STYLES:
+        for preset in preset_styles():
             if preset["id"] not in by_id:
                 norm_p = _norm_style(preset)
                 items.append(norm_p)
@@ -749,7 +816,7 @@ def get_styles() -> dict:
                 changed = True
         active_id = raw.get("active_id")
         if active_id not in by_id:
-            active_id = items[0]["id"] if items else PRESET_STYLES[0]["id"]
+            active_id = items[0]["id"] if items else preset_styles()[0]["id"]
             changed = True
         out = {"active_id": active_id, "items": items}
         if changed:
@@ -805,7 +872,7 @@ def delete_style(sid: str) -> bool:
             raise ValueError("內建風格卡不能刪除")
         cur["items"] = [x for x in cur["items"] if x["id"] != sid]
         if cur["active_id"] == sid:
-            cur["active_id"] = cur["items"][0]["id"] if cur["items"] else PRESET_STYLES[0]["id"]
+            cur["active_id"] = cur["items"][0]["id"] if cur["items"] else preset_styles()[0]["id"]
         _write(DATA / "styles.json", cur)
         return True
 
@@ -863,6 +930,7 @@ def new_episode(
     mode: str = "news",
     rating: str = "general",
     characters: list[str] | None = None,
+    form: str = "",
 ) -> dict:
     """Create an episode. `mode` (news|narrative) and `rating` (general|suggestive|adult)
     default to the current behaviour, so an episode without them is byte-identical to today."""
@@ -898,6 +966,8 @@ def new_episode(
             "mode": mode,                  # news | narrative
             "rating": rating,              # general | suggestive | adult
             "characters": list(characters or []),
+            "form": (form or "").strip().lower() if (form or "").strip().lower() in FORMS
+                    else default_form(mode, rating),
             "stage": "sources",
             "status": "queued",            # queued | running | waiting | done | error
             "waiting_for": None,           # direction | script | package | approval
@@ -922,6 +992,7 @@ def get_episode(eid: str) -> dict:
             ep.setdefault("mode", "news")
             ep.setdefault("rating", "general")
             ep.setdefault("characters", [])
+            ep.setdefault("form", default_form(ep["mode"], ep["rating"]))
         return ep
 
 
@@ -1043,6 +1114,7 @@ def list_episodes() -> list[dict]:
                     ep.setdefault("mode", "news")
                     ep.setdefault("rating", "general")
                     ep.setdefault("characters", [])
+                    ep.setdefault("form", default_form(ep["mode"], ep["rating"]))
                     eid = ep["id"]
                     ep["thumb"] = _episode_thumb(eid, ep)
                     metrics_path = d / "metrics.json"
