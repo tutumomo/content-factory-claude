@@ -1,12 +1,12 @@
-// v=20261123b busts the browser module cache after UI changes
-import { $, $$, api, applyNavLayout, esc, getNavLayout, state } from "./lib.js?v=20261123b";
-import { openNewEpisodeModal, openSettingsModal } from "./modals.js?v=20261123b";
-import { viewContent } from "./views/content.js?v=20261123b";
-import { viewEpisode } from "./views/episode.js?v=20261123b";
-import { viewIdeas } from "./views/ideas.js?v=20261123b";
-import { viewInsights } from "./views/insights.js?v=20261123b";
-import { viewSchedule } from "./views/schedule.js?v=20261123b";
-import { viewStyle } from "./views/style.js?v=20261123b";
+// v=20261125g busts the browser module cache after UI changes
+import { $, $$, api, applyNavLayout, esc, getNavLayout, state, toast } from "./lib.js?v=20261125g";
+import { openNewEpisodeModal, openSettingsModal } from "./modals.js?v=20261125g";
+import { viewContent } from "./views/content.js?v=20261125g";
+import { viewEpisode } from "./views/episode.js?v=20261125g";
+import { viewIdeas } from "./views/ideas.js?v=20261125g";
+import { viewInsights } from "./views/insights.js?v=20261125g";
+import { viewSchedule } from "./views/schedule.js?v=20261125g";
+import { viewStyle } from "./views/style.js?v=20261125g";
 
 const main = $("#main");
 
@@ -30,6 +30,22 @@ const ROUTE_ALIASES = {
   channel: "style",
 };
 
+function comfyItem(c) {
+  // ComfyUI only matters when the visuals chain actually uses it; a red dot with nothing
+  // asking for it reads as a defect, so say "not used" instead.
+  const detail = esc(c?.detail || "");
+  if (!c) return `<div class="st-item" title="未回報狀態"><span class="dot"></span>ComfyUI <b>未知</b></div>`;
+  if (c.ok) {
+    const h3 = c.h3_enabled ? ` <span class="muted">· H3</span>` : "";
+    return `<div class="st-item" title="${detail}"><span class="dot ok"></span>ComfyUI <b>就緒</b>${h3}</div>`;
+  }
+  if (!c.needed) {
+    return `<div class="st-item" title="${detail}"><span class="dot"></span>ComfyUI <b>未使用</b></div>`;
+  }
+  const what = c.chain?.includes("h3video") ? "影片與生圖" : "生圖";
+  return `<div class="st-item" title="${detail}"><span class="dot bad"></span>ComfyUI <b>未就緒</b> <span class="muted">（${what}會退回字卡）</span></div>`;
+}
+
 async function refreshStatus() {
   try {
     const [h, eps] = await Promise.all([api("/api/health"), api("/api/episodes")]);
@@ -40,6 +56,7 @@ async function refreshStatus() {
     const qTxt = h.worker.queued ? `（排隊 ${h.worker.queued}）` : "";
     $("#status").innerHTML = `
       <div class="st-item" title="${esc(h.tts.detail || "")}"><span class="dot ${h.tts.ok ? "ok" : "bad"}"></span>配音 <b>${h.tts.needs_voice_ref ? "缺參考聲音" : (h.tts.ok ? "就緒" : "未就緒")}</b></div>
+      ${comfyItem(h.comfy)}
       <div class="st-item"><span class="dot ok"></span>LLM <b>${esc(PROVIDER_LABEL[h.provider] || h.provider)}</b></div>
       <div class="st-item">agent：<b>${cur}</b>${qTxt}</div>`;
   } catch { /* server restarting */ }
@@ -93,6 +110,43 @@ state.onStatusRefresh = refreshStatus;
 
 $("#btn-new").onclick = () => openNewEpisodeModal();
 $("#btn-settings").onclick = () => openSettingsModal();
+
+// The NSFW switch, one click from anywhere. Flipping it reloads the view: every list, card and
+// form was fetched under the old state, so re-rendering is the only honest way to show the result.
+let nsfwBusy = false;
+async function refreshNsfwSwitch() {
+  try {
+    const s = await api("/api/nsfw");
+    const box = $("#nsfw-switch");
+    box.checked = Boolean(s.enabled);
+    // CF_NSFW=0 locks it closed; the API would refuse the flip, so disable the control too
+    box.disabled = Boolean(s.forced_off);
+    $("#nsfw-switch-label").title = s.forced_off
+      ? "這台機器用 CF_NSFW=0 強制關閉，無法從介面開啟"
+      : (s.enabled ? "限制級內容：開啟（點一下全部隱藏）" : "限制級內容：關閉（點一下開啟）");
+  } catch { /* server restarting */ }
+}
+
+$("#nsfw-switch").onchange = async (e) => {
+  if (nsfwBusy) return;
+  nsfwBusy = true;
+  const want = e.target.checked;
+  e.target.disabled = true;
+  try {
+    const s = await api("/api/nsfw", { method: "PUT", body: { enabled: want } });
+    toast(s.enabled ? "限制級內容已開啟" : "限制級內容已關閉");
+    // re-read the metadata too: the card list and critic sets depend on the switch
+    state.META = await api("/api/meta");
+    await route();          // every list was fetched under the old state: re-render
+  } catch (err) {
+    toast(err.message || "切換失敗");
+    e.target.checked = !want;
+  } finally {
+    nsfwBusy = false;
+    e.target.disabled = false;
+    refreshNsfwSwitch();
+  }
+};
 $("#btn-layout").onclick = () => {
   const next = getNavLayout() === "top" ? "side" : "top";
   applyNavLayout(next, true);
@@ -110,5 +164,7 @@ $("#btn-layout").onclick = () => {
 
   window.addEventListener("hashchange", route);
   await route();
+  refreshNsfwSwitch();          // the header toggle must show the real state on first paint
   setInterval(refreshStatus, 5000);
+  setInterval(refreshNsfwSwitch, 30000);   // another tab may have flipped it
 })();

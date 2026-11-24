@@ -1,5 +1,5 @@
-import { $, $$, api, compactNum, esc, fileUrl, fmtName, fmtShortDate, miniSteps, state, statusPill, when } from "../lib.js?v=20261123b";
-import { openNewEpisodeModal } from "../modals.js?v=20261123b";
+import { $, $$, api, compactNum, esc, fileUrl, fmtName, fmtShortDate, miniSteps, state, statusPill, when } from "../lib.js?v=20261125g";
+import { openNewEpisodeModal } from "../modals.js?v=20261125g";
 
 let contentQuery = "";
 let contentFormat = "all";
@@ -21,7 +21,7 @@ export async function viewContent(main) {
       return [e.topic, e.package_choice?.title, e.id].some((v) => String(v || "").toLowerCase().includes(q));
     });
 
-    const attention = eps.filter((e) => e.status === "waiting" || e.status === "error");
+    const attention = eps.filter((e) => ["waiting", "error", "paused"].includes(e.status));
     const inboxHtml = attention.length
       ? `<section class="inbox-strip">
           <div class="inbox-head">
@@ -51,7 +51,9 @@ export async function viewContent(main) {
       { key: "running", title: "Agent 製作中", dot: "var(--info)", rows: list.filter((e) => ["running", "queued"].includes(e.status)) },
       { key: "done", title: "已核准", dot: "var(--ok)", rows: list.filter((e) => e.status === "done") },
       { key: "error", title: "出錯待處理", dot: "var(--bad)", rows: list.filter((e) => e.status === "error") },
-    ];
+      // only ever non-empty while the switch is off: these come back by themselves when it is on
+      { key: "paused", title: "NSFW 已暫停", dot: "var(--wait)", rows: list.filter((e) => e.status === "paused") },
+    ].filter((c) => c.key !== "paused" || c.rows.length);
 
     const bodyHtml = !eps.length
       ? `<div class="card empty">還沒有任何集數。到「靈感」找題目，或按右上角「＋ 新集數」開始第一支。</div>`

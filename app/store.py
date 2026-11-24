@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .style_presets import EXTRA_PRESETS, NEW_CATEGORIES
+from .style_presets_nsfw import NSFW_CATEGORIES, NSFW_PRESETS
 
 ROOT = Path(__file__).resolve().parent.parent
 # CF_DATA lets a second instance (tests, smoke runs) use its own data folder instead of the live one.
@@ -24,6 +25,119 @@ PREF_CATS = ["選題", "方向與觀點", "講稿語氣", "開頭與節奏", "�
 # the first five are the original categories (old cards use them); the rest group the newer built-in cards
 STYLE_CATEGORIES = ["科技數碼", "新聞快評", "知識科普", "觀點深度", "生活工具", *NEW_CATEGORIES]
 
+
+def style_categories() -> list[str]:
+    """Every category the UI may offer. The adult ones appear only on a channel that allows them."""
+    allowed = rating_at_or_below("suggestive", (get_channel().get("max_rating") or "general").strip().lower())
+    return [*STYLE_CATEGORIES, *NSFW_CATEGORIES] if allowed else list(STYLE_CATEGORIES)
+
+# 內容模式。決定「事實」在這一集裡扮演什麼角色，也決定要不要來源閘門：
+#   news      = 新聞，每個主張都要有依據（預設；行為與以前完全一樣）
+#   narrative = 虛構敘事，內部自洽即可，不做來源求證
+#   fiction   = 虛構創作，可以完全從零編，允許自由想像與世界觀設定
+MODES = ("news", "narrative", "fiction")
+# 分級，由低到高；受限來源與發布限制都看它
+RATINGS = ("general", "suggestive", "adult")
+RATING_LABEL = {"general": "一般", "suggestive": "暗示", "adult": "成人"}
+MODE_LABEL = {"news": "新聞", "narrative": "敘事", "fiction": "自由創作"}
+# 這些模式不需要外部資料：不查證、不擋來源、可以完全原創
+UNVERIFIED_MODES = ("narrative", "fiction")
+
+# NSFW 題材分類，給風格卡與選題用；不是限制，只是讓品味紀錄與提示詞可以分開調。
+NSFW_TOPICS = ("情慾小說", "成人話題", "視覺寫真", "角色扮演", "關係探索", "成人幽默",
+               "有聲內容", "劇本分鏡")
+
+# 內容形態：同一個題材可以做成完全不同的成品，決定哪幾站要跑、交付什麼。
+# 這是「成品長什麼樣」，跟 mode（事實的角色）與 rating（尺度）是三個獨立的軸。
+# 清單刻意涵蓋成人內容實際會出的每一種格式：文字、聲音、圖像、影音、腳本。
+FORMS = (
+    "video",        # 影音
+    "novel",        # 短篇／中篇小說
+    "serial",       # 連載長篇
+    "poem",         # 詩／極短篇
+    "chat",         # 訊息體對話
+    "script",       # 劇本／分鏡腳本
+    "comic",        # 漫畫腳本
+    "guide",        # 指南／教學
+    "talk",         # 話題評論
+    "audiobook",    # 有聲書
+    "radio_drama",  # 廣播劇
+    "asmr",         # 耳語音檔
+    "gallery",      # 圖片集
+)
+FORM_LABEL = {
+    "video": "影片",
+    "novel": "小說／文字",
+    "serial": "連載長篇",
+    "poem": "詩／極短篇",
+    "chat": "訊息體對話",
+    "script": "劇本／分鏡",
+    "comic": "漫畫腳本",
+    "guide": "指南／教學",
+    "talk": "話題評論",
+    "audiobook": "MP3 小說",
+    "radio_drama": "廣播劇",
+    "asmr": "耳語音檔",
+    "gallery": "圖片集",
+}
+FORM_DESC = {
+    "video": "畫面＋旁白＋字幕的影片（預設）",
+    "novel": "純文字小說，輸出 txt／md，不配音、不出畫面",
+    "serial": "分章連載的長篇，輸出章節 markdown 與全文 txt",
+    "poem": "詩或極短篇，保留斷行與留白的排版",
+    "chat": "純對話推進的訊息體，一行一句、有發話者",
+    "script": "劇本格式：場景標題、動作、對白，可直接照著拍或錄",
+    "comic": "漫畫腳本：一格一格的畫面指示＋台詞＋旁白",
+    "guide": "指南／教學：分段說明＋要點清單，適合非虛構題材",
+    "talk": "話題評論的口播稿，第一人稱、有立場",
+    "audiobook": "小說全文＋朗讀音檔，輸出 mp3 與章節文字",
+    "radio_drama": "廣播劇：分場對白稿＋可朗讀的音檔",
+    "asmr": "耳語／環境音腳本＋短音檔，重聽感不重劇情",
+    "gallery": "多張圖＋圖說，輸出圖集與說明",
+}
+# 這個形態要不要跑「配音」與「畫面」階段
+FORM_NEEDS = {
+    "video": {"voice": True, "visual": True},
+    "novel": {"voice": False, "visual": False},
+    "serial": {"voice": False, "visual": False},
+    "poem": {"voice": False, "visual": False},
+    "chat": {"voice": False, "visual": False},
+    "script": {"voice": False, "visual": False},
+    "comic": {"voice": False, "visual": False},
+    "guide": {"voice": False, "visual": False},
+    "talk": {"voice": False, "visual": False},
+    "audiobook": {"voice": True, "visual": False},
+    "radio_drama": {"voice": True, "visual": False},
+    "asmr": {"voice": True, "visual": False},
+    "gallery": {"voice": False, "visual": True},
+}
+# 文字形態的排版方式（怎麼把 scenes 排成成品）
+FORM_LAYOUT = {
+    "novel": "prose", "serial": "chapters", "poem": "verse", "chat": "dialogue",
+    "script": "screenplay", "comic": "panels", "guide": "guide", "talk": "talk",
+}
+
+
+def form_layout(form: str) -> str:
+    """How the text of this form is laid out (falls back to plain prose)."""
+    return FORM_LAYOUT.get((form or "").strip().lower(), "prose")
+
+
+def is_audio_form(form: str) -> bool:
+    """Forms whose deliverable is an audio track (plus the text it was read from)."""
+    return (form or "").strip().lower() in ("audiobook", "radio_drama", "asmr")
+
+
+def default_form(mode: str, rating: str) -> str:
+    """Which content form an episode gets when the owner did not pick one (a plain video)."""
+    return "video"
+
+
+def form_of(ep: dict) -> str:
+    """The episode's content form, with old episodes falling back to a plain video."""
+    f = str(ep.get("form") or "").strip().lower()
+    return f if f in FORMS else "video"
+
 DEFAULT_SETTINGS: dict[str, Any] = {
     "llm": {
         "provider": "claude_cli",          # claude_cli | openai | mock
@@ -31,7 +145,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "openai_base_url": "http://127.0.0.1:1234/v1",
         "openai_model": "",
         "openai_key_env": "",              # name of env var holding the key, never the key
-        "timeout_s": 600,
+        "timeout_s": 1800,                 # 單次呼叫的上限；本機模型慢，預設放寬到 30 分鐘
+        "task_timeout_s": {},              # {"brief": 3600}：個別任務再放寬
+        "suggest_timeout_s": 180,          # 建集對話框的背景判讀；與上面的上限互不影響
+        "task_routes": {},                 # {"script": "openai"}：某個任務改用別的 provider
     },
     "tts": {
         "base_url": "http://127.0.0.1:8090",
@@ -176,7 +293,34 @@ DEFAULT_CHANNEL: dict[str, Any] = {
     "formats": ["long", "short", "carousel"],
     "platforms": ["YouTube", "Instagram", "Facebook"],
     "taboo": "",
+    "max_rating": "general",      # 頻道上限：這個頻道最多做到哪一級（成人集必須另外開關）
 }
+
+# 分級合法組合：新聞要可查證的事實，成人向必須是虛構敘事，兩者不能同時成立。
+# 回傳值是給使用者看的拒絕理由；None 代表合法。
+def rating_conflict(mode: str, rating: str) -> str | None:
+    """mode × rating 的合法性。回傳可讀的拒絕理由，合法時回 None。"""
+    if mode not in MODES:
+        return f"內容模式只能是 {'／'.join(MODES)}"
+    if rating not in RATINGS:
+        return f"分級只能是 {'／'.join(RATINGS)}"
+    if mode == "news" and rating == "adult":
+        return "新聞模式不支援 adult 分級：成人向必須是虛構敘事（mode=narrative），新聞要的是可查證的事實與來源。"
+    return None
+
+
+def rating_rank(rating: str) -> int:
+    """分級高低，數字越大限制越多。"""
+    try:
+        return RATINGS.index(rating)
+    except ValueError:
+        return 0
+
+
+def rating_at_or_below(rating: str, ceiling: str) -> bool:
+    """分級是否在允許的上限之內（ceiling 之上的一律不行）。"""
+    return rating_rank(rating) <= rating_rank(ceiling)
+
 
 PRESET_STYLES: list[dict[str, Any]] = [
     {
@@ -258,6 +402,16 @@ PRESET_STYLES: list[dict[str, Any]] = [
 # The five cards above are the originals: never edit or remove them (styles.json and old episodes use their ids).
 # Newer built-in cards live in app/style_presets.py and are appended to existing styles.json by get_styles().
 PRESET_STYLES += EXTRA_PRESETS
+
+
+def preset_styles() -> list[dict[str, Any]]:
+    """Built-in cards for this channel: the general set, plus the adult cards when allowed.
+
+    A channel capped at `general` never sees the adult cards at all — not hidden by CSS,
+    simply not in the list.
+    """
+    allowed = rating_at_or_below("suggestive", (get_channel().get("max_rating") or "general").strip().lower())
+    return [*PRESET_STYLES, *NSFW_PRESETS] if allowed else list(PRESET_STYLES)
 
 
 def _read(path: Path, default: Any) -> Any:
@@ -368,6 +522,8 @@ def _norm_pref(p: dict, idx: int = 0) -> dict | None:
         "status": status,
         "source": source,
         "evidence": str(p.get("evidence") or "").strip(),
+        # a rule learned from a restricted episode; kept out of prompts when the switch is off
+        "nsfw": bool(p.get("nsfw", False)),
     }
 
 
@@ -400,6 +556,7 @@ def add_pref(
     status: str = "active",
     source: str = "manual",
     evidence: str = "",
+    nsfw: bool | None = None,
 ) -> dict:
     with _lock:
         clean_rule = (rule or "").strip()
@@ -427,6 +584,7 @@ def add_pref(
             "status": status,
             "source": source,
             "evidence": (evidence or "").strip(),
+            "nsfw": bool(nsfw),
         }
         if not clean_rule:
             return entry
@@ -464,10 +622,16 @@ def delete_pref(pid: str) -> bool:
 
 
 def prefs_text() -> str:
+    """The taste rules that go into every prompt.
+
+    Adult-marked rules are dropped when the NSFW switch is off: the prompt is assembled from
+    whatever is left, so nothing restricted is ever handed to the model.
+    """
+    show_nsfw = nsfw_enabled()
     lines = [
         f"- [{p['category']}] {p['rule']}"
         for p in get_prefs()
-        if p.get("status", "active") == "active"
+        if p.get("status", "active") == "active" and (show_nsfw or not p.get("nsfw"))
     ]
     return "\n".join(lines) if lines else "（尚無）"
 
@@ -501,8 +665,15 @@ def _norm_idea(item: dict, idx: int = 0) -> dict | None:
         kind = "radar"
     fmt = item.get("format") if item.get("format") in ("long", "short") else "short"
     tags = [str(t).strip() for t in (item.get("tags") or []) if str(t).strip()]
+    # An idea's rating decides whether the switch hides it. Older ideas have none: they are
+    # judged by their text, so an explicit adult idea is not silently shown.
+    rating = str(item.get("rating") or "").strip().lower()
+    if rating not in RATINGS:
+        from . import suggest as _suggest      # late import: suggest imports store
+        rating = _suggest.judge_rating(title, notes)[0]
     return {
         "id": iid,
+        "rating": rating,
         "kind": kind,
         "title": title,
         "why": str(item.get("why") or "").strip(),
@@ -573,10 +744,27 @@ def _norm_idea_list(items: list[dict]) -> list[dict]:
     return sorted(manual + radar + watch, key=lambda x: x["found"], reverse=True)
 
 
-def get_radar() -> list[dict]:
+def all_ideas() -> list[dict]:
+    """Every idea on disk, restricted ones included.
+
+    The write paths must use this: reading the filtered list and writing it back would delete the
+    hidden ideas for good the moment anything touched radar.json while the switch was off.
+    """
     with _lock:
         raw = _read(DATA / "radar.json", [])
         return _norm_idea_list(raw if isinstance(raw, list) else [])
+
+
+def get_radar() -> list[dict]:
+    """Every idea the owner collected, radar hits and watch scans included.
+
+    Restricted ideas are hidden while the NSFW switch is off, so the ideas page shows the same
+    world the rest of the app does.
+    """
+    items = all_ideas()
+    if nsfw_enabled():
+        return items
+    return [i for i in items if (i.get("rating") or "general") == "general"]
 
 
 list_ideas = get_radar
@@ -601,9 +789,19 @@ def save_radar_state(state: dict) -> dict:
         return merged
 
 
+def get_idea(iid: str) -> dict | None:
+    """One idea by id (used to pre-fill the new-episode dialog from a radar hit)."""
+    if not iid:
+        return None
+    for item in list_ideas():
+        if item.get("id") == iid:
+            return item
+    return None
+
+
 def add_idea(data: dict) -> dict:
     with _lock:
-        items = get_radar()
+        items = all_ideas()
         candidate = dict(data)
         candidate.setdefault("id", f"idea-{uuid.uuid4().hex[:8]}")
         candidate.setdefault("found", time.time())
@@ -617,7 +815,7 @@ def add_idea(data: dict) -> dict:
 
 def update_idea(iid: str, patch: dict) -> dict | None:
     with _lock:
-        items = get_radar()
+        items = all_ideas()
         for idx, item in enumerate(items):
             if item["id"] == iid:
                 merged = {**item, **patch, "id": iid}
@@ -632,7 +830,7 @@ def update_idea(iid: str, patch: dict) -> dict | None:
 
 def delete_idea(iid: str) -> bool:
     with _lock:
-        items = get_radar()
+        items = all_ideas()
         kept = [item for item in items if item["id"] != iid]
         if len(kept) == len(items):
             return False
@@ -664,14 +862,21 @@ def _norm_style(s: dict) -> dict:
         "words": _norm_list(s.get("words")),
         "avoid": _norm_list(s.get("avoid")),
         "visual": str(s.get("visual") or "").strip(),   # 畫面方向；舊卡沒有這欄就是空字串
+        # NSFW 相關欄位。舊卡沒有這幾欄，一律當成一般內容，不會被誤判成成人牌。
+        "nsfw": bool(s.get("nsfw", False)),
+        "rating_min": str(s.get("rating_min") or "general").strip().lower(),
+        # empty = works for every form (the general cards). Only a card that names its forms
+        # is restricted to them.
+        "forms": _norm_list(s.get("forms")),
         "preset": bool(s.get("preset", False)),
         "source": str(s.get("source") or ("內建預設" if s.get("preset") else "自訂")).strip(),
     }
 
 
 def _bootstrap_styles() -> dict:
-    items = [_norm_style(p) for p in PRESET_STYLES]
-    active_id = PRESET_STYLES[0]["id"]
+    presets = preset_styles()
+    items = [_norm_style(p) for p in presets]
+    active_id = presets[0]["id"]
     ch = get_channel()
     if (ch.get("tone") or "").strip() or (ch.get("name") or "").strip():
         custom = _norm_style({
@@ -696,6 +901,11 @@ def _bootstrap_styles() -> dict:
     return data
 
 
+# Fields a built-in card is allowed to rewrite on every read. Everything else in a stored card
+# belongs to the owner (they may have edited the text), so it is never touched.
+_PRESET_OWNED = ("nsfw", "rating_min", "forms", "category", "icon")
+
+
 def get_styles() -> dict:
     with _lock:
         path = DATA / "styles.json"
@@ -705,15 +915,27 @@ def get_styles() -> dict:
         items = [_norm_style(x) for x in raw.get("items", []) if isinstance(x, dict)]
         by_id = {x["id"]: x for x in items}
         changed = False
-        for preset in PRESET_STYLES:
+        for preset in preset_styles():
             if preset["id"] not in by_id:
                 norm_p = _norm_style(preset)
                 items.append(norm_p)
                 by_id[norm_p["id"]] = norm_p
                 changed = True
+                continue
+            # a shipped preset gains new fields over time (forms, rating_min). Existing copies
+            # in styles.json would otherwise keep the old values forever, so refresh the fields
+            # the preset owns while leaving the owner's edits alone.
+            cur = by_id[preset["id"]]
+            want = _norm_style(preset)
+            for key in _PRESET_OWNED:
+                # read the value from the normalised preset: `forms: []` means "every form",
+                # and an omitted key in the source dict must still overwrite a stale stored value
+                if cur.get(key) != want[key]:
+                    cur[key] = want[key]
+                    changed = True
         active_id = raw.get("active_id")
         if active_id not in by_id:
-            active_id = items[0]["id"] if items else PRESET_STYLES[0]["id"]
+            active_id = items[0]["id"] if items else preset_styles()[0]["id"]
             changed = True
         out = {"active_id": active_id, "items": items}
         if changed:
@@ -769,7 +991,7 @@ def delete_style(sid: str) -> bool:
             raise ValueError("內建風格卡不能刪除")
         cur["items"] = [x for x in cur["items"] if x["id"] != sid]
         if cur["active_id"] == sid:
-            cur["active_id"] = cur["items"][0]["id"] if cur["items"] else PRESET_STYLES[0]["id"]
+            cur["active_id"] = cur["items"][0]["id"] if cur["items"] else preset_styles()[0]["id"]
         _write(DATA / "styles.json", cur)
         return True
 
@@ -786,6 +1008,9 @@ def activate_style(sid: str) -> dict:
 
 def style_block(style_id: str | None = None) -> str:
     card = get_style(style_id) or get_style()
+    if card and card.get("nsfw") and not nsfw_enabled():
+        # never describe an adult card to the model while restricted content is off
+        card = None
     if not card:
         return "（無）"
     lines = [
@@ -824,7 +1049,33 @@ def new_episode(
     sources: list[str] | None = None,
     style_id: str | None = None,
     idea_id: str | None = None,
+    mode: str = "news",
+    rating: str = "general",
+    characters: list[str] | None = None,
+    form: str = "",
 ) -> dict:
+    """Create an episode. `mode` (news|narrative) and `rating` (general|suggestive|adult)
+    default to the current behaviour, so an episode without them is byte-identical to today."""
+    mode = (mode or "news").strip().lower()
+    rating = (rating or "general").strip().lower()
+    why = rating_conflict(mode, rating)
+    if why:
+        raise ValueError(why)
+    ceiling = effective_max_rating()
+    if not rating_at_or_below(rating, ceiling):
+        if not nsfw_enabled():
+            raise ValueError(
+                f"限制級內容目前已關閉，不能建立 {rating} 分級的集數。"
+                f"請先在右上角把 NSFW 開關打開。")
+        raise ValueError(
+            f"這個頻道的分級上限是 {ceiling}，{rating} 超過上限。"
+            f"請到設定頁把頻道上限調高，或改用較低的分級。")
+    if rating != "general" and characters:
+        # a restricted episode may only use characters that carry the attestations
+        from . import characters as _chars   # late import: characters imports store
+        ok, bad = _chars.usable_cards(list(characters), rating)
+        if bad:
+            raise ValueError("角色卡有問題：" + "；".join(bad))
     with _lock:
         eid = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + slugify(topic)
         styles = get_styles()
@@ -838,6 +1089,11 @@ def new_episode(
             "source_urls": sources or [],
             "style_id": chosen_style,
             "idea_id": idea_id or None,
+            "mode": mode,                  # news | narrative
+            "rating": rating,              # general | suggestive | adult
+            "characters": list(characters or []),
+            "form": (form or "").strip().lower() if (form or "").strip().lower() in FORMS
+                    else default_form(mode, rating),
             "stage": "sources",
             "status": "queued",            # queued | running | waiting | done | error
             "waiting_for": None,           # direction | script | package | approval
@@ -854,9 +1110,103 @@ def new_episode(
         return ep
 
 
+# ---------- the NSFW switch ----------
+
+# The switch lives in its own file rather than in settings.json: the file existing *is* the
+# state, so it can be removed to force a closed switch, and nothing about the setting leaks
+# into a file the UI already renders.
+NSFW_LOCK = "nsfw.lock"
+
+
+def nsfw_enabled() -> bool:
+    """Whether restricted content may be shown and generated.
+
+    `CF_NSFW=0` in the environment always wins, so one machine can be locked closed without
+    touching its data. Otherwise the switch is on when the lock file exists.
+    """
+    forced = (os.environ.get("CF_NSFW") or "").strip().lower()
+    if forced in ("0", "false", "off", "no"):
+        return False
+    if forced in ("1", "true", "on", "yes"):
+        return True
+    return (DATA / NSFW_LOCK).exists()
+
+
+def set_nsfw(on: bool) -> bool:
+    """Flip the switch. Returns the new state."""
+    path = DATA / NSFW_LOCK
+    if on:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("on\n", "utf-8")
+    else:
+        path.unlink(missing_ok=True)
+    return nsfw_enabled()
+
+
+def effective_max_rating() -> str:
+    """The highest rating this channel may create right now.
+
+    The channel ceiling caps it; with the NSFW switch off the cap is `general` no matter what the
+    channel says. Routing every consumer through this keeps the UI and the create API agreeing.
+    """
+    ceiling = (get_channel().get("max_rating") or "general").strip().lower()
+    if not rating_at_or_below(ceiling, "adult"):
+        ceiling = "general"
+    if not nsfw_enabled():
+        return "general"
+    return ceiling
+
+
+# Words that mark text as restricted when it is about to leave the machine. A deliberate
+# over-approximation: a false positive only means one search is skipped, a false negative leaks.
+_NSFW_MARKERS = (
+    "情色", "色情", "情慾", "裸", "性愛", "性行為", "做愛", "高潮", "呻吟", "調教", "肉體",
+    "erotic", "nsfw", "18+", "限制級", "露點", "成人小說", "成人內容", "成人向",
+)
+
+
+def nsfw_marker(text: str) -> str:
+    """The first restricted-content marker found in `text`, or "" when there is none.
+
+    Returned as it appears in the text (not lowercased) so it can be quoted in an error message.
+    """
+    low = (text or "").lower()
+    for m in _NSFW_MARKERS:
+        i = low.find(m.lower())
+        if i != -1:
+            return (text or "")[i:i + len(m)]
+    return ""
+
+
+def is_restricted(ep: dict | None) -> bool:
+    """An episode above `general` — the thing the switch hides."""
+    return bool(ep) and (ep.get("rating") or "general").strip().lower() != "general"
+
+
+def visible_episode(eid: str) -> dict | None:
+    """The episode, or None when it must stay hidden (missing, or restricted with the switch off).
+
+    Every read path goes through this so there is one place to reason about. `get_episode`
+    stays unfiltered on purpose: the worker needs the real record to resume a paused job.
+    """
+    ep = get_episode(eid)
+    if ep is None:
+        return None
+    if is_restricted(ep) and not nsfw_enabled():
+        return None
+    return ep
+
+
 def get_episode(eid: str) -> dict:
     with _lock:
-        return _read(ep_dir(eid) / "episode.json", None)
+        ep = _read(ep_dir(eid) / "episode.json", None)
+        if ep is not None:
+            # old episodes predate mode/rating: fill in the defaults so every reader sees them
+            ep.setdefault("mode", "news")
+            ep.setdefault("rating", "general")
+            ep.setdefault("characters", [])
+            ep.setdefault("form", default_form(ep["mode"], ep["rating"]))
+        return ep
 
 
 def save_episode(ep: dict) -> None:
@@ -965,15 +1315,22 @@ def _episode_thumb(eid: str, ep: dict) -> str | None:
     return thumbs[0].get("file")
 
 
-def list_episodes() -> list[dict]:
+def list_episodes(include_hidden: bool = False) -> list[dict]:
     with _lock:
         out = []
+        show_nsfw = include_hidden or nsfw_enabled()
         if EPISODES.exists():
             for d in EPISODES.iterdir():
                 f = d / "episode.json"
                 if f.exists():
                     ep = json.loads(f.read_text("utf-8"))
                     ep.pop("log", None)
+                    ep.setdefault("mode", "news")
+                    ep.setdefault("rating", "general")
+                    ep.setdefault("characters", [])
+                    ep.setdefault("form", default_form(ep["mode"], ep["rating"]))
+                    if is_restricted(ep) and not show_nsfw:
+                        continue
                     eid = ep["id"]
                     ep["thumb"] = _episode_thumb(eid, ep)
                     metrics_path = d / "metrics.json"

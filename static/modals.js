@@ -1,4 +1,4 @@
-import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261123b";
+import { $, $$, api, applyNavLayout, closeModal, esc, getNavLayout, openModal, state, toast } from "./lib.js?v=20261125g";
 
 export async function openSettingsModal() {
   const s = await api("/api/settings");
@@ -49,6 +49,12 @@ export async function openSettingsModal() {
           <div><label>模型名稱</label><input id="s-openai_model" value="${esc(s.llm.openai_model)}"></div>
           <div><label>API key 環境變數名稱（只填名稱）</label><input id="s-openai_key_env" value="${esc(s.llm.openai_key_env)}" placeholder="例如 STRATA_API_KEY"></div>
         </div>
+        <label>LLM 逾時（秒）</label>
+        <input id="s-timeout_s" type="number" min="30" step="30" value="${esc(String(s.llm.timeout_s ?? 1800))}">
+        <div class="muted" style="font-size:12px;margin-top:-4px">單次呼叫最多等多久。本機模型跑長講稿要好幾分鐘，預設 1800 秒（30 分鐘）；逾時會回報等了多久而不是只說 timed out。</div>
+        <label>建集判讀逾時（秒）</label>
+        <input id="s-suggest_timeout_s" type="number" min="15" step="15" value="${esc(String(s.llm.suggest_timeout_s ?? 180))}">
+        <div class="muted" style="font-size:12px;margin-top:-4px">在「做一支新的」對話框裡，agent 依題目先判格式／模式／分級／形態的時間。這段只影響那個建議，逾時不影響製作；與上面的 LLM 逾時互相獨立。</div>
         <div class="row" style="margin-top:12px">
           <button type="button" class="btn" id="s-test">測試 LLM 連線</button>
           <span class="muted" id="s-test-out"></span>
@@ -307,6 +313,8 @@ export async function openSettingsModal() {
           for (const k of ["provider", "claude_model", "openai_base_url", "openai_model", "openai_key_env"]) {
             s.llm[k] = $(`#s-${k}`, root).value;
           }
+          s.llm.timeout_s = Math.max(30, +($("#s-timeout_s", root).value || 1800));
+          s.llm.suggest_timeout_s = Math.max(15, +($("#s-suggest_timeout_s", root).value || 180));
           for (const k of ["base_url", "model", "voice", "instruct", "voice_ref", "emotion"]) {
             s.tts[k] = $(`#t-${k}`, root).value;
           }
@@ -592,28 +600,58 @@ async function setupYouTubePane(root, s, collect) {
 
 // One <select> with an <optgroup> per category, in the server's category order. The search box
 // only narrows the options; the selected card always stays in the list so the choice never changes silently.
-function styleOptionsHtml(styles, selectedId, query) {
+function styleOptionsHtml(styles, selectedId, query, rating = "general", form = "") {
   const q = (query || "").trim().toLowerCase();
   const match = (st) => !q || [st.name, st.category, st.summary, st.id].some((v) => (v || "").toLowerCase().includes(q));
+  const ratings = state.META?.ratings || ["general", "suggestive", "adult"];
+  const rank = (r) => ratings.indexOf(r || "general");
+  // an NSFW card is only offered when the episode's rating is at least what the card asks for,
+  // and only when the card suits the chosen deliverable form
+  const fits = (st) => {
+    if (st.nsfw && rank(rating) < rank(st.rating_min || "suggestive")) return false;
+    if (form && Array.isArray(st.forms) && st.forms.length && !st.forms.includes(form)) return false;
+    return true;
+  };
   const order = state.META?.style_categories || [];
   const groups = new Map(order.map((c) => [c, []]));
   for (const st of styles) {
-    if (st.id !== selectedId && !match(st)) continue;
+    const keep = st.id === selectedId || (match(st) && fits(st));
+    if (!keep) continue;
     const cat = st.category || "其他";
     if (!groups.has(cat)) groups.set(cat, []);
     groups.get(cat).push(st);
   }
   return [...groups].filter(([, items]) => items.length).map(([cat, items]) =>
     `<optgroup label="${esc(cat)}">${items.map((st) =>
-      `<option value="${esc(st.id)}" ${st.id === selectedId ? "selected" : ""}>${esc(st.icon)} ${esc(st.name)}</option>`).join("")}</optgroup>`,
+      `<option value="${esc(st.id)}" ${st.id === selectedId ? "selected" : ""}>${esc(st.icon)} ${esc(st.name)}${st.nsfw ? " ⛔" : ""}</option>`).join("")}</optgroup>`,
   ).join("");
 }
 
 export async function openNewEpisodeModal(prefill = {}) {
-  const [ch, stylesRes] = await Promise.all([api("/api/channel"), api("/api/styles")]);
+  const q = new URLSearchParams({
+    topic: prefill.topic || "",
+    notes: prefill.notes || "",
+    format: prefill.format || "",
+    urls: Array.isArray(prefill.source_urls) ? prefill.source_urls.join("\n") : (prefill.source_urls || ""),
+    idea_id: prefill.idea_id || "",
+  });
+  // the rules answer instantly; the model's answer lands a moment later and only fills gaps
+  const [ch, stylesRes, meta, guess] = await Promise.all([
+    api("/api/channel"), api("/api/styles"), api("/api/meta"),
+    api("/api/suggest?" + q.toString()).catch(() => null),
+  ]);
   const styles = stylesRes.items || [];
-  const defaultStyle = prefill.style_id || stylesRes.active_id || (styles[0]?.id ?? "");
+  const hasTopic = Boolean((prefill.topic || "").trim());
+  // when the model guessed, its choice wins; otherwise the caller's, then the active card
+  const defaultStyle = guess?.style_id || prefill.style_id || stylesRes.active_id || (styles[0]?.id ?? "");
   const urls = Array.isArray(prefill.source_urls) ? prefill.source_urls.join("\n") : (prefill.source_urls || "");
+  const g = guess || {};
+  const modes = meta.modes || ["news", "narrative"];
+  const ratings = meta.ratings || ["general", "suggestive", "adult"];
+  const ratingLabel = meta.rating_label || {};
+  const modeLabel = meta.mode_label || {};
+  const maxRating = meta.max_rating || "general";
+  const ratingAllowed = (r) => ratings.indexOf(r) <= ratings.indexOf(maxRating);
 
   openModal({
     title: "做一支新的",
@@ -637,17 +675,142 @@ export async function openNewEpisodeModal(prefill = {}) {
           <select id="ne-style">${styleOptionsHtml(styles, defaultStyle, "")}</select>
         </div>
       </div>
+      <div class="grid-2">
+        <div>
+          <label>內容模式</label>
+          <select id="ne-mode">
+            ${modes.map((m) => `<option value="${esc(m)}">${esc(modeLabel[m] || m)}</option>`).join("")}
+          </select>
+        </div>
+        <div>
+          <label>分級</label>
+          <select id="ne-rating">
+            ${ratings.filter(ratingAllowed).map((r) => `<option value="${esc(r)}">${esc(ratingLabel[r] || r)}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+      <label>成品形態</label>
+      <select id="ne-form">
+        ${(meta.forms || ["video"]).map((f) => `<option value="${esc(f)}">${esc((meta.form_label || {})[f] || f)} — ${esc((meta.form_desc || {})[f] || "")}</option>`).join("")}
+      </select>
+      <div id="ne-rating-note" class="muted" style="margin:-4px 0 8px"></div>
+      ${guess && (guess.reasons || []).length ? `<div class="muted" id="ne-why" style="margin:-2px 0 10px;font-size:12px">
+        agent 先判：${(guess.reasons || []).map((r) => esc(r)).join("；")}${guess.by === "rules" ? "（規則判斷，模型判讀中）" : ""}</div>` : ""}
       <label>參考連結（一行一個；官方公告、對標影片頁、社群討論）</label>
-      <textarea id="ne-urls" placeholder="https://...">${esc(urls)}</textarea>
+      <textarea id="ne-urls" placeholder="https://...">${esc((guess && (guess.source_urls || []).length ? guess.source_urls : urls ? [urls] : []).join("\n"))}</textarea>
       <label>你的觀點與想強調的點（選填）</label>
       <textarea id="ne-notes" placeholder="身為觀眾，我最好奇的是…；這些不要講…">${esc(prefill.notes || "")}</textarea>`,
     footHtml: `<button type="button" class="btn" id="ne-cancel">取消</button><button type="button" class="btn primary" id="ne-go">開始製作</button>`,
     onMount: (root) => {
-      $("#ne-format", root).value = prefill.format === "long" ? "long" : "short";
+      const pick = (sel, value) => {
+        const el = $(sel, root);
+        if (!el || !value) return;
+        if ([...el.options].some((o) => o.value === value)) el.value = value;
+      };
+      $("#ne-format", root).value = (g.format || prefill.format) === "long" ? "long" : "short";
+      pick("#ne-mode", g.mode);
+      pick("#ne-rating", g.rating);
+      pick("#ne-form", g.form);
+      pick("#ne-style", g.style_id);
+      // the picker above was built before the guess was applied: repaint it for the right rating/form
+      if (g.rating || g.form) {
+        const sel = $("#ne-style", root);
+        const keep = g.style_id || sel.value;
+        sel.innerHTML = styleOptionsHtml(styles, keep, "", $("#ne-rating", root).value, $("#ne-form", root).value);
+        if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
+      }
       $("#ne-style-q", root).oninput = (e) => {
         const sel = $("#ne-style", root);
-        sel.innerHTML = styleOptionsHtml(styles, sel.value, e.target.value);
+        sel.innerHTML = styleOptionsHtml(styles, sel.value, e.target.value,
+          $("#ne-rating", root).value, $("#ne-form", root).value);
       };
+      const ratingNote = () => {
+        const mode = $("#ne-mode", root).value;
+        const rating = $("#ne-rating", root).value;
+        const form = $("#ne-form", root).value;
+        const box = $("#ne-rating-note", root);
+        const styleSel = $("#ne-style", root);
+        // the card list depends on the rating: repaint it and keep the pick if it still fits
+        const keep = styleSel.value;
+        styleSel.innerHTML = styleOptionsHtml(styles, keep, $("#ne-style-q", root).value, rating, form);
+        if (!styleSel.value) styleSel.value = keep;
+        const bits = [];
+        if (rating !== "general") {
+          bits.push(mode === "news"
+            ? "新聞模式只到「暗示」分級；成人向必須是虛構敘事。"
+            : "受限分級：不查證、不用免費實拍素材、不自動上傳任何平台、發布包只留本機。");
+        }
+        if (form === "novel") bits.push("小說：只出文字，不配音、不出畫面。");
+        else if (form === "audiobook") bits.push("MP3 小說：出文字稿＋mp3，不渲染影片。");
+        else if (form === "gallery") bits.push("圖片集：一張圖一段圖說，不配音也不合成影片。");
+        else if (form === "talk") bits.push("話題評論：口播＋字卡，會出影片與文字稿。");
+        box.innerHTML = bits.join("　");
+      };
+      $("#ne-mode", root).onchange = ratingNote;
+      $("#ne-rating", root).onchange = ratingNote;
+      $("#ne-form", root).onchange = ratingNote;
+      ratingNote();
+      // Second pass: the model reads the topic properly and may disagree with the rules.
+      // It arrives while the owner is typing, and only touches fields they have not changed.
+      if (hasTopic && g.by === "rules") {
+        const before = {
+          format: $("#ne-format", root).value, mode: $("#ne-mode", root).value,
+          rating: $("#ne-rating", root).value, form: $("#ne-form", root).value,
+          style: $("#ne-style", root).value, urls: $("#ne-urls", root).value,
+        };
+        const untouched = (sel, key) => $(sel, root).value === before[key];
+        const q2 = new URLSearchParams(q);
+        q2.set("deep", "1");
+        api("/api/suggest?" + q2.toString()).then((deep) => {
+          if (!deep || !root.isConnected) return;
+          const el = (sel) => $(sel, root);
+          if (deep.format && untouched("#ne-format", "format")) el("#ne-format").value = deep.format === "long" ? "long" : "short";
+          if (deep.mode && untouched("#ne-mode", "mode")) pick("#ne-mode", deep.mode);
+          if (deep.rating && untouched("#ne-rating", "rating")) pick("#ne-rating", deep.rating);
+          if (deep.form && untouched("#ne-form", "form")) pick("#ne-form", deep.form);
+          ratingNote();      // repaint for the new rating/form before picking a card
+          if (deep.style_id && untouched("#ne-style", "style")) pick("#ne-style", deep.style_id);
+          if (!before.urls.trim() && (deep.source_urls || []).length) el("#ne-urls").value = deep.source_urls.join("\n");
+          const why = el("#ne-why");
+          if (why && (deep.reasons || []).length) why.innerHTML = `agent 先判：${deep.reasons.map((r) => esc(r)).join("；")}`;
+          if (deep.by === "model") toast("agent 已依題目調整設定");
+        }).catch(() => { /* the rules' answer is already on screen */ });
+      }
+      // Opened without a topic (the ＋新集數 button): suggest once the topic is worth judging.
+      if (!hasTopic) {
+        let timer = null;
+        let done = false;
+        $("#ne-topic", root).oninput = (e) => {
+          clearTimeout(timer);
+          const text = e.target.value.trim();
+          if (done || text.length < 4) return;
+          timer = setTimeout(async () => {
+            done = true;
+            try {
+              const q3 = new URLSearchParams({ topic: text, notes: $("#ne-notes", root).value });
+              const deep = await api("/api/suggest?" + q3.toString());
+              if (!root.isConnected) return;
+              const set = (sel, val) => {
+                const el = $(sel, root);
+                if (!el || !val) return;
+                if ([...el.options].some((o) => o.value === val)) el.value = val;
+              };
+              set("#ne-format", deep.format);
+              set("#ne-mode", deep.mode);
+              set("#ne-rating", deep.rating);
+              set("#ne-form", deep.form);
+              // repaint the card list for the new rating/form, then select the suggested card
+              ratingNote();
+              set("#ne-style", deep.style_id);
+              if (!$("#ne-urls", root).value.trim() && (deep.source_urls || []).length) {
+                $("#ne-urls", root).value = deep.source_urls.join("\n");
+              }
+              const why = $("#ne-why", root);
+              if (why && (deep.reasons || []).length) why.innerHTML = `agent 先判：${deep.reasons.map((r) => esc(r)).join("；")}`;
+            } catch { /* typing on: a failed guess must not interrupt */ }
+          }, 700);
+        };
+      }
       $("#ne-topic", root).focus();
       $("#ne-cancel", root).onclick = closeModal;
       $("#ne-go", root).onclick = async () => {
@@ -657,6 +820,9 @@ export async function openNewEpisodeModal(prefill = {}) {
             body: {
               topic: $("#ne-topic", root).value,
               format: $("#ne-format", root).value,
+              mode: $("#ne-mode", root).value,
+              rating: $("#ne-rating", root).value,
+              form: $("#ne-form", root).value,
               style_id: $("#ne-style", root).value || null,
               idea_id: prefill.idea_id || null,
               source_urls: $("#ne-urls", root).value.split("\n"),

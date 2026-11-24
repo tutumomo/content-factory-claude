@@ -4,13 +4,17 @@ Falls back to Pillow cards when ComfyUI is down; the caller decides.
 """
 from __future__ import annotations
 
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
 
 from . import store
+
+_OVERRIDE = threading.local()
 
 # Per-family model combos (files from the ComfyUI loader enums on this box) + tuned
 # sampler settings taken from the installed reference workflows. 中文文字：Krea-2 弱，
@@ -67,7 +71,24 @@ class ComfyError(RuntimeError):
 
 
 def cfg() -> dict:
-    return store.get_settings().get("visuals") or {}
+    """The visuals settings, with any per-call override merged on top."""
+    base = dict(store.get_settings().get("visuals") or {})
+    over = getattr(_OVERRIDE, "cfg", None)
+    if over:
+        base.update(over)
+    return base
+
+
+@contextmanager
+def using(overrides: dict | None):
+    """Apply per-call visuals settings for the block (an episode may pick its own model combo)."""
+    prev = getattr(_OVERRIDE, "cfg", None)
+    _OVERRIDE.cfg = dict(overrides) if overrides else None
+    try:
+        yield
+    finally:
+        _OVERRIDE.cfg = prev
+
 
 
 def base() -> str:
@@ -82,6 +103,29 @@ def health(timeout: float = 4) -> dict:
         return {"ok": True, "detail": f"ComfyUI 就緒（{dev.get('name', 'GPU')}）"}
     except httpx.HTTPError as e:
         return {"ok": False, "detail": f"ComfyUI 連不上：{e}（請先執行 ./start_comfyui.sh）"}
+
+
+_STATUS: tuple[float, dict] | None = None
+
+
+def status(ttl: float = 5.0, timeout: float = 2.0) -> dict:
+    """Cached health for the status bar: it polls every few seconds and must not hammer the server."""
+    global _STATUS
+    now = time.monotonic()
+    if _STATUS is not None and now - _STATUS[0] < ttl:
+        return dict(_STATUS[1])
+    try:
+        out = health(timeout=timeout)
+    except Exception as e:  # noqa: BLE001 - a status probe must never break the endpoint
+        out = {"ok": False, "detail": f"探測失敗：{type(e).__name__}: {e}"}
+    _STATUS = (now, dict(out))
+    return out
+
+
+def forget_status() -> None:
+    """Drop the cached health (after starting or stopping the server)."""
+    global _STATUS
+    _STATUS = None
 
 
 def presets() -> dict:
@@ -107,6 +151,7 @@ def presets() -> dict:
 
 def _graph(prompt: str, w: int, h: int, seed: int) -> dict:
     c = cfg()
+    negative = (c.get("negative") or "").strip()
     g = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": c.get("unet") or "kromaKrea2_opd.safetensors", "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": c.get("clip") or "Huihui-Qwen3-VL-4B-Instruct-abliterated-fp8_scaled.safetensors",
@@ -129,9 +174,12 @@ def _graph(prompt: str, w: int, h: int, seed: int) -> dict:
         g["7"]["inputs"]["model"] = ["10", 0]
     if (c.get("encode") or "") == "qwen21":
         g["4"] = {"class_type": "TextEncodeQwenImage21", "inputs": {
-            "clip": ["2", 0], "prompt": prompt, "negative_prompt": "", "resolution": 0, "images": {}}}
+            "clip": ["2", 0], "prompt": prompt, "negative_prompt": negative, "resolution": 0, "images": {}}}
         g.pop("5", None)
         g["7"]["inputs"]["negative"] = ["4", 1]
+    elif negative:
+        # a real negative conditioning: its own text encode, not the zeroed-out positive
+        g["5"] = {"class_type": "CLIPTextEncode", "inputs": {"text": negative, "clip": ["2", 0]}}
     return g
 
 

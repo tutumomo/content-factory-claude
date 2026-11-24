@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import html
 import io
+import os
 import shutil
 import time
 from contextlib import contextmanager
@@ -13,7 +14,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import comfy, cost, llm, media, music, pipeline, prompts, sfx, sources, stock, stock_audio, store, video, video_analysis, watch, youtube
+from . import characters, comfy, cost, llm, media, music, pipeline, prompts, sfx, sources, stock, stock_audio, store, suggest, video, video_analysis, watch, youtube
 
 app = FastAPI(title="內容工廠")
 STATIC = store.ROOT / "static"
@@ -41,7 +42,7 @@ def _startup() -> None:
 
 def _ep(eid: str) -> dict:
     try:
-        ep = store.get_episode(eid)
+        ep = store.visible_episode(eid)
     except ValueError:
         ep = None
     if not ep:
@@ -59,18 +60,48 @@ def meta():
         "wait_label": pipeline.WAIT_LABEL,
         "styles": prompts.STYLES,
         "critics": {k: v[0] for k, v in prompts.CRITICS.items()},
+        "critics_by_mode": {m: {k: v[0] for k, v in prompts.critic_roles(m).items()}
+                             for m in store.MODES},
+        "critics_by_form": {f: {k: v[0] for k, v in prompts.critic_roles("fiction", f).items()}
+                             for f in store.FORMS},
+        "modes": list(store.MODES),
+        "mode_label": store.MODE_LABEL,
+        "ratings": list(store.RATINGS),
+        "rating_label": store.RATING_LABEL,
+        "forms": list(store.FORMS),
+        "form_label": store.FORM_LABEL,
+        "form_desc": store.FORM_DESC,
+        "nsfw_topics": list(store.NSFW_TOPICS),
+        # the effective ceiling: the channel's own limit, capped to `general` when the NSFW
+        # switch is off, so every consumer (dialog, card picker, create API) inherits the cap
+        "max_rating": store.effective_max_rating(),
         "pref_cats": store.PREF_CATS,
-        "style_categories": store.STYLE_CATEGORIES,
+        "style_categories": store.style_categories(),
         "sfx_tags": sfx.vocab(),
     }
 
 
 @app.get("/api/health")
 def health(llm_check: bool = False):
-    out = {"tts": media.tts_health(), "worker": pipeline.busy(), "provider": store.get_settings()["llm"]["provider"]}
+    out = {"tts": media.tts_health(), "worker": pipeline.busy(), "provider": store.get_settings()["llm"]["provider"],
+           "comfy": _comfy_status()}
     if llm_check:
         out["llm"] = llm.health()
     return out
+
+
+def _comfy_status() -> dict:
+    """ComfyUI's health, plus whether the current visuals chain would actually use it.
+
+    The status bar shows one dot per service. ComfyUI being down is not an error when the
+    chain does not use it (slides only), so the UI needs to know that difference.
+    """
+    st = comfy.status()
+    chain = sources.chain("visuals")
+    needed = [s for s in chain if s in ("comfy", "h3video")]
+    return {**st, "needed": bool(needed), "chain": chain,
+            "h3_enabled": bool(store.get_settings()["h3video"].get("enabled", True))}
+
 
 
 @app.get("/api/settings")
@@ -265,9 +296,66 @@ def remove_pref(pid: str):
 
 # ---------- styles ----------
 
+@app.get("/api/nsfw")
+def nsfw_state():
+    forced = (os.environ.get("CF_NSFW") or "").strip().lower()
+    return {"enabled": store.nsfw_enabled(),
+            "forced_off": forced in ("0", "false", "off", "no")}
+
+
+@app.put("/api/nsfw")
+def set_nsfw_state(body: dict = Body(...)):
+    """Flip the switch. Off hides restricted episodes everywhere; on resumes the ones it paused."""
+    on = bool(body.get("enabled"))
+    forced = (os.environ.get("CF_NSFW") or "").strip().lower()
+    if forced in ("0", "false", "off", "no") and on:
+        raise HTTPException(409, "這台機器用 CF_NSFW=0 強制關閉，不能從介面打開")
+    state = store.set_nsfw(on)
+    resumed = pipeline.resume_paused() if state else 0
+    return {"enabled": state, "resumed": resumed}
+
+
+@app.post("/api/nsfw/resume")
+def nsfw_resume():
+    """Re-queue the episodes a closed switch paused (idempotent)."""
+    return {"resumed": pipeline.resume_paused()}
+
+
 @app.get("/api/styles")
 def list_styles():
-    return store.get_styles()
+    data = store.get_styles()
+    if not store.nsfw_enabled():
+        data = {**data, "items": [c for c in data["items"] if not c.get("nsfw")]}
+    return data
+
+
+# ---------- character cards ----------
+
+@app.get("/api/characters")
+def list_characters():
+    items = characters.list_all()
+    if not store.nsfw_enabled():
+        items = [c for c in items if not c.get("ref_image") and not c.get("adult_attested")]
+    return {"items": items}
+
+
+@app.post("/api/characters")
+def create_character(body: dict = Body(...)):
+    card = characters.save(body)
+    return card
+
+
+@app.put("/api/characters/{cid}")
+def update_character(cid: str, body: dict = Body(...)):
+    body = {**body, "id": cid}
+    return characters.save(body)
+
+
+@app.delete("/api/characters/{cid}")
+def delete_character(cid: str):
+    if not characters.delete(cid):
+        raise HTTPException(404, "找不到這張角色卡")
+    return {"ok": True}
 
 
 @app.post("/api/styles")
@@ -412,7 +500,7 @@ def watch_run(sid: str):
 
 @app.delete("/api/radar/{idx}")
 def radar_delete(idx: int):
-    items = store.get_radar()
+    items = store.all_ideas()
     if 0 <= idx < len(items):
         items.pop(idx)
         store.save_radar(items)
@@ -459,6 +547,24 @@ def episodes():
     return store.list_episodes()
 
 
+@app.get("/api/suggest")
+def suggest_episode(topic: str = "", notes: str = "", format: str = "", urls: str = "",
+                    idea_id: str = "", deep: bool = False):
+    """Pre-fill the new-episode dialog: rules fire instantly, `deep=1` asks the model too.
+
+    The dialog calls this twice: once without `deep` the moment the dialog opens (so the
+    controls are never blank), then again with `deep=1` in the background to refine.
+    """
+    idea_urls: list[str] = []
+    idea = store.get_idea(idea_id) if idea_id else None
+    if idea:
+        idea_urls = [u for u in (idea.get("urls") or []) if str(u).startswith("http")]
+        topic = topic or idea.get("title") or ""
+        notes = notes or idea.get("notes") or idea.get("why") or ""
+    given = [u.strip() for u in (urls or "").splitlines() if u.strip().startswith("http")]
+    return suggest.suggest(topic, notes, [*given, *idea_urls], idea_format=format or None, deep=deep)
+
+
 @app.post("/api/episodes")
 def create_episode(body: dict = Body(...)):
     topic = (body.get("topic") or "").strip()
@@ -466,14 +572,22 @@ def create_episode(body: dict = Body(...)):
         raise HTTPException(400, "請輸入題目")
     fmt = body.get("format") if body.get("format") in ("long", "short") else "short"
     urls = [u.strip() for u in (body.get("source_urls") or []) if str(u).strip().startswith("http")]
-    ep = store.new_episode(
-        topic,
-        fmt,
-        body.get("notes", ""),
-        urls,
-        style_id=body.get("style_id") or None,
-        idea_id=body.get("idea_id") or None,
-    )
+    characters = [str(c).strip() for c in (body.get("characters") or []) if str(c).strip()]
+    try:
+        ep = store.new_episode(
+            topic,
+            fmt,
+            body.get("notes", ""),
+            urls,
+            style_id=body.get("style_id") or None,
+            idea_id=body.get("idea_id") or None,
+            mode=body.get("mode") or "news",
+            rating=body.get("rating") or "general",
+            characters=characters,
+            form=body.get("form") or "",
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     pipeline.enqueue("episode", ep["id"])
     return ep
 
@@ -597,9 +711,12 @@ def package(eid: str, body: dict = Body(...)):
 
 
 @app.post("/api/episodes/{eid}/approve")
-def approve(eid: str):
+def approve(eid: str, body: dict = Body(default={})):
     with _gate(eid, "approval"):
-        pipeline.approve(eid)
+        try:
+            pipeline.approve(eid, confirm_rating=(body.get("confirm_rating") or ""))
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
     return {"ok": True}
 
 
@@ -836,6 +953,9 @@ def youtube_upload(eid: str):
         raise HTTPException(409, "成片核准後才能上傳")
     if (ep.get("youtube") or {}).get("status") in ("queued", "uploading"):
         raise HTTPException(409, "這一集已在上傳中")
+    blocked = youtube.upload_blocked_reason(ep)
+    if blocked:
+        raise HTTPException(409, blocked)
     if not youtube.status()["logged_in"]:
         raise HTTPException(401, "還沒登入 Google 帳號")
     store.update_episode(eid, youtube={"status": "queued", "progress": 0.0})
@@ -848,13 +968,26 @@ def youtube_upload(eid: str):
 _FILES_ROOTS = ("episodes", "music", "sfx", "stock", "tmp")  # settings.json / youtube token / cost stay private
 
 
+def _episode_id_from_path(rel: Path) -> str:
+    """`episodes/<id>/...` -> `<id>`; anything else -> ""."""
+    parts = rel.parts
+    return parts[1] if len(parts) >= 3 and parts[0] == "episodes" else ""
+
+
 @app.get("/files/{path:path}")
 def files(path: str):
     p = (store.DATA / path).resolve()
     root = store.DATA.resolve()
     if root not in p.parents or not p.is_file():
         raise HTTPException(404)
-    if p.relative_to(root).parts[0] not in _FILES_ROOTS:
+    rel = p.relative_to(root)
+    if rel.parts[0] not in _FILES_ROOTS:
+        raise HTTPException(404)
+    # A per-episode file inherits that episode's visibility: an episode hidden by the NSFW switch
+    # must not be reachable by knowing its path. Checking only the top-level folder let anyone
+    # fetch /files/episodes/<id>/brief.json for a restricted episode.
+    eid = _episode_id_from_path(rel)
+    if eid and not store.visible_episode(eid):
         raise HTTPException(404)
     return FileResponse(p)
 

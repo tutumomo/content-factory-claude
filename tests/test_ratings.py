@@ -1,0 +1,1362 @@
+"""Ratings, modes, characters and the provider routing: the rules that guard a restricted episode.
+
+Everything here drives the shipped code (store.new_episode, sources.chain, llm.complete_json,
+prompts.critic_roles, characters.*, comfy._graph, pipeline.approve) rather than a copy of it.
+
+Run:  .venv/bin/python -m pytest tests/test_ratings.py -q
+"""
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+import httpx
+import pytest
+
+from app import characters, comfy, llm, pipeline, prompts, sources, store, suggest, websearch, youtube
+
+from app.style_presets_nsfw import NSFW_CATEGORIES, NSFW_PRESETS
+
+from .conftest import set_settings, wait_for
+
+
+@pytest.fixture
+def data(tmp_path, monkeypatch):
+    """Point the store at an empty folder so these tests never touch the shared smoke-test data."""
+    monkeypatch.setattr(store, "DATA", tmp_path)
+    monkeypatch.setattr(store, "EPISODES", tmp_path / "episodes")
+    return tmp_path
+
+
+@pytest.fixture
+def ceiling(client):
+    """Raise the rating ceiling and switch restricted content on, then restore both.
+
+    A fresh data folder has the NSFW switch off, so a restricted episode would be invisible to
+    every read path; tests that exercise restricted episodes must state that they want them.
+    """
+    ch = client.get("/api/channel").json()
+    old = ch.get("max_rating") or "general"
+    was_on = store.nsfw_enabled()
+    client.put("/api/channel", json={**ch, "max_rating": "adult"})
+    store.set_nsfw(True)
+    yield "adult"
+    ch2 = client.get("/api/channel").json()
+    client.put("/api/channel", json={**ch2, "max_rating": old})
+    store.set_nsfw(was_on)
+
+
+@pytest.fixture
+def offline(client):
+    """Run the episode on the offline mock LLM (the real one would call Claude CLI)."""
+    set_settings(client, llm={"provider": "mock"})
+    return client
+
+
+def _raise_ceiling(data, level: str = "adult") -> None:
+    """Let the channel make restricted episodes (the default ceiling is general)."""
+    store.save_channel({**store.get_channel(), "max_rating": level})
+    store.set_nsfw(True)   # a restricted episode is hidden while the switch is off
+
+
+def _use_stock_visuals(data) -> None:
+    """Put the free stock footage in the visuals chain, so the rating filter has something to drop."""
+    s = store.get_settings()
+    store.save_settings({**s, "visuals": {**s["visuals"], "source": "mix"}})
+
+
+def _restricted_episode(client, topic: str, rating: str = "adult") -> str:
+    r = client.post("/api/episodes", json={"topic": topic, "format": "short",
+                                            "mode": "narrative", "rating": rating})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def _restricted_episode_form(client, topic: str, form: str, rating: str = "adult") -> str:
+    r = client.post("/api/episodes", json={"topic": topic, "format": "short", "mode": "fiction",
+                                            "rating": rating, "form": form})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def _run_to_approval(client, eid: str, rating: str = "adult") -> None:
+    """Drive an episode up to the approval gate (the last gate before the publish package)."""
+    wait_for(client, eid)
+    ep = client.get(f"/api/episodes/{eid}").json()
+    if ep.get("waiting_for") == "sources":
+        assert client.post(f"/api/episodes/{eid}/sources", json={"proceed": True}).status_code == 200
+        wait_for(client, eid)
+    for _ in range(10):
+        ep = client.get(f"/api/episodes/{eid}").json()
+        w = ep.get("waiting_for")
+        if w == "direction":
+            d = ep["files"]["brief"]["directions"][0]["id"]
+            assert client.post(f"/api/episodes/{eid}/direction", json={"id": d}).status_code == 200
+        elif w == "script":
+            assert client.post(f"/api/episodes/{eid}/script", json={"approve": True}).status_code == 200
+        elif w == "storyboard":
+            assert client.post(f"/api/episodes/{eid}/storyboard", json={"approve": True}).status_code == 200
+        elif w == "cost":
+            assert client.post(f"/api/episodes/{eid}/cost").status_code == 200
+        elif w == "package":
+            assert client.post(f"/api/episodes/{eid}/package", json={"title": 0, "thumb": 0}).status_code == 200
+        else:
+            break
+        wait_for(client, eid)
+    ep = client.get(f"/api/episodes/{eid}").json()
+    assert ep["waiting_for"] == "approval", (ep.get("stage"), ep.get("error"), (ep.get("log") or [])[-3:])
+
+
+def _run_to_done(client, eid: str, rating: str | None = None) -> dict:
+    """Run an episode to done; a restricted episode gets its rating confirmation at the gate."""
+    _run_to_approval(client, eid, rating or "general")
+    body = {"confirm_rating": rating} if rating else {}
+    r = client.post(f"/api/episodes/{eid}/approve", json=body)
+    assert r.status_code == 200, r.text
+    return wait_for(client, eid)
+
+
+# ---------- criterion 1: mode and rating are first-class data ----------
+
+def test_new_episode_defaults_to_news_general(data):
+    ep = store.new_episode("測試題目", "short")
+    assert ep["mode"] == "news"
+    assert ep["rating"] == "general"
+    assert ep["characters"] == []
+
+
+def test_news_plus_adult_is_refused_with_a_readable_reason(data):
+    with pytest.raises(ValueError) as e:
+        store.new_episode("測試題目", "short", mode="news", rating="adult")
+    msg = str(e.value)
+    assert "narrative" in msg and "成人向" in msg, msg
+
+
+def test_api_refuses_news_plus_adult_and_returns_the_reason(client):
+    r = client.post("/api/episodes", json={"topic": "測試", "format": "short",
+                                            "mode": "news", "rating": "adult"})
+    assert r.status_code == 400
+    assert "narrative" in r.json()["detail"]
+
+
+def test_api_writes_mode_and_rating_and_reads_them_back(client, ceiling):
+    r = client.post("/api/episodes", json={"topic": "測試敘事", "format": "short",
+                                            "mode": "narrative", "rating": "suggestive"})
+    assert r.status_code == 200, r.text
+    ep = r.json()
+    assert ep["mode"] == "narrative"
+    assert ep["rating"] == "suggestive"
+    got = client.get(f"/api/episodes/{ep['id']}").json()
+    assert got["mode"] == "narrative"
+    assert got["rating"] == "suggestive"
+
+
+def test_rating_above_the_channel_ceiling_is_refused(data):
+    store.save_channel({**store.get_channel(), "max_rating": "general"})
+    store.set_nsfw(True)          # open the switch, so the *channel* ceiling is the reason
+    with pytest.raises(ValueError) as e:
+        store.new_episode("測試題目", "short", mode="narrative", rating="suggestive")
+    assert "上限" in str(e.value)
+    assert "NSFW" not in str(e.value)
+
+
+def test_raising_the_ceiling_allows_a_restricted_episode(data):
+    _raise_ceiling(data, "suggestive")
+    ep = store.new_episode("測試題目", "short", mode="narrative", rating="suggestive")
+    assert ep["rating"] == "suggestive"
+
+
+def test_meta_exposes_modes_ratings_and_each_mode_critic_set(client):
+    meta = client.get("/api/meta").json()
+    assert meta["modes"] == list(store.MODES)
+    assert meta["ratings"] == ["general", "suggestive", "adult"]
+    assert set(meta["critics_by_mode"]) == set(store.MODES)
+    assert meta["critics_by_mode"]["news"] != meta["critics_by_mode"]["narrative"]
+
+
+def test_timeout_is_generous_by_default_and_overridable_per_task(monkeypatch):
+    cfg = {"timeout_s": 1800}
+    assert llm.timeout_for("script", cfg) == 1800
+    cfg2 = {"timeout_s": 900, "task_timeout_s": {"brief": 3600}}
+    assert llm.timeout_for("brief", cfg2) == 3600
+    assert llm.timeout_for("script", cfg2) == 900
+    # a bad value must not crash the call path
+    assert llm.timeout_for("script", {"timeout_s": "slow"}) == 1800
+
+
+def test_a_timed_out_local_model_says_how_long_it_waited(monkeypatch):
+    def boom(*a, **kw):
+        raise httpx.TimeoutException("timed out")
+
+    monkeypatch.setattr(llm.httpx, "post", boom)
+    cfg = {"openai_base_url": "http://127.0.0.1:1/v1", "openai_model": "m", "timeout_s": 2400,
+           "openai_key_env": ""}
+    with pytest.raises(llm.LLMError) as e:
+        llm._openai("sys", "prompt", cfg, timeout=2400)
+    msg = str(e.value)
+    assert "2400" in msg, msg
+    assert "逾時" in msg
+    assert "timed out" not in msg      # the bare httpx wording is what confused the owner
+
+
+def test_the_default_llm_timeout_is_thirty_minutes():
+    assert store.DEFAULT_SETTINGS["llm"]["timeout_s"] == 1800
+
+
+def test_health_reports_comfyui_and_whether_the_chain_needs_it(client, monkeypatch):
+    monkeypatch.setattr(comfy, "status", lambda **kw: {"ok": False, "detail": "ComfyUI 連不上"})
+    monkeypatch.setattr(sources, "chain", lambda kind, rating="general": ["slides"] if kind == "visuals" else [])
+    h = client.get("/api/health").json()
+    assert h["comfy"]["ok"] is False
+    assert h["comfy"]["needed"] is False          # slides only: a red dot would be misleading
+    monkeypatch.setattr(sources, "chain", lambda kind, rating="general": ["comfy", "slides"] if kind == "visuals" else [])
+    h2 = client.get("/api/health").json()
+    assert h2["comfy"]["needed"] is True
+    assert h2["comfy"]["chain"] == ["comfy", "slides"]
+
+
+# ---------- criterion 2: rating gates the sources and the platforms ----------
+
+def test_general_chain_is_unchanged_by_the_rating_filter(data):
+    _use_stock_visuals(data)
+    assert sources.chain("visuals", "general") == sources.chain("visuals")
+
+
+def test_restricted_ratings_drop_the_free_stock_source(data):
+    _use_stock_visuals(data)
+    assert "stock" in sources.chain("visuals", "general")
+    for rating in ("suggestive", "adult"):
+        chain = sources.chain("visuals", rating)
+        assert "stock" not in chain, (rating, chain)
+        assert "comfy" in chain and "slides" in chain
+
+
+def test_the_plan_records_the_excluded_source(data):
+    _use_stock_visuals(data)
+    plan, _ = sources.start(["visuals"], rating="adult")
+    assert "stock" not in plan.chains["visuals"]
+    assert "stock" in plan.excluded["visuals"]
+    assert "實拍素材" in plan.line("visuals")
+
+
+def test_restricted_episode_blocks_youtube_upload_at_the_entry(client, ceiling):
+    eid = _restricted_episode(client, "受限測試")
+    ep = store.get_episode(eid)
+    ep["status"] = "done"
+    store.save_episode(ep)
+    up = client.post(f"/api/episodes/{eid}/youtube")
+    assert up.status_code == 409
+    assert "18+" in up.json()["detail"]
+
+
+def test_the_upload_worker_refuses_a_restricted_episode(data):
+    ep = {"id": "x", "rating": "adult"}
+    assert "18+" in youtube.upload_blocked_reason(ep)
+    assert youtube.upload_blocked_reason({"id": "x", "rating": "general"}) == ""
+
+
+def test_verify_has_a_rating_check(offline, ceiling, fakes):
+    client = offline
+    set_settings(client, visuals={"source": "mix"})
+    eid = _restricted_episode(client, "分級檢查測試")
+    ep = _run_to_done(client, eid, rating="adult")
+    verify = ep["files"]["verify"]
+    assert "分級" in verify["checks"]
+    assert verify["checks"]["分級"]["ok"] is True
+    assert "成人" in verify["checks"]["分級"]["value"]
+    # the restricted episode never used the free stock library
+    assert "stock" not in json.dumps(verify["sources"]["plan"], ensure_ascii=False)
+    assert "實拍素材" in json.dumps(verify["sources"]["plan"], ensure_ascii=False)
+
+
+# ---------- criterion 3: the writing layer survives a refusing provider ----------
+
+def test_refusal_is_reported_as_a_refusal_not_a_json_error(monkeypatch):
+    monkeypatch.setattr(llm, "complete",
+                        lambda task, system, prompt, timeout=None: "抱歉，我無法協助這個請求。")
+    with pytest.raises(llm.LLMRefusal) as e:
+        llm.complete_json("script", "sys", "prompt")
+    msg = str(e.value)
+    assert "拒絕" in msg
+    assert "不是合法 JSON" not in msg
+
+
+def test_refusal_is_detected_by_the_shared_marker_function():
+    assert llm.looks_like_refusal("抱歉，我無法協助這個請求。")
+    assert llm.looks_like_refusal("I can't help with that.")
+    assert not llm.looks_like_refusal('{"score": 8, "summary": "ok"}')
+
+
+def test_a_task_can_be_routed_to_another_provider(monkeypatch):
+    seen = {}
+
+    def fake_cli(system, prompt, cfg, tools="", timeout=None):
+        seen["cli"] = True
+        return "cli"
+
+    def fake_openai(system, prompt, cfg, timeout=None):
+        seen["openai"] = (timeout,)
+        return "openai"
+
+    monkeypatch.setattr(llm, "_claude_cli", fake_cli)
+    monkeypatch.setattr(llm, "_openai", fake_openai)
+    monkeypatch.setattr(store, "get_settings", lambda: {"llm": {
+        "provider": "claude_cli", "task_routes": {"script": "openai"},
+        "openai_base_url": "http://127.0.0.1:1/v1", "openai_model": "x",
+        "openai_key_env": "", "timeout_s": 5}})
+    assert llm.complete("script", "s", "p") == "openai"
+    assert seen.get("openai") and not seen.get("cli")
+    assert seen["openai"][0] == 5      # the configured timeout reaches the provider
+    # an unrouted task still uses the default provider
+    seen.clear()
+    assert llm.complete("brief", "s", "p") == "cli"
+
+
+def test_provider_for_falls_back_to_the_default_provider():
+    cfg = {"provider": "claude_cli", "task_routes": {"script": "openai", "bad": "nope"}}
+    assert llm.provider_for("script", cfg) == "openai"
+    assert llm.provider_for("brief", cfg) == "claude_cli"
+    assert llm.provider_for("bad", cfg) == "claude_cli"
+
+
+def test_narrative_mode_uses_its_own_rules_and_review_roles():
+    news_block = prompts.mode_block("news", "general")
+    narr_block = prompts.mode_block("narrative", "adult")
+    assert news_block == prompts.ANTI_HALLUCINATION
+    assert narr_block == prompts.NARRATIVE_RULES
+    assert "自洽" in narr_block
+    assert set(prompts.critic_roles("narrative")) == {"boundary", "coherence", "tension", "ai_voice"}
+    assert set(prompts.critic_roles("news")) == {"fact", "audience", "pacing", "ai_voice"}
+
+
+def test_narrative_script_prompt_carries_the_rating_note(data):
+    ep = {"id": "e", "topic": "故事", "format": "short", "style_id": None,
+          "mode": "narrative", "rating": "adult", "characters": []}
+    sys, _ = prompts.script(ep, {"id": "A"}, "")
+    assert prompts.NARRATIVE_RULES in sys
+    assert prompts.ANTI_HALLUCINATION not in sys
+    assert "成人" in sys
+
+
+def test_news_script_prompt_is_unchanged_by_the_rating_work(data):
+    ep = {"id": "e", "topic": "新聞", "format": "short", "style_id": None,
+          "mode": "news", "rating": "general", "characters": []}
+    sys, _ = prompts.script(ep, {"id": "A"}, "")
+    assert prompts.ANTI_HALLUCINATION in sys
+    assert prompts.NARRATIVE_RULES not in sys
+
+
+# ---------- criterion 4: characters and image controls ----------
+
+def test_a_character_without_an_adult_attestation_is_rejected(data):
+    card = characters.save({"name": "無宣告", "description": "tall"})
+    assert card["adult_attested"] is False
+    assert characters.card_problem(card, "general") == ""
+    assert "成年宣告" in characters.card_problem(card, "adult")
+    ok, bad = characters.usable_cards([card["id"]], "adult")
+    assert ok == [] and len(bad) == 1
+
+
+def test_a_real_person_photo_without_a_release_is_rejected(data):
+    card = characters.save({"name": "真人", "adult_attested": True,
+                             "ref_image": "/tmp/face.png", "model_release": ""})
+    assert "同意文件" in characters.card_problem(card, "adult")
+    released = characters.save({"name": "真人", "adult_attested": True,
+                                 "ref_image": "/tmp/face.png", "model_release": "consent.pdf"})
+    assert characters.card_problem(released, "adult") == ""
+
+
+def test_a_card_with_an_attestation_is_usable_at_a_restricted_rating(data):
+    card = characters.save({"name": "角色A", "adult_attested": True, "description": "same person"})
+    ok, bad = characters.usable_cards([card["id"]], "adult")
+    assert [c["id"] for c in ok] == [card["id"]] and bad == []
+
+
+def test_creating_a_restricted_episode_with_an_unattested_character_is_refused(data):
+    _raise_ceiling(data)
+    card = characters.save({"name": "無宣告", "description": "x"})
+    with pytest.raises(ValueError) as e:
+        store.new_episode("測試題目", "short", mode="narrative", rating="adult",
+                          characters=[card["id"]])
+    assert "成年宣告" in str(e.value)
+    # a general episode may still use the same card
+    ep = store.new_episode("測試題目", "short", characters=[card["id"]])
+    assert ep["characters"] == [card["id"]]
+
+
+def test_a_restricted_episode_with_a_real_person_photo_is_refused(data):
+    _raise_ceiling(data)
+    card = characters.save({"name": "真人", "adult_attested": True,
+                             "ref_image": "/tmp/face.png", "model_release": ""})
+    with pytest.raises(ValueError) as e:
+        store.new_episode("測試題目", "short", mode="narrative", rating="adult",
+                          characters=[card["id"]])
+    assert "同意文件" in str(e.value)
+
+
+def test_the_same_character_gets_the_same_description_and_seed_in_every_scene(data):
+    card = characters.save({"name": "角色A", "adult_attested": True,
+                             "description": "a woman with short black hair", "seed_base": 4242})
+    scene_a = {"characters": ["角色A"]}
+    scene_b = {"characters": ["角色A"]}
+    cards_a = characters.scene_cards(scene_a, [card])
+    cards_b = characters.scene_cards(scene_b, [card])
+    assert characters.prompt_fragments(cards_a) == characters.prompt_fragments(cards_b)
+    assert "short black hair" in characters.prompt_fragments(cards_a)
+    # the character's own offset is stable; only the scene index moves the seed
+    off = characters.seed_offset(card)
+    assert off == 4242
+    assert characters.scene_seed(1000, 7, 0, cards_a) - characters.scene_seed(1000, 7, 1, cards_a) == -1
+    assert characters.scene_seed(1000, 7, 0, cards_a) == 1000 + 7 + 0 + off
+
+
+def test_a_scene_that_names_nobody_shows_nobody(data):
+    card = characters.save({"name": "角色A", "adult_attested": True, "description": "x"})
+    assert characters.scene_cards({"characters": []}, [card]) == []
+    assert characters.scene_cards({}, [card]) == []
+    assert characters.scene_cards({"characters": ["角色A"]}, [card]) == [card]
+
+
+def test_the_negative_prompt_becomes_a_real_negative_condition(data):
+    def set_negative(v):
+        s = store.get_settings()
+        store.save_settings({**s, "visuals": {**s["visuals"], "negative": v}})
+
+    set_negative("")
+    without = comfy._graph("a prompt", 512, 512, 1)
+    assert without["5"]["class_type"] == "ConditioningZeroOut"
+    set_negative("blurry, extra fingers")
+    with_neg = comfy._graph("a prompt", 512, 512, 1)
+    assert with_neg["5"]["class_type"] == "CLIPTextEncode"
+    assert with_neg["5"]["inputs"]["text"] == "blurry, extra fingers"
+    assert with_neg["7"]["inputs"]["negative"] == ["5", 0]
+    # the only difference between the two graphs is the negative conditioning
+    diff = {k for k in set(without) | set(with_neg) if without.get(k) != with_neg.get(k)}
+    assert diff == {"5"}
+
+
+def test_per_call_settings_override_the_global_ones(data):
+    s = store.get_settings()
+    store.save_settings({**s, "visuals": {**s["visuals"], "unet": "global.safetensors"}})
+    assert comfy.cfg()["unet"] == "global.safetensors"
+    with comfy.using({"unet": "per_call.safetensors"}):
+        assert comfy.cfg()["unet"] == "per_call.safetensors"
+        graph = comfy._graph("p", 512, 512, 1)
+        assert graph["1"]["inputs"]["unet_name"] == "per_call.safetensors"
+    assert comfy.cfg()["unet"] == "global.safetensors"
+
+
+# ---------- criterion 5: the restricted publish package and the audit trail ----------
+
+def test_a_restricted_publish_package_has_no_carousel_fb_post_or_shorts_captions(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode(client, "受限發布包測試")
+    ep = _run_to_done(client, eid, rating="adult")
+    pub = Path(ep["published_dir"])
+    assert (pub / "video.mp4").is_file()
+    assert (pub / "subtitles.srt").is_file()
+    assert (pub / "thumbnail.jpg").is_file()
+    assert (pub / "metadata.json").is_file()
+    assert (pub / "CHECKLIST.md").is_file()
+    assert not (pub / "shorts").exists()
+    assert not (pub / "shorts" / "caption_tiktok.txt").exists()
+    assert not (pub / "shorts" / "caption_instagram.txt").exists()
+    assert not list(pub.glob("card_*.jpg"))
+    meta = json.loads((pub / "metadata.json").read_text("utf-8"))
+    assert meta["contentRating"] == "adult"
+    assert meta["ai_generated"] is True
+    assert meta["ai_disclosure"]
+    assert "fb_post" not in meta
+    checklist = (pub / "CHECKLIST.md").read_text("utf-8")
+    assert "不支援自動上傳" in checklist
+
+
+def test_a_general_publish_package_is_unchanged(offline, fakes):
+    client = offline
+    r = client.post("/api/episodes", json={"topic": "一般發布包測試", "format": "short"})
+    eid = r.json()["id"]
+    ep = _run_to_done(client, eid)
+    assert ep["status"] == "done"
+    pub = Path(ep["published_dir"])
+    assert (pub / "shorts" / "caption_tiktok.txt").is_file()
+    assert (pub / "shorts" / "caption_instagram.txt").is_file()
+    meta = json.loads((pub / "metadata.json").read_text("utf-8"))
+    assert "contentRating" not in meta
+    assert not (pub / "CHECKLIST.md").exists()
+
+
+def test_approving_a_restricted_episode_needs_a_matching_rating_confirmation(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode(client, "分級確認測試")
+    _run_to_approval(client, eid)
+    bad = client.post(f"/api/episodes/{eid}/approve", json={"confirm_rating": "general"})
+    assert bad.status_code == 400
+    assert "分級確認" in bad.json()["detail"]
+    good = client.post(f"/api/episodes/{eid}/approve", json={"confirm_rating": "adult"})
+    assert good.status_code == 200, good.text
+    ep = store.get_episode(eid)
+    approvals = ep.get("approvals") or []
+    assert any(a.get("rating") == "adult" and a.get("confirm_rating") == "adult" for a in approvals)
+
+
+def test_a_general_episode_needs_no_rating_confirmation(offline, fakes):
+    client = offline
+    r = client.post("/api/episodes", json={"topic": "一般核准測試", "format": "short"})
+    eid = r.json()["id"]
+    ep = _run_to_done(client, eid)
+    assert ep["status"] == "done"
+
+
+def test_the_manifest_records_models_characters_seeds_and_prompt_hashes(offline, ceiling, fakes, monkeypatch):
+    client = offline
+    # the shared fake's health probe takes no timeout, so ComfyUI reads as unavailable; make it usable here
+    monkeypatch.setattr(comfy, "health", lambda timeout=4: {"ok": True, "detail": "ComfyUI 就緒（fake）"})
+    sources._cache.clear()      # probe results are cached for 30 s; drop what an earlier test cached
+    set_settings(client, visuals={"source": "comfy"})
+    card = characters.save({"name": "角色A", "adult_attested": True,
+                             "description": "same person", "seed_base": 777})
+    r = client.post("/api/episodes", json={"topic": "稽核軌跡測試", "format": "short",
+                                            "mode": "narrative", "rating": "adult",
+                                            "characters": [card["id"]]})
+    eid = r.json()["id"]
+    ep = _run_to_done(client, eid, rating="adult")
+    manifest = store.read_json(eid, "assets/manifest.json")
+    assert manifest["rating"] == "adult"
+    assert manifest["characters"] and manifest["characters"][0]["id"] == card["id"]
+    assert manifest["characters"][0]["seed_base"] == 777
+    assert manifest["models"], "manifest must record which models made the pictures"
+    assert manifest["scenes"]
+    for s in manifest["scenes"]:
+        assert "seed" in s and "prompt_sha256" in s
+
+
+# ---------- creative modes: no verification, free invention ----------
+
+def test_fiction_is_an_allowed_mode_with_its_own_rules(data):
+    assert "fiction" in store.MODES
+    assert set(prompts.critic_roles("fiction")) != set(prompts.critic_roles("news"))
+    assert prompts.mode_block("fiction") == prompts.FICTION_RULES
+    assert "不需要依據" in prompts.FICTION_RULES
+
+
+def test_creative_modes_skip_the_source_gate(data, monkeypatch):
+    """A fiction episode with no links must not stop to ask for sources."""
+    _raise_ceiling(data)
+    ep = store.new_episode("憑空編的故事", "short", mode="fiction", rating="adult", form="novel")
+    monkeypatch.setattr(pipeline, "wait", lambda *a, **k: (_ for _ in ()).throw(AssertionError("gated")))
+    monkeypatch.setattr(pipeline, "fetch_text", lambda url, limit=6000: "（不抓）")
+    assert pipeline.st_sources(store.get_episode(ep["id"])) is True
+    verdict = store.get_episode(ep["id"])["checks"]["sources"]
+    assert verdict["ok"] is True and verdict.get("creative") is True
+    assert "不查證" in verdict["value"]
+
+
+def test_news_still_gates_without_sources(data, monkeypatch):
+    """The default news path keeps its old behaviour: no material means a gate."""
+    ep = store.new_episode("沒有來源的新聞", "short")
+    calls = {}
+
+    def fake_wait(eid, what):
+        calls["gated"] = what
+
+    monkeypatch.setattr(pipeline, "wait", fake_wait)
+    monkeypatch.setattr(pipeline, "fetch_text", lambda url, limit=6000: "（不抓）")
+    assert pipeline.st_sources(store.get_episode(ep["id"])) is False
+    assert calls.get("gated") == "sources"
+
+
+def test_the_rating_note_reaches_the_fiction_script_prompt(data):
+    _raise_ceiling(data)
+    ep = store.new_episode("故事", "short", mode="fiction", rating="adult", form="novel")
+    sys, _ = prompts.script(ep, {"id": "A"}, "")
+    assert prompts.FICTION_RULES in sys
+    assert "成人" in sys
+    assert "未成年" in sys       # the hard line survives even in free-invention mode
+
+
+# ---------- content forms ----------
+
+def test_the_five_forms_round_trip_through_the_store(data):
+    for form in store.FORMS:
+        ep = store.new_episode(f"測試 {form}", "short", form=form)
+        assert ep["form"] == form
+        assert store.get_episode(ep["id"])["form"] == form
+
+
+def test_an_unknown_form_falls_back_to_video(data):
+    ep = store.new_episode("測試", "short", form="podcast")
+    assert ep["form"] == "video"
+    assert store.form_of({}) == "video"          # old episodes predate the field
+
+
+def test_each_form_declares_what_it_needs():
+    assert store.FORM_NEEDS["novel"] == {"voice": False, "visual": False}
+    assert store.FORM_NEEDS["video"] == {"voice": True, "visual": True}
+    assert store.FORM_NEEDS["audiobook"] == {"voice": True, "visual": False}
+    assert store.FORM_NEEDS["gallery"] == {"voice": False, "visual": True}
+
+
+def test_text_forms_get_their_own_review_roles():
+    video = set(prompts.critic_roles("fiction", "video"))
+    novel = set(prompts.critic_roles("fiction", "novel"))
+    audio = set(prompts.critic_roles("fiction", "audiobook"))
+    assert novel != video
+    assert "prose" in novel and "pull" in novel
+    assert "listenability" in audio
+    assert "listenability" not in novel
+
+
+def test_each_form_tells_the_model_what_the_finished_piece_is():
+    for form in store.FORMS:
+        block = prompts.form_block(form)
+        assert block and block != prompts.form_block("video") or form == "video"
+    assert "不要寫「畫面」" in prompts.form_block("novel")
+    assert "給耳朵聽" in prompts.form_block("audiobook")
+    assert "一張圖" in prompts.form_block("gallery")
+
+
+def test_a_novel_episode_produces_text_and_no_video(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode_form(client, "小說成品", form="novel")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    assert (out / "novel.txt").is_file()
+    assert (out / "manuscript.md").is_file()
+    assert not (out / "video.mp4").exists()
+    assert not (out / "subtitles.srt").exists()
+    verify = ep["files"]["verify"]
+    assert verify["checks"]["成品形態"]["ok"] is True
+    assert "不配音" in verify["checks"]["成品形態"]["value"]
+
+
+def test_an_audiobook_episode_produces_an_mp3_and_chapters(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode_form(client, "MP3 小說成品", form="audiobook")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    assert (out / "audiobook.mp3").is_file()
+    assert (out / "audiobook.mp3").stat().st_size > 0
+    assert (out / "chapters.json").is_file()
+    chapters = json.loads((out / "chapters.json").read_text("utf-8"))
+    assert chapters and all("start" in c for c in chapters)
+    assert not (out / "video.mp4").exists()
+
+
+def test_a_gallery_episode_produces_images_and_captions(offline, ceiling, fakes, monkeypatch):
+    client = offline
+    monkeypatch.setattr(comfy, "health", lambda timeout=4: {"ok": True, "detail": "fake"})
+    sources._cache.clear()
+    eid = _restricted_episode_form(client, "圖集成品", form="gallery")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    images = sorted(out.glob("image_*.jpg"))
+    assert images, "gallery must ship images"
+    assert (out / "captions.json").is_file()
+    caps = json.loads((out / "captions.json").read_text("utf-8"))
+    assert len(caps) == len(images)
+    assert all(c["caption"] for c in caps)
+    assert not (out / "video.mp4").exists()
+
+
+def test_a_talk_episode_produces_a_script_and_no_video(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode_form(client, "話題評論成品", form="talk")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    assert (out / "script.txt").is_file()
+    assert (out / "manuscript.md").is_file()
+    assert not (out / "video.mp4").exists()
+
+
+# ---------- NSFW style cards ----------
+
+def test_nsfw_style_cards_exist_with_a_rating_floor():
+    assert len(NSFW_PRESETS) >= 8
+    for card in NSFW_PRESETS:
+        assert card["rating_min"] in ("suggestive", "adult"), card["id"]
+        assert card["category"] in NSFW_CATEGORIES
+        assert card["avoid"], "every adult card must carry its hard lines"
+        assert any("未成年" in a for a in card["avoid"]), card["id"]
+        assert "未經同意" in " ".join(card["avoid"]) or card["rating_min"] == "suggestive", card["id"]
+
+
+def test_a_general_channel_never_sees_the_adult_cards(data):
+    """The cards are gated by the channel ceiling: not hidden, simply absent."""
+    assert store.get_channel()["max_rating"] == "general"
+    ids = {c["id"] for c in store.preset_styles()}
+    assert not any(i.startswith("nsfw-") for i in ids)
+    assert "情慾敘事" not in store.style_categories()
+    _raise_ceiling(data, "adult")
+    ids = {c["id"] for c in store.preset_styles()}
+    assert "nsfw-narr-slowburn" in ids
+    assert "情慾敘事" in store.style_categories()
+
+
+def test_nsfw_cards_survive_the_store_round_trip(data):
+    _raise_ceiling(data, "adult")
+    styles = store.get_styles()
+    card = next(c for c in styles["items"] if c["id"] == "nsfw-narr-slowburn")
+    assert card["nsfw"] is True
+    assert card["rating_min"] == "adult"
+    assert card["forms"]
+    general = next(c for c in styles["items"] if not c["id"].startswith("nsfw-"))
+    assert general["nsfw"] is False
+    assert general["rating_min"] == "general"
+
+
+def test_the_nsfw_categories_are_declared_separately():
+    for cat in ("情慾敘事", "感官描寫", "成人話題", "角色關係"):
+        assert cat in NSFW_CATEGORIES
+        assert cat not in store.STYLE_CATEGORIES       # general list stays untouched
+
+
+def test_meta_exposes_forms_and_nsfw_topics(client):
+    meta = client.get("/api/meta").json()
+    assert meta["forms"] == list(store.FORMS)
+    assert set(meta["critics_by_form"]) == set(store.FORMS)
+    assert meta["nsfw_topics"]
+    assert meta["form_label"]["novel"] == "小說／文字"
+
+
+# ---------- every NSFW deliverable format ----------
+
+def test_every_content_form_has_at_least_one_nsfw_card():
+    """A format with no card would leave the owner with no guidance for it."""
+    missing = [f for f in store.FORMS if not any(f in c["forms"] for c in NSFW_PRESETS)]
+    assert missing == [], f"這些形態沒有對應的 NSFW 風格卡：{missing}"
+
+
+def test_every_nsfw_card_only_names_real_forms():
+    for card in NSFW_PRESETS:
+        for f in card["forms"]:
+            assert f in store.FORMS, (card["id"], f)
+
+
+def test_every_form_has_its_own_prompt_rule_and_review_roles():
+    for form in store.FORMS:
+        assert form in prompts.FORM_RULES, f"{form} 沒有提示詞規則"
+        assert prompts.form_block(form).strip()
+        roles = prompts.critic_roles("fiction", form)
+        assert roles, form
+
+
+def test_the_forms_cover_the_shapes_adult_content_takes():
+    """Text, voice, image, screen and stage: the vocabulary has to reach all of them."""
+    for f in ("novel", "serial", "poem", "chat", "script", "comic", "guide",
+              "audiobook", "radio_drama", "asmr", "gallery", "video", "talk"):
+        assert f in store.FORMS, f
+
+
+def test_text_forms_each_write_their_own_layout():
+    blocks = [{"headline": "第一章", "body": "A：你睡了嗎\nB：還沒\nA：那就好"}]
+    for form, marker in (("chat", "A：你睡了嗎"), ("poem", "A：你睡了嗎"),
+                         ("comic", "第 1 格："), ("script", "內景／外景")):
+        rendered = pipeline._RENDERERS[store.form_layout(form)](blocks)
+        assert marker in rendered, (form, rendered)
+    assert "第 1 格：" in pipeline._RENDERERS["panels"](blocks)
+    assert "內景／外景" in pipeline._RENDERERS["screenplay"](blocks)
+    # prose and chapters stay prose
+    assert pipeline._RENDERERS["prose"](blocks) == pipeline._RENDERERS["chapters"](blocks)
+
+
+def test_each_text_form_ships_a_named_file():
+    for form in pipeline.TEXT_FORMS:
+        assert form in pipeline.TEXT_TARGET, form
+        assert pipeline._form_outputs(form), form
+    assert pipeline.TEXT_TARGET["script"] == "screenplay.txt"
+    assert pipeline.TEXT_TARGET["comic"] == "comic_script.txt"
+    assert "radio_drama.mp3" in pipeline._form_outputs("radio_drama")
+    assert "asmr.mp3" in pipeline._form_outputs("asmr")
+
+
+def test_a_serial_episode_ships_chapters_not_a_film(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode_form(client, "連載成品", form="serial")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    assert (out / "serial.txt").is_file()
+    assert (out / "manuscript.md").is_file()
+    assert not (out / "video.mp4").exists()
+
+
+def test_a_chat_episode_ships_the_message_log(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode_form(client, "訊息體成品", form="chat")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    assert (out / "chat.txt").is_file()
+    assert not (out / "video.mp4").exists()
+
+
+def test_a_comic_episode_ships_a_panel_script(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode_form(client, "漫畫腳本成品", form="comic")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    assert (out / "comic_script.txt").is_file()
+    assert not (out / "video.mp4").exists()
+
+
+def test_an_asmr_episode_ships_an_audio_track(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode_form(client, "耳語音檔成品", form="asmr")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    assert (out / "asmr.mp3").is_file()
+    assert (out / "asmr.mp3").stat().st_size > 0
+    assert (out / "asmr_script.txt").is_file()
+    assert not (out / "video.mp4").exists()
+
+
+# ---------- pre-filling the new-episode dialog from the topic ----------
+
+def test_the_rules_guess_every_setting_from_the_topic(data):
+    _raise_ceiling(data)
+    s = suggest.suggest("情慾小說：深夜的公寓")
+    assert s["mode"] == "fiction"
+    assert s["rating"] == "adult"
+    assert s["form"] == "novel"
+    assert s["style_id"].startswith("nsfw-")
+    assert s["by"] == "rules"
+    assert s["reasons"], "a guess must be able to explain itself"
+
+
+def test_a_news_topic_stays_news_and_general(data):
+    s = suggest.suggest("黃仁勳回應 AI 泡沫")
+    assert s["mode"] == "news"
+    assert s["rating"] == "general"
+    assert s["form"] == "video"
+    assert not s["style_id"].startswith("nsfw-"), "a general topic must not get an adult card"
+
+
+def test_a_poem_topic_picks_the_poem_form_and_a_narrative_mode(data):
+    s = suggest.suggest("寫一首關於離別的詩")
+    assert s["form"] == "poem"
+    assert s["mode"] == "fiction"
+
+
+def test_the_guess_marks_what_the_ceiling_forbids(data):
+    """The rating says what the topic is; `allowed` says whether it may be created."""
+    assert store.get_channel()["max_rating"] == "general"
+    s = suggest.suggest("情慾小說：深夜的公寓")
+    assert s["rating"] == "adult", "判斷要如實反映題目"
+    assert s["allowed"] is False, "但一般頻道不能建"
+    assert not s["style_id"].startswith("nsfw-"), "不能配成人風格卡"
+
+
+def test_urls_already_in_the_topic_are_pre_filled(data):
+    s = suggest.suggest("看這篇 https://example.com/a 和 https://example.com/b 的說法")
+    assert "https://example.com/a" in s["source_urls"]
+    assert "https://example.com/b" in s["source_urls"]
+
+
+def test_known_urls_are_kept_and_merged_with_the_topic_ones(data):
+    s = suggest.suggest("看這篇 https://example.com/a", urls=["https://example.com/b"])
+    assert s["source_urls"][0] == "https://example.com/b"     # caller's links come first
+    assert "https://example.com/a" in s["source_urls"]
+
+
+def test_an_idea_format_wins_over_the_guessed_one(data):
+    s = suggest.suggest("黃仁勳回應 AI 泡沫", idea_format="long")
+    assert s["format"] == "long"
+
+
+def test_the_guess_only_offers_settings_the_api_would_accept(data):
+    _raise_ceiling(data)
+    for topic in ("情慾小說：深夜的公寓", "寫一首離別的詩", "Google 發布 Gemini", "漫畫：夏天"):
+        s = suggest.suggest(topic)
+        assert s["mode"] in store.MODES
+        assert s["rating"] in store.RATINGS
+        assert s["form"] in store.FORMS
+        assert s["format"] in ("short", "long")
+        # the same combination the create API validates
+        assert store.rating_conflict(s["mode"], s["rating"]) is None, topic
+
+
+def test_the_suggest_endpoint_answers_with_a_full_pre_fill(client, ceiling):
+    r = client.get("/api/suggest", params={"topic": "情慾小說：深夜的公寓"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"] == "fiction" and body["rating"] == "adult"
+    assert body["form"] == "novel"
+    assert isinstance(body["source_urls"], list)
+    assert body["reasons"]
+
+
+def test_the_suggest_endpoint_reads_the_idea_it_was_given(client, ceiling):
+    idea = client.post("/api/ideas", json={"title": "情慾小說：雨夜的旅館",
+                                            "urls": ["https://example.com/ref"],
+                                            "kind": "note"}).json()
+    r = client.get("/api/suggest", params={"idea_id": idea["id"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert "旅館" in body["topic"]
+    assert "https://example.com/ref" in body["source_urls"]
+    assert body["form"] == "novel"
+
+
+# ---------- regressions: the card list must not collapse to one entry ----------
+
+def test_a_general_card_stored_with_a_stale_form_list_is_repaired(data):
+    """A shipped preset gains/clears fields over time; the stored copy must follow."""
+    import json
+    _raise_ceiling(data, "adult")
+    store.get_styles()
+    path = data / "styles.json"
+    raw = json.loads(path.read_text("utf-8"))
+    for c in raw["items"]:
+        if c["id"] in ("preset-tech-decode", "nsfw-narr-slowburn"):
+            c["forms"] = ["video"]        # the value an older build wrote
+    path.write_text(json.dumps(raw, ensure_ascii=False), "utf-8")
+    by_id = {c["id"]: c for c in store.get_styles()["items"]}
+    assert by_id["preset-tech-decode"]["forms"] == []      # general card: every form
+    assert "novel" in by_id["nsfw-narr-slowburn"]["forms"]  # adult card: its shipped list
+
+
+def test_a_general_card_works_for_every_form(data):
+    for c in store.get_styles()["items"]:
+        if not c.get("nsfw"):
+            assert c["forms"] == [], f"{c['id']} 應該適用全部形態"
+
+
+def test_the_guide_form_still_offers_many_cards(data):
+    _raise_ceiling(data, "adult")
+    styles = store.get_styles()["items"]
+    ok = [c for c in styles if (not c.get("forms") or "guide" in c["forms"])]
+    assert len(ok) > 10, "只有一張卡代表 forms 過濾壞了"
+
+
+def test_an_idiom_about_desire_is_judged_suggestive(data):
+    _raise_ceiling(data, "adult")
+    s = suggest.suggest("女人30如狼、40如虎，男人該如何面對")
+    assert s["rating"] == "suggestive"
+    assert s["mode"] in ("fiction", "narrative"), "受限分級不能留在新聞模式"
+    assert s["style_id"].startswith("nsfw-"), "暗示題材應該拿到成人向的卡"
+
+
+def test_a_neutral_topic_is_not_pulled_into_a_rated_one(data):
+    s = suggest.suggest("黃仁勳回應 AI 泡沫")
+    assert s["rating"] == "general"
+    assert s["mode"] == "news"
+    assert not s["style_id"].startswith("nsfw-")
+
+
+# ---------- the NSFW switch ----------
+
+def test_the_switch_is_off_by_default_in_a_fresh_data_dir(data):
+    assert store.nsfw_enabled() is False
+
+
+def test_the_switch_is_a_file_so_it_can_be_forced_closed(data, monkeypatch):
+    store.set_nsfw(True)
+    assert store.nsfw_enabled() is True
+    monkeypatch.setenv("CF_NSFW", "0")
+    assert store.nsfw_enabled() is False, "the environment must win over the file"
+
+
+def test_a_restricted_episode_disappears_from_the_list_when_the_switch_is_off(data):
+    _raise_ceiling(data)
+    plain = store.new_episode("一般", "short")
+    adult = store.new_episode("成人", "short", mode="fiction", rating="adult")
+    assert {e["id"] for e in store.list_episodes()} == {plain["id"], adult["id"]}
+    store.set_nsfw(False)
+    assert {e["id"] for e in store.list_episodes()} == {plain["id"]}
+
+
+def test_visible_episode_hides_the_restricted_one_but_get_episode_still_works(data):
+    _raise_ceiling(data)
+    adult = store.new_episode("成人", "short", mode="fiction", rating="adult")
+    store.set_nsfw(False)
+    assert store.visible_episode(adult["id"]) is None
+    # the worker must still be able to read and resume the record
+    assert store.get_episode(adult["id"])["id"] == adult["id"]
+
+
+def test_the_episode_api_returns_404_for_a_hidden_episode(client, ceiling):
+    eid = _restricted_episode(client, "隱藏測試")
+    store.set_nsfw(False)
+    assert client.get(f"/api/episodes/{eid}").status_code == 404
+    assert eid not in {e["id"] for e in client.get("/api/episodes").json()}
+
+
+def test_the_file_route_does_not_serve_a_hidden_episode(client, ceiling):
+    """Knowing the path must not be enough: this was an open hole."""
+    eid = _restricted_episode(client, "檔案直連測試")
+    path = f"/files/episodes/{eid}/episode.json"
+    assert client.get(path).status_code == 200
+    store.set_nsfw(False)
+    assert client.get(path).status_code == 404
+    # and a general episode is unaffected
+    r = client.post("/api/episodes", json={"topic": "一般檔案", "format": "short"})
+    gid = r.json()["id"]
+    assert client.get(f"/files/episodes/{gid}/episode.json").status_code == 200
+
+
+def test_the_switch_hides_adult_style_cards(client, ceiling):
+    on = client.get("/api/styles").json()["items"]
+    assert any(c.get("nsfw") for c in on)
+    store.set_nsfw(False)
+    off = client.get("/api/styles").json()["items"]
+    assert not any(c.get("nsfw") for c in off), "成人風格卡必須消失，不只是隱藏"
+
+
+def test_the_switch_api_reports_and_flips(client, ceiling):
+    assert client.get("/api/nsfw").json()["enabled"] is True
+    assert client.put("/api/nsfw", json={"enabled": False}).json()["enabled"] is False
+    assert client.get("/api/nsfw").json()["enabled"] is False
+    assert client.put("/api/nsfw", json={"enabled": True}).json()["enabled"] is True
+
+
+def test_the_switch_api_refuses_to_open_when_the_env_forbids_it(client, ceiling, monkeypatch):
+    monkeypatch.setenv("CF_NSFW", "0")
+    r = client.put("/api/nsfw", json={"enabled": True})
+    assert r.status_code == 409
+    assert "CF_NSFW" in r.json()["detail"]
+
+
+def test_the_switch_caps_the_effective_rating_everywhere(data):
+    store.save_channel({**store.get_channel(), "max_rating": "adult"})
+    store.set_nsfw(True)
+    assert store.effective_max_rating() == "adult"
+    store.set_nsfw(False)
+    assert store.effective_max_rating() == "general", "開關關閉時上限必須降到一般"
+
+
+def test_creating_a_restricted_episode_with_the_switch_off_is_refused(data):
+    store.save_channel({**store.get_channel(), "max_rating": "adult"})
+    store.set_nsfw(False)
+    with pytest.raises(ValueError) as e:
+        store.new_episode("成人題目", "short", mode="fiction", rating="adult")
+    assert "NSFW" in str(e.value), "訊息要指向開關，不是頻道設定"
+
+
+def test_the_suggestion_reports_the_rating_and_whether_it_may_be_created(data):
+    store.save_channel({**store.get_channel(), "max_rating": "adult"})
+    store.set_nsfw(False)
+    off = suggest.suggest("情慾小說：深夜")
+    assert off["rating"] == "adult", "判斷要如實反映題目"
+    assert off["allowed"] is False, "但開關關閉時不能建立"
+    store.set_nsfw(True)
+    on = suggest.suggest("情慾小說：深夜")
+    assert on["rating"] == "adult" and on["allowed"] is True
+
+
+def test_meta_reports_the_capped_ceiling(client, ceiling):
+    assert client.get("/api/meta").json()["max_rating"] == "adult"
+    store.set_nsfw(False)
+    assert client.get("/api/meta").json()["max_rating"] == "general"
+
+
+def test_the_switch_state_api_says_when_it_is_forced(client, ceiling, monkeypatch):
+    assert client.get("/api/nsfw").json()["forced_off"] is False
+    monkeypatch.setenv("CF_NSFW", "0")
+    body = client.get("/api/nsfw").json()
+    assert body["enabled"] is False and body["forced_off"] is True
+
+
+def test_the_header_carries_the_one_click_switch():
+    """The control must exist in the served shell, not only in the settings modal."""
+    html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text("utf-8")
+    assert 'id="nsfw-switch"' in html
+    assert 'id="nsfw-switch-label"' in html
+    app_js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text("utf-8")
+    # it must talk to the API and re-render, not just flip a checkbox
+    assert '/api/nsfw' in app_js
+    assert 'method: "PUT"' in app_js
+    assert "await route()" in app_js
+
+
+# ---------- the switch reaches the prompt layer ----------
+
+def test_an_adult_taste_rule_never_reaches_the_prompt_when_off(data):
+    _raise_ceiling(data)
+    store.add_pref("講稿語氣", "成人場景要寫感官細節", nsfw=True)
+    store.add_pref("講稿語氣", "開頭三秒要有鉤子")
+    on = store.prefs_text()
+    assert "感官細節" in on and "鉤子" in on
+    store.set_nsfw(False)
+    off = store.prefs_text()
+    assert "感官細節" not in off, "關閉後成人規則不能出現在提示詞裡"
+    assert "鉤子" in off, "一般規則要留著"
+
+
+def test_an_adult_style_card_is_not_described_to_the_model_when_off(data):
+    _raise_ceiling(data)
+    assert "慢熱情慾敘事" in store.style_block("nsfw-narr-slowburn")
+    store.set_nsfw(False)
+    assert store.style_block("nsfw-narr-slowburn") == "（無）"
+
+
+def test_base_system_carries_nothing_restricted_when_off(data):
+    _raise_ceiling(data)
+    store.add_pref("講稿語氣", "成人場景要寫感官細節", nsfw=True)
+    sys_on = prompts.base_system("nsfw-narr-slowburn")
+    assert "慢熱情慾敘事" in sys_on and "感官細節" in sys_on
+    store.set_nsfw(False)
+    sys_off = prompts.base_system("nsfw-narr-slowburn")
+    assert "慢熱情慾敘事" not in sys_off
+    assert "感官細節" not in sys_off
+
+
+def test_the_channel_block_never_carries_restricted_settings(data):
+    """The channel block is part of every prompt, so it must stay free of adult settings."""
+    store.save_channel({**store.get_channel(), "max_rating": "adult", "taboo": ""})
+    for on in (True, False):
+        store.set_nsfw(on)
+        block = prompts.channel_block()
+        assert "adult" not in block and "NSFW" not in block
+
+
+# ---------- pausing instead of erroring ----------
+
+def test_a_restricted_episode_pauses_instead_of_running_when_off(data):
+    _raise_ceiling(data)
+    ep = store.new_episode("成人測試", "short", mode="fiction", rating="adult")
+    store.set_nsfw(False)
+    pipeline.run_episode(ep["id"])
+    got = store.get_episode(ep["id"])
+    assert got["status"] == "paused"
+    assert got.get("nsfw_paused") is True
+    assert got["stage"] == "sources", "暫停要留在原地，不能往下跑"
+
+
+def test_a_general_episode_is_not_paused_when_off(data):
+    _raise_ceiling(data)
+    ep = store.new_episode("一般測試", "short")
+    store.set_nsfw(False)
+    assert pipeline._paused_by_nsfw(store.get_episode(ep["id"])) is False
+
+
+def test_resuming_requeues_the_paused_episode(data, monkeypatch):
+    _raise_ceiling(data)
+    ep = store.new_episode("成人測試", "short", mode="fiction", rating="adult")
+    store.set_nsfw(False)
+    pipeline.run_episode(ep["id"])
+    assert store.get_episode(ep["id"])["status"] == "paused"
+    queued = []
+    monkeypatch.setattr(pipeline, "enqueue", lambda kind, *a: queued.append((kind, a)))
+    store.set_nsfw(True)
+    n = pipeline.resume_paused()
+    assert n == 1
+    assert queued and queued[0][0] == "episode"
+    assert store.get_episode(ep["id"])["nsfw_paused"] is False
+
+
+def test_flipping_the_switch_resumes_through_the_api(client, ceiling, monkeypatch):
+    eid = _restricted_episode(client, "暫停測試")
+    queued = []
+    monkeypatch.setattr(pipeline, "enqueue", lambda kind, *a: queued.append((kind, a)))
+    # close it first, then park the episode the way the worker would have
+    client.put("/api/nsfw", json={"enabled": False})
+    store.update_episode(eid, status="paused", nsfw_paused=True)
+    body = client.put("/api/nsfw", json={"enabled": True}).json()
+    assert body["enabled"] is True
+    # the live worker may grab the job the instant it is queued, so assert the outcome rather than
+    # the count: the episode must no longer be paused, and its flag must be cleared
+    after = store.get_episode(eid)
+    assert after["status"] != "paused", "打開開關後不該還停在暫停"
+    assert after.get("nsfw_paused") is False
+    assert body["resumed"] >= 0
+
+
+# ---------- the search path must not carry restricted text off the machine ----------
+
+def test_a_restricted_episode_does_not_search_when_the_switch_is_off(data):
+    _raise_ceiling(data)
+    ep = {"topic": "成人小說：雨夜的旅館", "rating": "adult", "mode": "fiction"}
+    store.set_nsfw(False)
+    out = websearch.search(ep)
+    assert out["results"] == [] and out["engine"] == ""
+    assert out["errors"] and "不對外搜尋" in out["errors"][0]
+
+
+def test_the_claude_engine_refuses_to_send_explicit_text(data, monkeypatch):
+    """A general episode whose notes quote explicit material must not reach the cloud either."""
+    _raise_ceiling(data)
+    store.set_nsfw(False)
+    sent = []
+    monkeypatch.setattr(websearch.llm, "claude_web_search",
+                        lambda sys, prompt, **kw: sent.append(prompt) or {"urls": []})
+    ep = {"topic": "一般題目", "rating": "general", "notes": "參考了一段情色小說的寫法"}
+    with pytest.raises(websearch.SearchError) as e:
+        websearch._claude(ep, [], [], 3)
+    assert "阻止送出" in str(e.value)
+    assert sent == [], "內容不能真的送出去"
+
+
+def test_a_clean_general_episode_still_searches(data, monkeypatch):
+    _raise_ceiling(data)
+    store.set_nsfw(False)
+    sent = []
+    monkeypatch.setattr(websearch.llm, "claude_web_search",
+                        lambda sys, prompt, **kw: sent.append(prompt) or {"urls": [{"url": "https://example.com/a"}]})
+    ep = {"topic": "黃仁勳回應 AI 泡沫", "rating": "general", "notes": ""}
+    got = websearch._claude(ep, [], [], 3)
+    assert sent and got[0]["url"] == "https://example.com/a"
+
+
+def test_the_marker_helper_is_case_insensitive_and_specific():
+    assert store.nsfw_marker("這是 NSFW 的內容") == "NSFW"
+    assert store.nsfw_marker("限制級電影") == "限制級"
+    assert store.nsfw_marker("黃仁勳回應 AI 泡沫") == ""
+    assert store.nsfw_marker("") == ""
+
+
+# ---------- the dialog's timeout must not leak into the episode's ----------
+
+def test_the_suggest_timeout_defaults_to_three_minutes(data):
+    assert suggest.suggest_timeout() == 180.0
+
+
+def test_the_suggest_timeout_is_configurable_and_independent(data):
+    s = store.get_settings()
+    store.save_settings({**s, "llm": {**s["llm"], "timeout_s": 3600, "suggest_timeout_s": 90}})
+    assert suggest.suggest_timeout() == 90
+    # the episode ceiling must not cap it, and it must not cap the episode
+    s = store.get_settings()
+    store.save_settings({**s, "llm": {**s["llm"], "timeout_s": 30, "suggest_timeout_s": 240}})
+    assert suggest.suggest_timeout() == 240
+
+
+def test_refining_does_not_rewrite_the_global_timeout(data, monkeypatch):
+    """Regression: the dialog used to shrink llm.timeout_s while it ran, so a concurrent
+    episode inherited 45 s and failed with "waited 45 seconds"."""
+    s = store.get_settings()
+    store.save_settings({**s, "llm": {**s["llm"], "timeout_s": 3600, "suggest_timeout_s": 180}})
+    seen = []
+
+    def spy(task, system, prompt, timeout=None):
+        seen.append(timeout)
+        # while the dialog call is in flight, an episode's call must still read 3600
+        seen.append(llm.timeout_for("script"))
+        return {"format": "short", "mode": "news", "rating": "general", "form": "video"}
+
+    monkeypatch.setattr(llm, "complete_json", spy)
+    suggest.refine("測試題目", "")
+    assert seen[0] == 180.0, "對話框要用自己的上限"
+    assert seen[1] == 3600.0, "同時進行的製作不能繼承對話框的短上限"
+    assert store.get_settings()["llm"]["timeout_s"] == 3600
+
+
+def test_complete_takes_an_explicit_timeout(monkeypatch):
+    seen = {}
+
+    def fake_openai(system, prompt, cfg, timeout=None):
+        seen["t"] = timeout
+        return "ok"
+
+    monkeypatch.setattr(llm, "_openai", fake_openai)
+    s = store.get_settings()
+    store.save_settings({**s, "llm": {**s["llm"], "provider": "openai", "timeout_s": 3600}})
+    llm.complete("script", "sys", "prompt", timeout=120)
+    assert seen["t"] == 120
+    llm.complete("script", "sys", "prompt")
+    assert seen["t"] == 3600
+
+
+def test_the_settings_modal_offers_both_timeouts():
+    js = (Path(__file__).resolve().parent.parent / "static" / "modals.js").read_text("utf-8")
+    assert 'id="s-timeout_s"' in js
+    assert 'id="s-suggest_timeout_s"' in js
+    assert "s.llm.suggest_timeout_s" in js
+
+
+# ---------- the ideas page respects the switch too ----------
+
+def test_an_idea_carries_a_rating(data):
+    adult = store.add_idea({"title": "情慾小說：雨夜的旅館", "kind": "note"})
+    plain = store.add_idea({"title": "黃仁勳回應 AI 泡沫", "kind": "note"})
+    assert adult["rating"] == "adult"
+    assert plain["rating"] == "general"
+
+
+def test_the_rating_judgement_is_not_capped_by_the_channel_ceiling(data):
+    """The ceiling decides what may be created, not what a topic is.
+
+    Conflating the two meant an adult idea was filed as general on a general channel, and the
+    switch then had nothing to hide.
+    """
+    assert store.get_channel()["max_rating"] == "general"
+    rating, _ = suggest.judge_rating("情慾小說：雨夜的旅館", "")
+    assert rating == "adult"
+    out = suggest.suggest("情慾小說：雨夜的旅館")
+    assert out["rating"] == "adult"
+    assert out["allowed"] is False, "一般頻道不能建，但題目本身仍是成人"
+
+
+def test_restricted_ideas_disappear_when_the_switch_is_off(data):
+    store.add_idea({"title": "情慾小說：雨夜的旅館", "kind": "note"})
+    store.add_idea({"title": "黃仁勳回應 AI 泡沫", "kind": "note"})
+    store.set_nsfw(True)
+    assert len(store.list_ideas()) == 2
+    store.set_nsfw(False)
+    titles = [i["title"] for i in store.list_ideas()]
+    assert "黃仁勳回應 AI 泡沫" in titles
+    assert "情慾小說：雨夜的旅館" not in titles
+
+
+def test_hidden_ideas_survive_a_write_while_the_switch_is_off(data):
+    """Regression: the write paths read the visible list, so saving would delete the hidden
+    ideas for good."""
+    store.set_nsfw(True)
+    store.add_idea({"title": "情慾小說：雨夜的旅館", "kind": "note"})
+    store.set_nsfw(False)
+    store.add_idea({"title": "新的普通靈感", "kind": "note"})
+    store.set_nsfw(True)
+    titles = [i["title"] for i in store.list_ideas()]
+    assert "情慾小說：雨夜的旅館" in titles, "關閉時新增的東西不能把藏起來的刪掉"
+    assert "新的普通靈感" in titles
+
+
+def test_deleting_an_idea_while_hidden_does_not_delete_the_others(data):
+    store.set_nsfw(True)
+    hidden = store.add_idea({"title": "情慾小說：雨夜的旅館", "kind": "note"})
+    store.add_idea({"title": "黃仁勳回應 AI 泡沫", "kind": "note"})
+    store.set_nsfw(False)
+    store.delete_idea(hidden["id"])       # deleting a hidden idea is still allowed
+    store.set_nsfw(True)
+    assert [i["title"] for i in store.list_ideas()] == ["黃仁勳回應 AI 泡沫"]
+
+
+def test_the_ideas_api_hides_restricted_ideas(client, ceiling):
+    client.post("/api/ideas", json={"title": "開關測試用的情慾小說", "kind": "note"})
+    client.post("/api/ideas", json={"title": "開關測試用的一般靈感", "kind": "note"})
+    store.set_nsfw(True)
+    on = {i["title"] for i in client.get("/api/ideas").json()}
+    assert "開關測試用的情慾小說" in on and "開關測試用的一般靈感" in on
+    store.set_nsfw(False)
+    off = {i["title"] for i in client.get("/api/ideas").json()}
+    assert "開關測試用的一般靈感" in off
+    assert "開關測試用的情慾小說" not in off
+
+
+def test_a_scanned_topic_gets_a_rating(data):
+    store.set_nsfw(True)
+    pipeline.add_radar_cards([{"title": "黃仁勳回應 AI 泡沫"}, {"title": "情慾小說：深夜的旅館"}])
+    by_title = {i["title"]: i["rating"] for i in store.list_ideas()}
+    assert by_title["黃仁勳回應 AI 泡沫"] == "general"
+    assert by_title["情慾小說：深夜的旅館"] == "adult"
+
+
+def test_every_frontend_file_that_uses_state_imports_it():
+    """A view using `state` without importing it fails at runtime, not at build time.
+
+    The ideas page did exactly that (the rating badge), and the page only showed
+    "載入失敗：state is not defined" once the switch was on and a rated idea appeared.
+    """
+    static = Path(__file__).resolve().parent.parent / "static"
+    for f in sorted(static.rglob("*.js")):
+        text = f.read_text("utf-8")
+        if not re.search(r"\bstate\b", text):
+            continue
+        if re.search(r"export\s+(const|let|var)\s+state\b", text):
+            continue          # lib.js defines it; everyone else imports it
+        head = "\n".join(text.splitlines()[:6])
+        assert re.search(r"import[^;]*\bstate\b", head), f"{f.name} 用了 state 但沒有匯入"
+
+
+def test_the_ideas_page_renders_the_rating_badge():
+    """The badge reads state.META, so the import above is what keeps the page alive."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "views" / "ideas.js").read_text("utf-8")
+    assert "state.META?.rating_label" in js

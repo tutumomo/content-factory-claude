@@ -1,5 +1,5 @@
-import { $, $$, api, esc, fmtName, statusPill, toast, when } from "../lib.js?v=20261123b";
-import { openNewEpisodeModal } from "../modals.js?v=20261123b";
+import { $, $$, api, esc, fmtName, state, statusPill, toast, when } from "../lib.js?v=20261125g";
+import { openNewEpisodeModal } from "../modals.js?v=20261125g";
 
 const KIND_LABEL = { radar: "雷達", watch: "訂閱", note: "筆記", link: "連結", quote: "金句" };
 const WATCH_FREQ = [["daily", "每天"], ["weekdays", "週一到週五"], ["weekly", "每週"], ["hours", "每隔幾小時"]];
@@ -62,6 +62,7 @@ export async function viewIdeas(main) {
               ${it.attention_score != null ? `<span class="pill" title="${esc(it.score_reason || "")}">注意力 ${it.attention_score}</span>` : it.heat ? `<span class="pill">熱度：${esc(it.heat)}</span>` : ""}
               ${it.group_size > 1 ? `<span class="pill" title="${esc((it.members || []).map((m) => m.title).join("\n"))}">${it.group_size} 篇同事件</span>` : ""}
               ${it.needs_more ? `<span class="pill">待補</span>` : ""}
+              ${it.rating && it.rating !== "general" ? `<span class="pill accent" title="內容分級">${esc(state.META?.rating_label?.[it.rating] || it.rating)}</span>` : ""}
               <span class="grow"></span>
               <span class="muted" style="font-size:12px">${when(it.found).slice(5, 16)}</span>
             </div>

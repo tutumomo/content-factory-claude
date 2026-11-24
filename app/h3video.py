@@ -7,11 +7,14 @@ keeps H3's own ambient soundtrack; the pipeline mixes it under the narration (h3
 from __future__ import annotations
 
 import math
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import comfy, store
 
+_OVERRIDE = threading.local()
 FPS = 24
 # Pika H3 Flex 6-NFE sigma knots (from the official template's ManualSigmas node)
 FLEX_SIGMAS = "1.0, 0.972973, 0.923077, 0.8, 0.571429, 0.333333, 0.0"
@@ -24,7 +27,24 @@ CAMERA = [
 
 
 def cfg() -> dict:
-    return store.get_settings().get("h3video") or {}
+    """The h3video settings, with any per-call override merged on top."""
+    base = dict(store.get_settings().get("h3video") or {})
+    over = getattr(_OVERRIDE, "cfg", None)
+    if over:
+        base.update(over)
+    return base
+
+
+@contextmanager
+def using(overrides: dict | None):
+    """Apply per-call H3 settings for the block (an episode may pick its own recipe)."""
+    prev = getattr(_OVERRIDE, "cfg", None)
+    _OVERRIDE.cfg = dict(overrides) if overrides else None
+    try:
+        yield
+    finally:
+        _OVERRIDE.cfg = prev
+
 
 
 def frames_for(seconds: float) -> int:

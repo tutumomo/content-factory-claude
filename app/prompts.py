@@ -105,17 +105,31 @@ def source_status_text(source_state: dict | None) -> str:
 
 
 def brief(ep: dict, sources: str, source_state: dict | None = None) -> tuple[str, str]:
-    sys = base_system(ep.get("style_id")) + "\n\n" + ANTI_HALLUCINATION + """
+    mode = ep.get("mode") or "news"
+    rating = ep.get("rating") or "general"
+    form = ep.get("form") or "video"
+    creative = mode in store.UNVERIFIED_MODES
+    sys = base_system(ep.get("style_id")) + "\n\n" + mode_block(mode, rating) + "\n\n" + form_block(form) + f"""
 
 # 任務：方向簡報
 同一個題目可以做成很不一樣的內容。給 3–4 個切入方向。
-輸出：{"directions":[{"id":"A","angle":"一句話切角","audience":"給誰看","why":"為什麼適合本頻道","outline":["段落1","段落2"],"include":["要講"],"exclude":["不講"],"title_feel":"標題感"}],"stale_warnings":["可能過時或需求證的資訊"]}"""
-    prompt = (
-        f"# 題目\n{ep['topic']}\n\n# 格式\n{fmt_desc(ep)}\n\n"
-        f"# 使用者筆記\n{ep.get('notes') or '（無）'}\n\n"
-        f"# 來源狀態\n{source_status_text(source_state)}\n\n"
-        f"# 蒐集到的資料\n{sources or '（無外部資料，請依常識並標註需求證之處）'}"
-    )
+{"這是創作，不需要查證：請大方設計不同的情境與衝突，不要因為「沒有資料」而退縮。" if creative else "方向要能靠手上的資料撐起來。"}
+輸出：{{"directions":[{{"id":"A","angle":"一句話切角","audience":"給誰看","why":"為什麼適合本頻道","outline":["段落1","段落2"],"include":["要講"],"exclude":["不講"],"title_feel":"標題感"}}]{"".join(["", ""]) + ",\"stale_warnings\":[\"可能過時或需求證的資訊\"]" if not creative else ""}}}"""
+    if rating_note(rating):
+        sys += "\n\n" + rating_note(rating)
+    if creative:
+        prompt = (
+            f"# 題目\n{ep['topic']}\n\n# 格式\n{fmt_desc(ep)}\n\n"
+            f"# 使用者筆記（最優先，當成創作brief）\n{ep.get('notes') or '（無）'}\n\n"
+            f"# 參考資料\n{sources or '（沒有參考資料，請完全自行發揮）'}"
+        )
+    else:
+        prompt = (
+            f"# 題目\n{ep['topic']}\n\n# 格式\n{fmt_desc(ep)}\n\n"
+            f"# 使用者筆記\n{ep.get('notes') or '（無）'}\n\n"
+            f"# 來源狀態\n{source_status_text(source_state)}\n\n"
+            f"# 蒐集到的資料\n{sources or '（無外部資料，請依常識並標註需求證之處）'}"
+        )
     return sys, prompt
 
 
@@ -138,27 +152,65 @@ music 是整支片子的背景音樂風格（純音樂、無人聲），例如 "
 - 開場第 1–2 個畫面先給觀眾一個留下來的理由：本片要回答的問題，加一句路線圖（例如「這期講三件事：怎麼裝、怎麼拆、哪裡會看走眼」）。路線圖用講稿說出來，不另外加畫面。
 - 收尾在行動呼籲之前留一個畫面講限制、代價或踩坑（例如「不過這種做法有幾個地方要注意」）。資料裡找不到就講「我還沒驗證到」的部分，不要編。"""
 
+# 敘事模式的講稿結構：多一個 characters（這個畫面出現哪些角色），其餘與新聞模式相同。
+SCRIPT_SHAPE_NARRATIVE = """輸出：{"working_title":"暫定標題","music":"英文一句背景音樂風格","scenes":[{"narration":"這個畫面要念的講稿（口語、短句）","headline":"畫面大標（12 字內）","bullets":["畫面重點，最多 3 條，每條 18 字內"],"style":"bigtype|papercut|corkboard|clean","visual":"英文一句畫面描述","characters":["這個畫面出現的角色代號"],"stock_query":"英文 2-5 個字的實拍素材關鍵詞","sfx":"音效標籤","emotion":"念這段的口氣"}]}
+畫面風格可選：""" + "；".join(f"{k}={v}" for k, v in STYLES.items()) + """。
+music 是整支片子的背景音樂風格（純音樂、無人聲），例如 "warm lo-fi, soft piano, light drums"。只給風格，不要寫歌詞。
+每個畫面另外給四件事：
+- visual：英文一句具體畫面描述（主體、場景、光線、構圖），會拿去文字生圖。不要要求畫面出現任何文字、字幕、標籤。
+- characters：這個畫面裡出現的角色代號，只能用上面列出的角色代號；這個畫面沒有角色就給空陣列。
+- stock_query：拿去找免費實拍素材的英文關鍵詞（2-5 個字，具體名詞與場景）；抽象概念就找具體替代畫面。
+- sfx：這個畫面開頭墊一個音效，只能從清單挑一個，真的不需要就給空字串：""" + "、".join(sfx.TAGS) + """。
+- emotion：念這段的口氣，一到四個字，例如 好奇／興奮／沉穩／提醒／驚訝。
+講稿要像真人說話：短句、口語、具體例子；不要 AI 腔、不要套話、不要過度排比。英文專有名詞保留原文。
+敘事的鋪陳（長片必守；短片只取用得到的部分）：
+- 開場第 1–2 個畫面先建立情境與角色，讓觀眾知道這是誰、在哪裡、想要什麼。
+- 中段要有一個轉折，不要一路平鋪；轉折前後的情緒與力道要不一樣。
+- 收尾要收束，不要停在半空中，也不要用一句話把所有事講完。"""
+
 
 def script(ep: dict, direction: dict, sources: str, source_state: dict | None = None) -> tuple[str, str]:
+    mode = ep.get("mode") or "news"
+    rating = ep.get("rating") or "general"
+    form = ep.get("form") or "video"
+    creative = mode in store.UNVERIFIED_MODES
     sys = (
         base_system(ep.get("style_id"))
-        + "\n\n# 任務：寫講稿\n依使用者選定的方向寫完整講稿，拆成畫面。\n"
-        + ANTI_HALLUCINATION
+        + "\n\n# 任務：寫講稿\n依使用者選定的方向寫完整內容，依成品形態拆段。\n"
+        + mode_block(mode, rating)
+        + "\n\n"
+        + form_block(form)
         + "\n\n"
         + SAFETY_BOUNDARY
         + "\n\n"
         + TERM_RULES
         + "\n"
-        + SCRIPT_SHAPE
+        + (SCRIPT_SHAPE_NARRATIVE if creative else SCRIPT_SHAPE)
     )
+    if rating_note(rating):
+        sys += "\n\n" + rating_note(rating)
+    data_note = ("（創作模式：不需要查證資料，參考資料只是可用的素材，不必逐句對應）" if creative
+                 else sources or "（無）")
     prompt = (
         f"# 題目\n{ep['topic']}\n\n# 格式\n{fmt_desc(ep)}\n\n"
         f"# 選定方向\n{json.dumps(direction, ensure_ascii=False)}\n\n"
         f"# 使用者補充（最優先）\n{ep.get('direction_notes') or '（無）'}\n\n"
-        f"# 來源狀態\n{source_status_text(source_state)}\n\n"
-        f"# 資料\n{sources or '（無）'}"
+        + (f"# 角色（外觀與性格要一致）\n{_character_block(ep)}\n\n" if _character_block(ep) else "")
+        + ("" if creative else f"# 來源狀態\n{source_status_text(source_state)}\n\n")
+        + f"# 資料\n{data_note}"
     )
     return sys, prompt
+
+
+def _character_block(ep: dict) -> str:
+    """The characters this episode uses, with their fixed appearance, so scenes stay consistent."""
+    from . import characters as ch
+    cards, _ = ch.usable_cards(list(ep.get("characters") or []), ep.get("rating") or "general")
+    if not cards:
+        return ""
+    rows = [f"- {c['name']}：{c['description']}" if c["description"] else f"- {c['name']}" for c in cards]
+    return "\n".join(rows)
+
 
 
 CRITICS = {
@@ -168,12 +220,184 @@ CRITICS = {
     "ai_voice": ("AI 腔獵人", "抓空話、套話、過度排比、翻譯腔、說教語氣，以及違反品味紀錄的句子。"),
 }
 
+# 敘事模式的審稿角色：事實查核對虛構故事沒有意義，改成界線、連貫與情慾節奏。
+CRITICS_NARRATIVE = {
+    "boundary": ("界線與分級", "檢查內容是否越過本集分級、是否涉及未成年、是否寫入未經同意的真人或真實事件；"
+                              "任何一項成立就給 0 分並說明是哪一句。"),
+    "coherence": ("情節連貫", "檢查角色動機、前後因果、時間線與細節是否自洽，抓矛盾與跳接。"),
+    "tension": ("情慾節奏", "檢查鋪陳與收束的節奏：太早跳過、太拖、或缺了轉折就點出來。"),
+    "ai_voice": ("AI 腔獵人", "抓空話、套話、過度排比、翻譯腔、說教語氣，以及違反品味紀錄的句子。"),
+}
+
+
+# 文字形態的審稿角色：沒有畫面與節奏，改成文字本身、章節推進與聽感。
+CRITICS_TEXT = {
+    "boundary": ("界線與分級", "檢查是否越過本集分級、是否涉及未成年、是否寫入未經同意的真人；"
+                              "任何一項成立就給 0 分並說明是哪一句。"),
+    "prose": ("文字質地", "抓套語、翻譯腔、形容詞堆疊、說明書語氣，以及一眼看得出是模型寫的句子。"),
+    "coherence": ("情節連貫", "檢查角色動機、前後因果、時間線與細節是否自洽，抓矛盾與跳接。"),
+    "pull": ("閱讀推力", "檢查讀者會不會想往下讀：段落結尾有沒有留懸念、有沒有原地打轉的地方。"),
+}
+
+# MP3 小說多一個「聽感」角色：念出來順不順、聽一次能不能懂。
+CRITICS_AUDIOBOOK = {
+    **CRITICS_TEXT,
+    "listenability": ("聽感", "把句子念出來檢查：同音歧義、過長的插入語、指代不清、需要回頭聽一次的地方。"),
+}
+
+
+# 腳本／分鏡類多一個「可執行性」角色：交給繪者或導演能不能直接做。
+CRITICS_SCRIPT = {
+    "boundary": CRITICS_TEXT["boundary"],
+    "executable": ("可執行性", "檢查每一格／每一場是否清楚到能直接做：鏡位、位置、動作、台詞有沒有缺。"),
+    "prose": CRITICS_TEXT["prose"],
+    "coherence": CRITICS_TEXT["coherence"],
+}
+
+# 非虛構的成人話題（指南、評論）不需要情節連貫，改成依據與可執行性。
+CRITICS_NONFICTION = {
+    "boundary": CRITICS_TEXT["boundary"],
+    "evidence": ("依據", "抓沒有根據的斷言、把個案當通則、聽起來像醫療建議卻沒有來源。"),
+    "usable": ("可照做", "檢查聽眾看完能不能照著做：步驟夠不夠具體、有沒有講清楚前提。"),
+    "ai_voice": CRITICS_TEXT["prose"],
+}
+
+_AUDIO_FORMS = ("audiobook", "radio_drama", "asmr")
+_SCRIPT_FORMS = ("script", "comic")
+_GUIDE_FORMS = ("guide", "talk")
+
+
+def critic_roles(mode: str | None, form: str | None = None) -> dict:
+    """The review roles for a mode × form. News keeps the factual set; every form gets its own."""
+    form = (form or "video").strip().lower()
+    if form in _GUIDE_FORMS:
+        return CRITICS_NONFICTION
+    if form == "asmr":
+        return {**CRITICS_AUDIOBOOK, "listenability": ("聽感與留白", "檢查聲音事件夠不夠、空白有沒有被填滿、低聲念得完嗎。")}
+    if form in _AUDIO_FORMS:
+        return CRITICS_AUDIOBOOK
+    if form in _SCRIPT_FORMS:
+        return CRITICS_SCRIPT
+    if form in ("novel", "serial", "poem", "chat"):
+        return CRITICS_TEXT
+    return CRITICS_NARRATIVE if (mode or "news") in store.UNVERIFIED_MODES else CRITICS
+
+
+# 敘事模式的規則區塊：把「每個數字都要有來源」換成「前後自洽、角色一致、不涉未成年與未經同意的真人」。
+NARRATIVE_RULES = """【敘事規則 — 嚴格遵守】
+1. 這是虛構故事，不要寫成新聞或教學：不要假裝引用資料、數字或真實事件，也不要放「根據報導」這類口吻。
+2. 內部要自洽：角色、場景、時間線、道具、稱呼前後一致；前面建立的規則後面不能自己推翻。
+3. 角色要有一致的外觀描述；同一個角色在不同畫面要能被認出是同一人。
+4. 界線是硬線：不寫未成年角色、不寫未經同意的真人或真實事件、不寫侵犯的細節。
+5. 情慾描寫要服務於情境與角色，不要變成沒有情節的器官清單；留白與推進要平衡。
+6. 說明欄與標題不要露骨到無法在公開平台顯示的程度。"""
+
+# 自由創作：不需要任何依據，允許原創世界觀。界線仍然是硬的，只是不再要求「不假裝引用」。
+FICTION_RULES = """【自由創作規則 — 嚴格遵守】
+1. 這是完全原創的虛構作品。不需要依據、不需要來源，也不必解釋「這是虛構的」以外的任何現實對應。
+2. 可以自由發明世界觀、角色、規則與衝突；一旦發明就要守住它，後面不能自己推翻。
+3. 允許留白與暗示，允許不把結局講完；但每一段都要推進情境或角色，不要原地打轉。
+4. 角色要有一致的慾望、習慣與說話方式；同一個角色換了場景也要是同一個人。
+5. 界線是硬線：不寫未成年角色、不寫未經同意的真人、不把侵犯寫成浪漫。
+6. 標題與說明用氣氛與懸念，不要用露骨的身體描述。"""
+
+
+def mode_block(mode: str | None, rating: str | None = None) -> str:
+    """The rule block for this episode: facts for news, story rules for narrative, free rein for fiction."""
+    mode = mode or "news"
+    if mode == "fiction":
+        return FICTION_RULES
+    if mode == "narrative":
+        return NARRATIVE_RULES
+    return ANTI_HALLUCINATION
+
+
+# 各內容形態對「成品」的要求，會接在講稿規則後面。
+FORM_RULES = {
+    "video": """【成品形態：影片】
+每個畫面一句旁白，長度依格式；旁白要念得順、斷句自然。畫面文字不要跟旁白重複。""",
+    "novel": """【成品形態：小說／文字】
+這是給人讀的文字，不是旁白稿，不要寫「畫面」「這段我們來看」這類影片用語。
+分段推進：每段 120–300 字，段落之間要有時間或場景的推移。
+不要為每段寫 headline／bullets；scenes 的 narration 就是小說正文。
+可以寫章節標題，放在 headline。""",
+    "serial": """【成品形態：連載長篇】
+每個 scenes 項目是一章，不是一段。一章 800–2000 字，narration 放這一章的正文。
+章末一定要留推力（懸念、決定、未解的問題），不要一章講完一個完整弧線。
+前面建立的設定與人物關係要延續，不能每章換一套規則。""",
+    "poem": """【成品形態：詩／極短篇】
+保留斷行：narration 裡的換行就是詩的斷行，不要寫成連續段落。
+不要解釋意象，不要加「這象徵著…」。留白比句子多更好。
+一整首詩放在一個 scenes 項目即可；headline 是詩題。""",
+    "chat": """【成品形態：訊息體對話】
+每一行是一則訊息，格式固定為「發話者：內容」，例如「A：你睡了嗎」。
+不要寫旁白、不要描述表情；情緒只能靠回覆的速度、標點與用詞表達。
+scenes 的 narration 放整段對話；headline 是這段對話的時間或場景（例如「凌晨兩點」）。""",
+    "script": """【成品形態：劇本／分鏡腳本】
+格式：場景標題（內景／外景・地點・時間）→ 動作段落 → 對白。
+動作只寫看得見聽得到的，不要寫角色的內心狀態。
+narration 就是劇本正文；headline 放場景標題。不要寫鏡頭焦段這類拍攝術語。""",
+    "comic": """【成品形態：漫畫腳本】
+一格一件事。每一行格式固定為「第 N 格：畫面指示｜台詞」，沒有台詞就只寫畫面指示。
+畫面指示要具體到繪者能畫（鏡位、角色位置、表情）；台詞要短到能塞進對話框。
+一個 scenes 項目是一頁（4–6 格）；headline 是頁標。""",
+    "guide": """【成品形態：指南／教學】
+非虛構：講清楚怎麼做，每一步都要能照著執行。
+narration 一段一個步驟，先講要做什麼、再講為什麼；可以放清單但不要超過三項。
+沒有依據的建議要標明「這是我的經驗」。""",
+    "talk": """【成品形態：話題評論】
+這是主持人口播，第一人稱、有立場。開場先講清楚「這件事的爭點是什麼」。
+可以引用資料，但要說明來源；沒有依據的判斷要明講「這是我的看法」。
+畫面是字卡，所以 headline 與 bullets 要能單獨表達重點。""",
+    "audiobook": """【成品形態：MP3 小說】
+正文跟小說一樣是連續文字，但每一段都要能獨立朗讀：不要依賴表格、清單或純視覺效果。
+句子短一點、少用括號與破折號插入語，因為這是給耳朵聽的。
+每段開頭避免用代名詞起頭，聽眾可能中途才開始聽。""",
+    "radio_drama": """【成品形態：廣播劇】
+只有聲音：每一行都要能被念出來或做成音效。
+對白之間用「（停頓）」「（遠處關門聲）」這類括號標記聲音事件，不要寫純視覺描述。
+narration 放整場戲；headline 是場次（例如「第一場・雨夜的公寓」）。""",
+    "asmr": """【成品形態：耳語音檔】
+句子要短到能低聲念完一句就停。大量留白，不要填滿時間。
+用「（靠近麥克風）」「（布料摩擦）」標記聲音遠近與材質。
+不要寫劇情大綱；每一段就是一段可以直接錄的聲音。""",
+    "gallery": """【成品形態：圖片集】
+每個 scenes 項目是一張圖：narration 是這張圖的圖說（1–3 句），headline 是短標。
+圖說要能獨立看懂，不要依賴前後張。visual 要寫清楚畫面構成，因為這就是成品本身。""",
+}
+
+
+def form_block(form: str | None) -> str:
+    """What the finished piece must look like, given the episode's content form."""
+    return FORM_RULES.get((form or "video").strip().lower(), FORM_RULES["video"])
+
+
+def rating_note(rating: str | None) -> str:
+    """One line telling the model which content rating this episode is."""
+    rating = (rating or "general").strip().lower()
+    if rating == "general":
+        return ""
+    label = store.RATING_LABEL.get(rating, rating)
+    if rating == "suggestive":
+        return (f"【分級】本集分級是「{label}」：可以有性暗示與挑逗，但不得出現明確裸露的器官細節，"
+                f"不得出現未成年角色，不得寫入未經同意的真人。")
+    return (f"【分級】本集分級是「{label}」：可以寫明確的成人內容，但不得出現未成年角色、"
+            f"不得寫入未經同意的真人或可辨識的真實人物、不得把犯罪行為寫成值得同情的事。")
+
 
 def critique(role: str, ep: dict, scr: dict, sources: str) -> tuple[str, str]:
-    name, job = CRITICS[role]
+    mode = ep.get("mode") or "news"
+    rating = ep.get("rating") or "general"
+    roles = critic_roles(mode, ep.get("form"))
+    name, job = roles[role]
     extra = ""
     if role == "fact":
         extra = "\n\n" + ANTI_HALLUCINATION + "\n\n" + SAFETY_BOUNDARY + "\n\n" + TERM_RULES
+    elif role == "boundary":
+        # the boundary role is a hard gate: it must be told what the episode's rating allows
+        extra = "\n\n" + mode_block(mode, rating) + "\n\n" + SAFETY_BOUNDARY
+        if rating_note(rating):
+            extra += "\n\n" + rating_note(rating)
     sys = base_system(ep.get("style_id")) + f"""
 
 # 任務：審稿（角色：{name}）
@@ -185,7 +409,12 @@ def critique(role: str, ep: dict, scr: dict, sources: str) -> tuple[str, str]:
 
 
 def revise(ep: dict, scr: dict, reviews: dict, extra: str = "") -> tuple[str, str]:
-    sys = base_system(ep.get("style_id")) + "\n\n# 任務：依審稿意見修稿\n保留好的部分，只修被指出的問題。\n" + SCRIPT_SHAPE
+    mode = ep.get("mode") or "news"
+    sys = (base_system(ep.get("style_id"))
+           + "\n\n# 任務：依審稿意見修稿\n保留好的部分，只修被指出的問題。\n"
+           + mode_block(mode, ep.get("rating"))
+           + "\n\n" + form_block(ep.get("form"))
+           + "\n" + (SCRIPT_SHAPE_NARRATIVE if mode in store.UNVERIFIED_MODES else SCRIPT_SHAPE))
     prompt = (
         f"# 格式\n{fmt_desc(ep)}\n\n# 原講稿\n{json.dumps(scr, ensure_ascii=False)}\n\n"
         f"# 審稿意見\n{json.dumps(reviews, ensure_ascii=False)}\n\n# 使用者意見（最優先）\n{extra or '（無）'}"
@@ -202,6 +431,9 @@ def _link_rule(urls: list[str]) -> str:
 
 
 def package(ep: dict, scr: dict, n_titles: int, n_thumbs: int, urls: list[str] | None = None) -> tuple[str, str]:
+    rating = (ep.get("rating") or "general").strip().lower()
+    if rating != "general":
+        return _package_restricted(ep, scr, n_titles, n_thumbs, urls)
     sys = base_system(ep.get("style_id")) + f"""
 
 # 任務：包裝
@@ -226,6 +458,41 @@ def package(ep: dict, scr: dict, n_titles: int, n_thumbs: int, urls: list[str] |
 "description":"YouTube 說明欄（第一段是答案前置摘要，含重點段落與時間軸佔位）",
 "carousel":[{{"heading":"每頁標題","body":"每頁 1–3 句"}}]（5–7 頁，第一頁是封面鉤子，最後一頁是行動呼籲）,
 "fb_post":"Facebook 貼文","hashtags":["#標籤"]}}"""
+    prompt = f"# 題目\n{ep['topic']}\n\n# 格式\n{fmt_desc(ep)}\n\n# 定稿\n{json.dumps(scr, ensure_ascii=False)}"
+    return sys, prompt
+
+
+def _package_restricted(ep: dict, scr: dict, n_titles: int, n_thumbs: int,
+                        urls: list[str] | None) -> tuple[str, str]:
+    """Packaging for a non-general episode: no carousel, no FB post, no platform captions.
+
+    The publish package for a restricted episode carries only the film, the subtitles, the
+    thumbnail, the metadata and a compliance checklist, so the packaging step must not
+    produce platform copy that has nowhere to go.
+    """
+    rating = (ep.get("rating") or "general").strip().lower()
+    label = store.RATING_LABEL.get(rating, rating)
+    sys = base_system(ep.get("style_id")) + f"""
+
+# 任務：包裝（受限分級：{label}）
+只做標題候選、縮圖文案與一段發布說明。這一集不會有 IG 輪播、Facebook 貼文或 shorts 平台文案。
+
+{SELF_CONTAINED_TITLE}
+
+{ANTI_HALLUCINATION}
+
+{SAFETY_BOUNDARY}
+
+{TERM_RULES}
+
+{rating_note(rating)}
+
+說明欄：這支片子不進公開平台，但說明欄仍要能讓本人辨識這是什麼、講的是什麼。第一句講清楚這是虛構故事與它的情境，不要寫成新聞。
+縮圖大字與說明欄都不要露骨到無法在自己的裝置上預覽的程度；用氣氛、懸念或情境詞代替直接描寫。
+輸出：{{"titles":[{{"text":"標題","angle":"好奇|數字|衝突|實用"}}]（{n_titles} 個）,
+"thumbnails":[{{"main":"縮圖大字 4–10 字","sub":"小字 12 字內","theme":"dark|light"}}]（{n_thumbs} 個，深淺都要有）,
+"description":"發布說明（第一段講清楚這是什麼）",
+"hashtags":["#標籤"]}}"""
     prompt = f"# 題目\n{ep['topic']}\n\n# 格式\n{fmt_desc(ep)}\n\n# 定稿\n{json.dumps(scr, ensure_ascii=False)}"
     return sys, prompt
 

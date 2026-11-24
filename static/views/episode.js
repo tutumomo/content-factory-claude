@@ -1,5 +1,5 @@
-import { $, $$, api, esc, fileUrl, fmtName, fmtShortDate, state, statusPill, stepper, toast } from "../lib.js?v=20261123b";
-import { loginGoogle } from "../modals.js?v=20261123b";
+import { $, $$, api, esc, fileUrl, fmtName, fmtShortDate, state, statusPill, stepper, toast } from "../lib.js?v=20261125g";
+import { loginGoogle } from "../modals.js?v=20261125g";
 
 function gateDirection(brief) {
   if (!brief) return "";
@@ -32,10 +32,11 @@ function gateSources(ep) {
       <button type="button" class="btn" id="src-skip">來源不足也繼續（講稿會標註需求證）</button></div></div>`;
 }
 
-function critiqueTable(c) {
+function critiqueTable(c, mode) {
   if (!c?.rounds?.length) return "";
+  const labels = state.META?.critics_by_mode?.[mode || "news"] || state.META?.critics || {};
   return `<div class="crit">${c.rounds.map((r) => `<div class="muted" style="margin-top:8px">第 ${r.round} 輪</div><table>
-    ${Object.entries(r.reviews).map(([k, v]) => `<tr><td style="width:110px">${esc(state.META.critics[k])}</td>
+    ${Object.entries(r.reviews).map(([k, v]) => `<tr><td style="width:110px">${esc(labels[k] || k)}</td>
       <td style="width:50px"><span class="score ${v.score >= 8 ? "hi" : "low"}">${v.score}</span></td><td>${esc(v.summary)}
       ${(v.issues || []).length ? `<ul>${v.issues.slice(0, 5).map((x) => `<li>「${esc(x.quote)}」— ${esc(x.problem)} → ${esc(x.fix)}</li>`).join("")}</ul>` : ""}</td></tr>`).join("")}</table>`).join("")}</div>`;
 }
@@ -118,19 +119,31 @@ function videoBlock(ep, vertical) {
 function packageSummary(pk, ep) {
   if (!pk || !ep.package_choice) return "";
   const t = pk.thumbnails[ep.package_choice.thumb];
+  const carousel = (pk.carousel || []).length ? `<h2>IG 輪播</h2><div class="carousel">${(pk.carousel || []).map((c) => `<img src="${fileUrl(c.file)}">`).join("")}</div>` : "";
   return `<div class="card"><h2 style="margin-top:0">包裝</h2><div class="row">${t ? `<img src="${fileUrl(t.file)}" style="width:240px;border-radius:6px">` : ""}
     <div class="grow"><b>${esc(ep.package_choice.title)}</b><div class="muted" style="white-space:pre-wrap;margin-top:6px">${esc(pk.description).slice(0, 400)}</div></div></div>
-    <h2>IG 輪播</h2><div class="carousel">${(pk.carousel || []).map((c) => `<img src="${fileUrl(c.file)}">`).join("")}</div></div>`;
+    ${carousel}</div>`;
 }
 
 function gateApproval(ep, F, vertical) {
   const checks = F.verify ? Object.values(F.verify.checks) : [];
   const bad = checks.filter((c) => !c.ok).length;
+  const rating = ep.rating || "general";
+  const restricted = rating !== "general";
+  const rlabel = state.META?.rating_label?.[rating] || rating;
+  const confirmBlock = restricted ? `
+    <div class="row" style="margin-top:10px"><label class="grow" style="margin:0">分級確認：這一集是
+      <select id="ap-rating" style="width:auto">
+        <option value="">請選擇分級</option>
+        <option value="${esc(rating)}">${esc(rlabel)}</option>
+      </select></label></div>
+    <div class="warn" style="margin-top:8px">受限分級的發布包只留在本機（不含輪播、貼文與 shorts 文案），也不會自動上傳任何平台。</div>` : "";
   return `<div class="card gate"><h2>看成片，決定核准或退件</h2>
     <p class="muted">發出去就收不回來。逐項確認：影片、聲音、字幕、輪播、說明欄、標題與縮圖。</p>
     ${bad ? `<div class="warn">自動檢查有 ${bad} 項沒過，請特別看一下。</div>` : ""}</div>
     ${videoBlock(ep, vertical)}${packageSummary(F.package, ep)}
     <div class="card gate"><div class="row"><label class="grow" style="margin:0"><input type="checkbox" id="ap-check" style="width:auto"> 我看過成片，影片、聲音、字幕、輪播、說明欄都正常</label></div>
+    ${confirmBlock}
     <div class="row" style="margin-top:12px"><button type="button" class="btn primary" id="ap-go" disabled>核准，輸出發布包</button></div>
     <h2>退件</h2><div class="row"><select id="rj-to" style="width:auto"><option value="assemble">重做畫面與配音</option><option value="script">重寫講稿</option>
       <option value="package">重做標題與縮圖</option><option value="brief">重給方向</option></select>
@@ -147,6 +160,11 @@ function metricsBlock(ep) {
 
 function youtubeBlock(ep) {
   const y = ep.youtube || {};
+  const rating = ep.rating || "general";
+  if (rating !== "general") {
+    return `<div class="row" style="margin-top:12px"><b class="grow">YouTube</b></div>
+      <div class="warn" style="margin-top:6px">受限分級不支援自動上傳：YouTube Data API 沒有可寫的 18+ 欄位，而且平台規範禁止這類內容。發布包只留本機。</div>`;
+  }
   const label = { queued: "排隊中", uploading: "上傳中", processing: "設定縮圖中", done: "已上傳", error: "上傳失敗" }[y.status] || "";
   let html = `<div class="row" style="margin-top:12px"><b class="grow">YouTube ${label ? `・${label}` : ""}</b>`;
   if (["queued", "uploading", "processing"].includes(y.status)) {
@@ -162,6 +180,20 @@ function youtubeBlock(ep) {
   }
   if (y.status === "error") html += `<div class="muted" style="color:var(--bad)">${esc(y.error)}</div>`;
   return html;
+}
+
+function ratingPill(ep) {
+  const r = ep.rating || "general";
+  if (r === "general") return "";
+  const label = state.META?.rating_label?.[r] || r;
+  return `<span class="pill accent" title="內容分級">${esc(label)}</span>`;
+}
+
+function modePill(ep) {
+  const m = ep.mode || "news";
+  if (m === "news") return "";
+  const label = state.META?.mode_label?.[m] || m;
+  return `<span class="pill" title="內容模式">${esc(label)}</span>`;
 }
 
 export async function viewEpisode(main, id) {
@@ -180,7 +212,7 @@ export async function viewEpisode(main, id) {
       ${styleCard ? `<span class="pill">${esc(styleCard.icon)} ${esc(styleCard.name)}</span>` : ""}
       ${ep.schedule ? `<a class="pill accent" href="#/schedule" style="text-decoration:none">📅 ${esc(fmtShortDate(ep.schedule))}</a>` : ""}
     </div>
-    <div class="row"><h1 class="grow">${esc(ep.package_choice?.title || ep.topic)}</h1><span class="pill">${fmtName(ep.format)}</span>${statusPill(ep)}</div>
+    <div class="row"><h1 class="grow">${esc(ep.package_choice?.title || ep.topic)}</h1><span class="pill">${fmtName(ep.format)}</span>${ratingPill(ep)}${modePill(ep)}${statusPill(ep)}</div>
     ${stepper(ep)}`;
 
   if (health?.tts?.needs_voice_ref && !["done", "error"].includes(ep.status)) {
@@ -206,8 +238,12 @@ export async function viewEpisode(main, id) {
   if (ep.status === "waiting" && ep.waiting_for === "approval") html += gateApproval(ep, F, vertical);
 
   if (ep.status === "done") {
+    const restricted = (ep.rating || "general") !== "general";
+    const pkgDesc = restricted
+      ? "發布包：<code>${esc(ep.published_dir)}</code>（影片、字幕、縮圖、metadata.json、CHECKLIST.md；受限分級只留本機）"
+      : "發布包：<code>${esc(ep.published_dir)}</code>（影片、縮圖、字幕、說明欄、輪播圖卡、metadata.json）";
     html += `<div class="card"><h2 style="margin-top:0">已核准</h2>
-      <div class="muted">發布包：<code>${esc(ep.published_dir)}</code>（影片、縮圖、字幕、說明欄、輪播圖卡、metadata.json）${ep.schedule ? `・排程 ${esc(ep.schedule)}` : ""}</div>
+      <div class="muted">${pkgDesc}${ep.schedule ? `・排程 ${esc(ep.schedule)}` : ""}</div>
       ${youtubeBlock(ep)}</div>`;
     html += videoBlock(ep, vertical) + packageSummary(F.package, ep) + metricsBlock(ep);
   }
@@ -216,7 +252,7 @@ export async function viewEpisode(main, id) {
       <ul>${(ep.direction.outline || []).map((o) => `<li>${esc(o)}</li>`).join("")}</ul>${ep.direction_notes ? `<div class="muted">你的補充：${esc(ep.direction_notes)}</div>` : ""}</details>`;
   }
   if (F.critique && ep.waiting_for !== "script") {
-    html += `<details class="card"><summary><b>多模型互審紀錄</b></summary>${critiqueTable(F.critique)}</details>`;
+    html += `<details class="card"><summary><b>多模型互審紀錄</b></summary>${critiqueTable(F.critique, ep.mode)}</details>`;
   }
   html += `<details class="card" ${ep.status === "running" ? "open" : ""}><summary><b>agent 工作紀錄</b></summary><div class="log" id="log">${(ep.log || []).map((l) => `${new Date(l.t * 1000).toLocaleTimeString("zh-TW", { hour12: false })}  ${esc(l.msg)}`).join("\n")}</div></details>
     <div class="row"><span class="grow muted">${esc(ep.id)}</span><button type="button" class="btn danger" id="del">刪除這一集</button></div>`;
@@ -294,8 +330,22 @@ export async function viewEpisode(main, id) {
     thumb: +$(".thumb.sel", main).dataset.thumb,
     schedule: $("#pk-sched", main).value,
   }));
-  $("#ap-check", main) && ($("#ap-check", main).onchange = (e) => ($("#ap-go", main).disabled = !e.target.checked));
-  $("#ap-go", main) && ($("#ap-go", main).onclick = () => post("approve"));
+  $("#ap-check", main) && ($("#ap-check", main).onchange = (e) => {
+    const ratingSel = $("#ap-rating", main);
+    const confirmed = !ratingSel || ratingSel.value === (ep.rating || "general");
+    $("#ap-go", main).disabled = !e.target.checked || !confirmed;
+  });
+  $("#ap-rating", main) && ($("#ap-rating", main).onchange = () => {
+    const box = $("#ap-check", main);
+    if (box) {
+      const ratingSel = $("#ap-rating", main);
+      const confirmed = ratingSel.value === (ep.rating || "general");
+      $("#ap-go", main).disabled = !box.checked || !confirmed;
+    }
+  });
+  $("#ap-go", main) && ($("#ap-go", main).onclick = () => post("approve", {
+    confirm_rating: ($("#ap-rating", main) || {}).value || "",
+  }));
   $("#rj-go", main) && ($("#rj-go", main).onclick = () => {
     const r = $("#rj-reason", main).value.trim();
     if (!r) return toast("請留一句退件理由");
