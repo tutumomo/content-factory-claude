@@ -43,34 +43,89 @@ MODE_LABEL = {"news": "新聞", "narrative": "敘事", "fiction": "自由創作"
 # 這些模式不需要外部資料：不查證、不擋來源、可以完全原創
 UNVERIFIED_MODES = ("narrative", "fiction")
 
+# NSFW 題材分類，給風格卡與選題用；不是限制，只是讓品味紀錄與提示詞可以分開調。
+NSFW_TOPICS = ("情慾小說", "成人話題", "視覺寫真", "角色扮演", "關係探索", "成人幽默",
+               "有聲內容", "劇本分鏡")
+
 # 內容形態：同一個題材可以做成完全不同的成品，決定哪幾站要跑、交付什麼。
 # 這是「成品長什麼樣」，跟 mode（事實的角色）與 rating（尺度）是三個獨立的軸。
-FORMS = ("video", "novel", "audiobook", "gallery", "talk")
+# 清單刻意涵蓋成人內容實際會出的每一種格式：文字、聲音、圖像、影音、腳本。
+FORMS = (
+    "video",        # 影音
+    "novel",        # 短篇／中篇小說
+    "serial",       # 連載長篇
+    "poem",         # 詩／極短篇
+    "chat",         # 訊息體對話
+    "script",       # 劇本／分鏡腳本
+    "comic",        # 漫畫腳本
+    "guide",        # 指南／教學
+    "talk",         # 話題評論
+    "audiobook",    # 有聲書
+    "radio_drama",  # 廣播劇
+    "asmr",         # 耳語音檔
+    "gallery",      # 圖片集
+)
 FORM_LABEL = {
     "video": "影片",
     "novel": "小說／文字",
-    "audiobook": "MP3 小說",
-    "gallery": "圖片集",
+    "serial": "連載長篇",
+    "poem": "詩／極短篇",
+    "chat": "訊息體對話",
+    "script": "劇本／分鏡",
+    "comic": "漫畫腳本",
+    "guide": "指南／教學",
     "talk": "話題評論",
+    "audiobook": "MP3 小說",
+    "radio_drama": "廣播劇",
+    "asmr": "耳語音檔",
+    "gallery": "圖片集",
 }
 FORM_DESC = {
     "video": "畫面＋旁白＋字幕的影片（預設）",
     "novel": "純文字小說，輸出 txt／md，不配音、不出畫面",
-    "audiobook": "小說全文＋逐段配音，輸出 mp3 與章節文字",
-    "gallery": "多張圖＋圖說，輸出圖集與說明（可再加旁白）",
-    "talk": "主持人口播評論，畫面是字卡，輸出影片與文字稿",
+    "serial": "分章連載的長篇，輸出章節 markdown 與全文 txt",
+    "poem": "詩或極短篇，保留斷行與留白的排版",
+    "chat": "純對話推進的訊息體，一行一句、有發話者",
+    "script": "劇本格式：場景標題、動作、對白，可直接照著拍或錄",
+    "comic": "漫畫腳本：一格一格的畫面指示＋台詞＋旁白",
+    "guide": "指南／教學：分段說明＋要點清單，適合非虛構題材",
+    "talk": "話題評論的口播稿，第一人稱、有立場",
+    "audiobook": "小說全文＋朗讀音檔，輸出 mp3 與章節文字",
+    "radio_drama": "廣播劇：分場對白稿＋可朗讀的音檔",
+    "asmr": "耳語／環境音腳本＋短音檔，重聽感不重劇情",
+    "gallery": "多張圖＋圖說，輸出圖集與說明",
 }
 # 這個形態要不要跑「配音」與「畫面」階段
 FORM_NEEDS = {
     "video": {"voice": True, "visual": True},
     "novel": {"voice": False, "visual": False},
+    "serial": {"voice": False, "visual": False},
+    "poem": {"voice": False, "visual": False},
+    "chat": {"voice": False, "visual": False},
+    "script": {"voice": False, "visual": False},
+    "comic": {"voice": False, "visual": False},
+    "guide": {"voice": False, "visual": False},
+    "talk": {"voice": False, "visual": False},
     "audiobook": {"voice": True, "visual": False},
+    "radio_drama": {"voice": True, "visual": False},
+    "asmr": {"voice": True, "visual": False},
     "gallery": {"voice": False, "visual": True},
-    "talk": {"voice": True, "visual": False},
+}
+# 文字形態的排版方式（怎麼把 scenes 排成成品）
+FORM_LAYOUT = {
+    "novel": "prose", "serial": "chapters", "poem": "verse", "chat": "dialogue",
+    "script": "screenplay", "comic": "panels", "guide": "guide", "talk": "talk",
 }
 
-# NSFW 題材分類，給風格卡與選題用；不是限制，只是讓品味紀錄與提示詞可以分開調。
-NSFW_TOPICS = ("情慾小說", "成人話題", "視覺寫真", "角色扮演", "關係探索", "成人幽默")
+
+def form_layout(form: str) -> str:
+    """How the text of this form is laid out (falls back to plain prose)."""
+    return FORM_LAYOUT.get((form or "").strip().lower(), "prose")
+
+
+def is_audio_form(form: str) -> bool:
+    """Forms whose deliverable is an audio track (plus the text it was read from)."""
+    return (form or "").strip().lower() in ("audiobook", "radio_drama", "asmr")
 
 
 def default_form(mode: str, rating: str) -> str:
@@ -699,6 +754,16 @@ def save_radar_state(state: dict) -> dict:
         return merged
 
 
+def get_idea(iid: str) -> dict | None:
+    """One idea by id (used to pre-fill the new-episode dialog from a radar hit)."""
+    if not iid:
+        return None
+    for item in list_ideas():
+        if item.get("id") == iid:
+            return item
+    return None
+
+
 def add_idea(data: dict) -> dict:
     with _lock:
         items = get_radar()
@@ -765,7 +830,9 @@ def _norm_style(s: dict) -> dict:
         # NSFW 相關欄位。舊卡沒有這幾欄，一律當成一般內容，不會被誤判成成人牌。
         "nsfw": bool(s.get("nsfw", False)),
         "rating_min": str(s.get("rating_min") or "general").strip().lower(),
-        "forms": _norm_list(s.get("forms")) or ["video"],
+        # empty = works for every form (the general cards). Only a card that names its forms
+        # is restricted to them.
+        "forms": _norm_list(s.get("forms")),
         "preset": bool(s.get("preset", False)),
         "source": str(s.get("source") or ("內建預設" if s.get("preset") else "自訂")).strip(),
     }
@@ -799,6 +866,11 @@ def _bootstrap_styles() -> dict:
     return data
 
 
+# Fields a built-in card is allowed to rewrite on every read. Everything else in a stored card
+# belongs to the owner (they may have edited the text), so it is never touched.
+_PRESET_OWNED = ("nsfw", "rating_min", "forms", "category", "icon")
+
+
 def get_styles() -> dict:
     with _lock:
         path = DATA / "styles.json"
@@ -814,6 +886,18 @@ def get_styles() -> dict:
                 items.append(norm_p)
                 by_id[norm_p["id"]] = norm_p
                 changed = True
+                continue
+            # a shipped preset gains new fields over time (forms, rating_min). Existing copies
+            # in styles.json would otherwise keep the old values forever, so refresh the fields
+            # the preset owns while leaving the owner's edits alone.
+            cur = by_id[preset["id"]]
+            for key in _PRESET_OWNED:
+                if key not in preset:
+                    continue
+                want = _norm_style(preset)[key]
+                if cur.get(key) != want:
+                    cur[key] = want
+                    changed = True
         active_id = raw.get("active_id")
         if active_id not in by_id:
             active_id = items[0]["id"] if items else preset_styles()[0]["id"]

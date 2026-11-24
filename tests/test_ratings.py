@@ -13,7 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import characters, comfy, llm, pipeline, prompts, sources, store, youtube
+from app import characters, comfy, llm, pipeline, prompts, sources, store, suggest, youtube
 
 from app.style_presets_nsfw import NSFW_CATEGORIES, NSFW_PRESETS
 
@@ -705,3 +705,178 @@ def test_meta_exposes_forms_and_nsfw_topics(client):
     assert set(meta["critics_by_form"]) == set(store.FORMS)
     assert meta["nsfw_topics"]
     assert meta["form_label"]["novel"] == "小說／文字"
+
+
+# ---------- every NSFW deliverable format ----------
+
+def test_every_content_form_has_at_least_one_nsfw_card():
+    """A format with no card would leave the owner with no guidance for it."""
+    missing = [f for f in store.FORMS if not any(f in c["forms"] for c in NSFW_PRESETS)]
+    assert missing == [], f"這些形態沒有對應的 NSFW 風格卡：{missing}"
+
+
+def test_every_nsfw_card_only_names_real_forms():
+    for card in NSFW_PRESETS:
+        for f in card["forms"]:
+            assert f in store.FORMS, (card["id"], f)
+
+
+def test_every_form_has_its_own_prompt_rule_and_review_roles():
+    for form in store.FORMS:
+        assert form in prompts.FORM_RULES, f"{form} 沒有提示詞規則"
+        assert prompts.form_block(form).strip()
+        roles = prompts.critic_roles("fiction", form)
+        assert roles, form
+
+
+def test_the_forms_cover_the_shapes_adult_content_takes():
+    """Text, voice, image, screen and stage: the vocabulary has to reach all of them."""
+    for f in ("novel", "serial", "poem", "chat", "script", "comic", "guide",
+              "audiobook", "radio_drama", "asmr", "gallery", "video", "talk"):
+        assert f in store.FORMS, f
+
+
+def test_text_forms_each_write_their_own_layout():
+    blocks = [{"headline": "第一章", "body": "A：你睡了嗎\nB：還沒\nA：那就好"}]
+    for form, marker in (("chat", "A：你睡了嗎"), ("poem", "A：你睡了嗎"),
+                         ("comic", "第 1 格："), ("script", "內景／外景")):
+        rendered = pipeline._RENDERERS[store.form_layout(form)](blocks)
+        assert marker in rendered, (form, rendered)
+    assert "第 1 格：" in pipeline._RENDERERS["panels"](blocks)
+    assert "內景／外景" in pipeline._RENDERERS["screenplay"](blocks)
+    # prose and chapters stay prose
+    assert pipeline._RENDERERS["prose"](blocks) == pipeline._RENDERERS["chapters"](blocks)
+
+
+def test_each_text_form_ships_a_named_file():
+    for form in pipeline.TEXT_FORMS:
+        assert form in pipeline.TEXT_TARGET, form
+        assert pipeline._form_outputs(form), form
+    assert pipeline.TEXT_TARGET["script"] == "screenplay.txt"
+    assert pipeline.TEXT_TARGET["comic"] == "comic_script.txt"
+    assert "radio_drama.mp3" in pipeline._form_outputs("radio_drama")
+    assert "asmr.mp3" in pipeline._form_outputs("asmr")
+
+
+def test_a_serial_episode_ships_chapters_not_a_film(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode_form(client, "連載成品", form="serial")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    assert (out / "serial.txt").is_file()
+    assert (out / "manuscript.md").is_file()
+    assert not (out / "video.mp4").exists()
+
+
+def test_a_chat_episode_ships_the_message_log(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode_form(client, "訊息體成品", form="chat")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    assert (out / "chat.txt").is_file()
+    assert not (out / "video.mp4").exists()
+
+
+def test_a_comic_episode_ships_a_panel_script(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode_form(client, "漫畫腳本成品", form="comic")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    assert (out / "comic_script.txt").is_file()
+    assert not (out / "video.mp4").exists()
+
+
+def test_an_asmr_episode_ships_an_audio_track(offline, ceiling, fakes):
+    client = offline
+    eid = _restricted_episode_form(client, "耳語音檔成品", form="asmr")
+    ep = _run_to_done(client, eid, rating="adult")
+    out = Path(ep["published_dir"])
+    assert (out / "asmr.mp3").is_file()
+    assert (out / "asmr.mp3").stat().st_size > 0
+    assert (out / "asmr_script.txt").is_file()
+    assert not (out / "video.mp4").exists()
+
+
+# ---------- pre-filling the new-episode dialog from the topic ----------
+
+def test_the_rules_guess_every_setting_from_the_topic(data):
+    _raise_ceiling(data)
+    s = suggest.suggest("情慾小說：深夜的公寓")
+    assert s["mode"] == "fiction"
+    assert s["rating"] == "adult"
+    assert s["form"] == "novel"
+    assert s["style_id"].startswith("nsfw-")
+    assert s["by"] == "rules"
+    assert s["reasons"], "a guess must be able to explain itself"
+
+
+def test_a_news_topic_stays_news_and_general(data):
+    s = suggest.suggest("黃仁勳回應 AI 泡沫")
+    assert s["mode"] == "news"
+    assert s["rating"] == "general"
+    assert s["form"] == "video"
+    assert not s["style_id"].startswith("nsfw-"), "a general topic must not get an adult card"
+
+
+def test_a_poem_topic_picks_the_poem_form_and_a_narrative_mode(data):
+    s = suggest.suggest("寫一首關於離別的詩")
+    assert s["form"] == "poem"
+    assert s["mode"] == "fiction"
+
+
+def test_the_guess_never_exceeds_the_channel_ceiling(data):
+    assert store.get_channel()["max_rating"] == "general"
+    s = suggest.suggest("情慾小說：深夜的公寓")
+    assert s["rating"] == "general", "a general-capped channel must not be offered adult"
+    assert not s["style_id"].startswith("nsfw-")
+
+
+def test_urls_already_in_the_topic_are_pre_filled(data):
+    s = suggest.suggest("看這篇 https://example.com/a 和 https://example.com/b 的說法")
+    assert "https://example.com/a" in s["source_urls"]
+    assert "https://example.com/b" in s["source_urls"]
+
+
+def test_known_urls_are_kept_and_merged_with_the_topic_ones(data):
+    s = suggest.suggest("看這篇 https://example.com/a", urls=["https://example.com/b"])
+    assert s["source_urls"][0] == "https://example.com/b"     # caller's links come first
+    assert "https://example.com/a" in s["source_urls"]
+
+
+def test_an_idea_format_wins_over_the_guessed_one(data):
+    s = suggest.suggest("黃仁勳回應 AI 泡沫", idea_format="long")
+    assert s["format"] == "long"
+
+
+def test_the_guess_only_offers_settings_the_api_would_accept(data):
+    _raise_ceiling(data)
+    for topic in ("情慾小說：深夜的公寓", "寫一首離別的詩", "Google 發布 Gemini", "漫畫：夏天"):
+        s = suggest.suggest(topic)
+        assert s["mode"] in store.MODES
+        assert s["rating"] in store.RATINGS
+        assert s["form"] in store.FORMS
+        assert s["format"] in ("short", "long")
+        # the same combination the create API validates
+        assert store.rating_conflict(s["mode"], s["rating"]) is None, topic
+
+
+def test_the_suggest_endpoint_answers_with_a_full_pre_fill(client, ceiling):
+    r = client.get("/api/suggest", params={"topic": "情慾小說：深夜的公寓"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"] == "fiction" and body["rating"] == "adult"
+    assert body["form"] == "novel"
+    assert isinstance(body["source_urls"], list)
+    assert body["reasons"]
+
+
+def test_the_suggest_endpoint_reads_the_idea_it_was_given(client, ceiling):
+    idea = client.post("/api/ideas", json={"title": "情慾小說：雨夜的旅館",
+                                            "urls": ["https://example.com/ref"],
+                                            "kind": "note"}).json()
+    r = client.get("/api/suggest", params={"idea_id": idea["id"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert "旅館" in body["topic"]
+    assert "https://example.com/ref" in body["source_urls"]
+    assert body["form"] == "novel"

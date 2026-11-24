@@ -1,5 +1,5 @@
-import { $, $$, api, esc, fmtName, statusPill, toast, when } from "../lib.js?v=20261124d";
-import { openNewEpisodeModal } from "../modals.js?v=20261124d";
+import { $, $$, api, esc, fmtName, statusPill, toast, when } from "../lib.js?v=20261125b";
+import { openNewEpisodeModal } from "../modals.js?v=20261125b";
 
 const KIND_LABEL = { radar: "雷達", watch: "訂閱", note: "筆記", link: "連結", quote: "金句" };
 const WATCH_FREQ = [["daily", "每天"], ["weekdays", "週一到週五"], ["weekly", "每週"], ["hours", "每隔幾小時"]];

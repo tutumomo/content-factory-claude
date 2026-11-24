@@ -246,11 +246,40 @@ CRITICS_AUDIOBOOK = {
 }
 
 
+# 腳本／分鏡類多一個「可執行性」角色：交給繪者或導演能不能直接做。
+CRITICS_SCRIPT = {
+    "boundary": CRITICS_TEXT["boundary"],
+    "executable": ("可執行性", "檢查每一格／每一場是否清楚到能直接做：鏡位、位置、動作、台詞有沒有缺。"),
+    "prose": CRITICS_TEXT["prose"],
+    "coherence": CRITICS_TEXT["coherence"],
+}
+
+# 非虛構的成人話題（指南、評論）不需要情節連貫，改成依據與可執行性。
+CRITICS_NONFICTION = {
+    "boundary": CRITICS_TEXT["boundary"],
+    "evidence": ("依據", "抓沒有根據的斷言、把個案當通則、聽起來像醫療建議卻沒有來源。"),
+    "usable": ("可照做", "檢查聽眾看完能不能照著做：步驟夠不夠具體、有沒有講清楚前提。"),
+    "ai_voice": CRITICS_TEXT["prose"],
+}
+
+_AUDIO_FORMS = ("audiobook", "radio_drama", "asmr")
+_SCRIPT_FORMS = ("script", "comic")
+_GUIDE_FORMS = ("guide", "talk")
+
+
 def critic_roles(mode: str | None, form: str | None = None) -> dict:
-    """The review roles for a mode × form. News keeps the factual set; text forms get their own."""
+    """The review roles for a mode × form. News keeps the factual set; every form gets its own."""
     form = (form or "video").strip().lower()
-    if form in ("novel", "audiobook", "talk"):
-        return CRITICS_AUDIOBOOK if form == "audiobook" else CRITICS_TEXT
+    if form in _GUIDE_FORMS:
+        return CRITICS_NONFICTION
+    if form == "asmr":
+        return {**CRITICS_AUDIOBOOK, "listenability": ("聽感與留白", "檢查聲音事件夠不夠、空白有沒有被填滿、低聲念得完嗎。")}
+    if form in _AUDIO_FORMS:
+        return CRITICS_AUDIOBOOK
+    if form in _SCRIPT_FORMS:
+        return CRITICS_SCRIPT
+    if form in ("novel", "serial", "poem", "chat"):
+        return CRITICS_TEXT
     return CRITICS_NARRATIVE if (mode or "news") in store.UNVERIFIED_MODES else CRITICS
 
 
@@ -292,17 +321,49 @@ FORM_RULES = {
 分段推進：每段 120–300 字，段落之間要有時間或場景的推移。
 不要為每段寫 headline／bullets；scenes 的 narration 就是小說正文。
 可以寫章節標題，放在 headline。""",
-    "audiobook": """【成品形態：MP3 小說】
-正文跟小說一樣是連續文字，但每一段都要能獨立朗讀：不要依賴表格、清單或純視覺效果。
-句子短一點、少用括號與破折號插入語，因為這是給耳朵聽的。
-每段開頭避免用代名詞起頭，聽眾可能中途才開始聽。""",
-    "gallery": """【成品形態：圖片集】
-每個 scenes 項目是一張圖：narration 是這張圖的圖說（1–3 句），headline 是短標。
-圖說要能獨立看懂，不要依賴前後張。visual 要寫清楚畫面構成，因為這就是成品本身。""",
+    "serial": """【成品形態：連載長篇】
+每個 scenes 項目是一章，不是一段。一章 800–2000 字，narration 放這一章的正文。
+章末一定要留推力（懸念、決定、未解的問題），不要一章講完一個完整弧線。
+前面建立的設定與人物關係要延續，不能每章換一套規則。""",
+    "poem": """【成品形態：詩／極短篇】
+保留斷行：narration 裡的換行就是詩的斷行，不要寫成連續段落。
+不要解釋意象，不要加「這象徵著…」。留白比句子多更好。
+一整首詩放在一個 scenes 項目即可；headline 是詩題。""",
+    "chat": """【成品形態：訊息體對話】
+每一行是一則訊息，格式固定為「發話者：內容」，例如「A：你睡了嗎」。
+不要寫旁白、不要描述表情；情緒只能靠回覆的速度、標點與用詞表達。
+scenes 的 narration 放整段對話；headline 是這段對話的時間或場景（例如「凌晨兩點」）。""",
+    "script": """【成品形態：劇本／分鏡腳本】
+格式：場景標題（內景／外景・地點・時間）→ 動作段落 → 對白。
+動作只寫看得見聽得到的，不要寫角色的內心狀態。
+narration 就是劇本正文；headline 放場景標題。不要寫鏡頭焦段這類拍攝術語。""",
+    "comic": """【成品形態：漫畫腳本】
+一格一件事。每一行格式固定為「第 N 格：畫面指示｜台詞」，沒有台詞就只寫畫面指示。
+畫面指示要具體到繪者能畫（鏡位、角色位置、表情）；台詞要短到能塞進對話框。
+一個 scenes 項目是一頁（4–6 格）；headline 是頁標。""",
+    "guide": """【成品形態：指南／教學】
+非虛構：講清楚怎麼做，每一步都要能照著執行。
+narration 一段一個步驟，先講要做什麼、再講為什麼；可以放清單但不要超過三項。
+沒有依據的建議要標明「這是我的經驗」。""",
     "talk": """【成品形態：話題評論】
 這是主持人口播，第一人稱、有立場。開場先講清楚「這件事的爭點是什麼」。
 可以引用資料，但要說明來源；沒有依據的判斷要明講「這是我的看法」。
 畫面是字卡，所以 headline 與 bullets 要能單獨表達重點。""",
+    "audiobook": """【成品形態：MP3 小說】
+正文跟小說一樣是連續文字，但每一段都要能獨立朗讀：不要依賴表格、清單或純視覺效果。
+句子短一點、少用括號與破折號插入語，因為這是給耳朵聽的。
+每段開頭避免用代名詞起頭，聽眾可能中途才開始聽。""",
+    "radio_drama": """【成品形態：廣播劇】
+只有聲音：每一行都要能被念出來或做成音效。
+對白之間用「（停頓）」「（遠處關門聲）」這類括號標記聲音事件，不要寫純視覺描述。
+narration 放整場戲；headline 是場次（例如「第一場・雨夜的公寓」）。""",
+    "asmr": """【成品形態：耳語音檔】
+句子要短到能低聲念完一句就停。大量留白，不要填滿時間。
+用「（靠近麥克風）」「（布料摩擦）」標記聲音遠近與材質。
+不要寫劇情大綱；每一段就是一段可以直接錄的聲音。""",
+    "gallery": """【成品形態：圖片集】
+每個 scenes 項目是一張圖：narration 是這張圖的圖說（1–3 句），headline 是短標。
+圖說要能獨立看懂，不要依賴前後張。visual 要寫清楚畫面構成，因為這就是成品本身。""",
 }
 
 

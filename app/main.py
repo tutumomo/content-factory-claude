@@ -13,7 +13,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import characters, comfy, cost, llm, media, music, pipeline, prompts, sfx, sources, stock, stock_audio, store, video, video_analysis, watch, youtube
+from . import characters, comfy, cost, llm, media, music, pipeline, prompts, sfx, sources, stock, stock_audio, store, suggest, video, video_analysis, watch, youtube
 
 app = FastAPI(title="內容工廠")
 STATIC = store.ROOT / "static"
@@ -511,6 +511,24 @@ def delete_idea(iid: str):
 @app.get("/api/episodes")
 def episodes():
     return store.list_episodes()
+
+
+@app.get("/api/suggest")
+def suggest_episode(topic: str = "", notes: str = "", format: str = "", urls: str = "",
+                    idea_id: str = "", deep: bool = False):
+    """Pre-fill the new-episode dialog: rules fire instantly, `deep=1` asks the model too.
+
+    The dialog calls this twice: once without `deep` the moment the dialog opens (so the
+    controls are never blank), then again with `deep=1` in the background to refine.
+    """
+    idea_urls: list[str] = []
+    idea = store.get_idea(idea_id) if idea_id else None
+    if idea:
+        idea_urls = [u for u in (idea.get("urls") or []) if str(u).startswith("http")]
+        topic = topic or idea.get("title") or ""
+        notes = notes or idea.get("notes") or idea.get("why") or ""
+    given = [u.strip() for u in (urls or "").splitlines() if u.strip().startswith("http")]
+    return suggest.suggest(topic, notes, [*given, *idea_urls], idea_format=format or None, deep=deep)
 
 
 @app.post("/api/episodes")

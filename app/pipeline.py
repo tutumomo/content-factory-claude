@@ -475,29 +475,115 @@ def _shot_seconds(ep: dict, vis: dict) -> float:
     return min(8.0, max(2.5, v))
 
 
+# every form whose deliverable is text only
+TEXT_FORMS = ("novel", "serial", "poem", "chat", "script", "comic", "guide", "talk")
+
+
 def _scene_text(scr: dict) -> list[dict]:
     """The scenes as plain prose blocks: narration is the body, headline becomes a heading."""
     return [{"headline": (sc.get("headline") or "").strip(),
              "body": (sc.get("narration") or "").strip()} for sc in scr.get("scenes") or []]
 
 
-def _write_manuscript(eid: str, scr: dict, out: Path, form: str) -> Path:
-    """Write the text deliverable: one .md with chapter/scene headings plus a plain .txt."""
-    blocks = _scene_text(scr)
-    title = (scr.get("working_title") or "").strip() or "未命名"
-    md = [f"# {title}", ""]
-    for i, b in enumerate(blocks):
-        if b["headline"]:
-            md += [f"## {b['headline']}", ""]
-        md += [b["body"], ""]
-    txt = [title, ""]
+def _render_verse(blocks: list[dict]) -> str:
+    """Poetry: keep the line breaks the model wrote, no reflow."""
+    out = []
     for b in blocks:
         if b["headline"]:
-            txt += [b["headline"], ""]
-        txt += [b["body"], ""]
-    (out / "manuscript.md").write_text("\n".join(md), "utf-8")
-    target = out / "novel.txt" if form == "novel" else out / "script.txt"
-    target.write_text("\n".join(txt), "utf-8")
+            out += [b["headline"], ""]
+        out += [b["body"], ""]
+    return "\n".join(out)
+
+
+def _render_dialogue(blocks: list[dict]) -> str:
+    """Message-style: `發話者：內容` per line; an unlabelled line becomes a narration beat."""
+    out = []
+    for b in blocks:
+        if b["headline"]:
+            out += [f"── {b['headline']} ──", ""]
+        for line in b["body"].split("\n"):
+            line = line.strip()
+            if line:
+                out.append(line)
+        out.append("")
+    return "\n".join(out)
+
+
+def _render_screenplay(blocks: list[dict]) -> str:
+    """Screenplay: scene heading, action paragraph, then dialogue on its own lines."""
+    out = []
+    for i, b in enumerate(blocks, 1):
+        out += [f"{i}. 內景／外景　{b['headline'] or '未命名場景'}", ""]
+        for line in b["body"].split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            out.append(f"　　{line}" if "：" in line[:12] else line)
+        out.append("")
+    return "\n".join(out)
+
+
+def _render_panels(blocks: list[dict]) -> str:
+    """Comic script: one block per page, each line a panel."""
+    out = []
+    for i, b in enumerate(blocks, 1):
+        out += [f"## 第 {i} 頁　{b['headline']}", ""]
+        for j, line in enumerate([x.strip() for x in b["body"].split("\n") if x.strip()], 1):
+            out.append(f"第 {j} 格：{line}")
+        out.append("")
+    return "\n".join(out)
+
+
+def _render_guide(blocks: list[dict]) -> str:
+    """Guide: numbered sections with the bullet list turned into a checklist."""
+    out = []
+    for i, b in enumerate(blocks, 1):
+        out += [f"## {i}. {b['headline'] or ''}".rstrip(), "", b["body"], ""]
+    return "\n".join(out)
+
+
+def _render_prose(blocks: list[dict]) -> str:
+    out = []
+    for b in blocks:
+        if b["headline"]:
+            out += [f"## {b['headline']}", ""]
+        out += [b["body"], ""]
+    return "\n".join(out)
+
+
+_RENDERERS = {
+    "verse": _render_verse, "dialogue": _render_dialogue, "screenplay": _render_screenplay,
+    "panels": _render_panels, "guide": _render_guide, "chapters": _render_prose,
+    "talk": _render_prose, "prose": _render_prose,
+}
+
+# filename each text form ships as
+def _form_outputs(form: str) -> tuple[str, ...]:
+    """The named deliverable files a form writes (before the shared manuscript/chapters)."""
+    text = TEXT_TARGET.get(form, "script.txt")
+    if store.is_audio_form(form):
+        audio = {"audiobook": "audiobook.mp3", "radio_drama": "radio_drama.mp3",
+                 "asmr": "asmr.mp3"}.get(form, "audio.mp3")
+        return (text, audio)
+    return (text,)
+
+
+TEXT_TARGET = {
+    "novel": "novel.txt", "serial": "serial.txt", "poem": "poem.txt", "chat": "chat.txt",
+    "script": "screenplay.txt", "comic": "comic_script.txt", "guide": "guide.txt",
+    "talk": "script.txt", "audiobook": "novel.txt", "radio_drama": "radio_drama.txt",
+    "asmr": "asmr_script.txt",
+}
+
+
+def _write_manuscript(eid: str, scr: dict, out: Path, form: str) -> Path:
+    """Write this form's text deliverable: a rendered .md plus a plain .txt."""
+    blocks = _scene_text(scr)
+    title = (scr.get("working_title") or "").strip() or "未命名"
+    body = _RENDERERS.get(store.form_layout(form), _render_prose)(blocks)
+    (out / "manuscript.md").write_text(f"# {title}\n\n{body}", "utf-8")
+    target = out / TEXT_TARGET.get(form, "script.txt")
+    target.write_text(f"{title}\n\n{body}", "utf-8")
     store.write_json(eid, "assets/scenes.json", scr)
     return target
 
@@ -532,8 +618,9 @@ def _assemble_audiobook(ep: dict) -> bool:
     shutil.rmtree(assets, ignore_errors=True)
     assets.mkdir(parents=True)
     out.mkdir(exist_ok=True)
+    form = store.form_of(ep)
     scr = store.read_json(eid, "script.json")
-    _write_manuscript(eid, scr, out, "novel")
+    target = _write_manuscript(eid, scr, out, form)
     plan, br = sources.start(["voice"], rating=(ep.get("rating") or "general"))
     narrator = sources.Narrator(plan, br, store.log, eid,
                                 total_chars=sum(len(s.get("narration") or "") for s in scr.get("scenes") or []))
@@ -551,18 +638,21 @@ def _assemble_audiobook(ep: dict) -> bool:
         pieces.append(wav)
         t0 += dur
     track = media.concat_wavs(pieces, assets / "narration.wav")
-    mp3 = out / "audiobook.mp3"
+    mp3_name = {"audiobook": "audiobook.mp3", "radio_drama": "radio_drama.mp3",
+                "asmr": "asmr.mp3"}.get(form, "audio.mp3")
+    mp3 = out / mp3_name
     media.to_mp3(track, mp3)
     store.write_json(eid, "output/chapters.json", chapters)
+    label = store.FORM_LABEL.get(form, form)
     v = {"size": [0, 0], "duration": round(t0, 2), "checks": {
         "配音": {"ok": bool(pieces), "value": f"{len(pieces)} 段，{t0:.1f} 秒"},
         "章節": {"ok": True, "value": f"{len(chapters)} 段"},
         "分級": {"ok": True, "value": store.RATING_LABEL.get(ep.get("rating") or "general", "")},
-        "成品形態": {"ok": True, "value": "MP3 小說：有聲書＋文字稿"},
+        "成品形態": {"ok": True, "value": f"{label}：音檔＋文字稿（{target.name}）"},
     }, "plan": plan.to_dict(), "sources": {"plan": [plan.line("voice")]}}
     store.write_json(eid, "output/verify.json", v)
     _write_manifest(eid, ep, (ep.get("rating") or "general"), [], [])
-    store.log(eid, f"MP3 小說完成：{mp3.name}（{t0:.1f} 秒，{len(chapters)} 段）")
+    store.log(eid, f"{label}完成：{mp3.name}（{t0:.1f} 秒，{len(chapters)} 段）")
     return True
 
 
@@ -618,9 +708,9 @@ def _assemble_gallery(ep: dict) -> bool:
 def st_assemble(ep: dict) -> bool:
     eid = ep["id"]
     form = store.form_of(ep)
-    if form in ("novel", "talk"):
+    if form in TEXT_FORMS:
         return _assemble_text(ep, form)
-    if form == "audiobook":
+    if store.is_audio_form(form):
         return _assemble_audiobook(ep)
     if form == "gallery":
         return _assemble_gallery(ep)
@@ -1140,23 +1230,18 @@ def st_approved(ep: dict) -> bool:
     if form == "video":
         shutil.copy(d / "output" / "final.mp4", pub / "video.mp4")
         shutil.copy(d / "output" / "subtitles.srt", pub / "subtitles.srt")
-    elif form == "audiobook":
-        shutil.copy(d / "output" / "audiobook.mp3", pub / "audiobook.mp3")
-        shutil.copy(d / "output" / "novel.txt", pub / "novel.txt")
-        shutil.copy(d / "output" / "manuscript.md", pub / "manuscript.md")
-        if (d / "output" / "chapters.json").exists():
-            shutil.copy(d / "output" / "chapters.json", pub / "chapters.json")
-    elif form == "novel":
-        shutil.copy(d / "output" / "novel.txt", pub / "novel.txt")
-        shutil.copy(d / "output" / "manuscript.md", pub / "manuscript.md")
-    elif form == "talk":
-        shutil.copy(d / "output" / "script.txt", pub / "script.txt")
-        shutil.copy(d / "output" / "manuscript.md", pub / "manuscript.md")
     elif form == "gallery":
         for img in sorted((d / "output").glob("image_*.jpg")):
             shutil.copy(img, pub / img.name)
-        shutil.copy(d / "output" / "captions.json", pub / "captions.json")
-        shutil.copy(d / "output" / "gallery.md", pub / "gallery.md")
+        for extra in ("captions.json", "gallery.md"):
+            if (d / "output" / extra).exists():
+                shutil.copy(d / "output" / extra, pub / extra)
+    else:
+        # text forms ship their rendered text; audio forms add the track and its chapters
+        for extra in (*_form_outputs(form), "manuscript.md", "chapters.json"):
+            src = d / "output" / extra
+            if src.exists():
+                shutil.copy(src, pub / extra)
     if pk.get("thumbnails"):
         shutil.copy(store.DATA / pk["thumbnails"][ch["thumb"]]["file"], pub / "thumbnail.jpg")
     meta = {"title": ch["title"], "description": pk.get("description", ""), "hashtags": pk.get("hashtags", []),
