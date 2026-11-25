@@ -155,7 +155,9 @@ function metricsBlock(ep) {
     ${ep.metrics.length ? `<table class="crit" style="width:100%">${ep.metrics.map((m, idx) => `<tr><td>${esc(m.platform)}</td><td>${esc(m.date)}</td><td>觀看 ${esc(m.views)}</td><td>平均觀看 ${esc(m.watch_time)}</td><td>新追蹤 ${esc(m.followers)}</td><td>${esc(m.note)}</td><td><button type="button" class="btn danger sm" data-mdel="${idx}">刪</button></td></tr>`).join("")}</table>` : ""}
     <div class="row" style="margin-top:8px"><input id="m-platform" placeholder="平台" style="width:110px"><input id="m-date" type="date" style="width:150px">
     <input id="m-views" placeholder="觀看" style="width:90px"><input id="m-watch_time" placeholder="平均觀看" style="width:100px"><input id="m-followers" placeholder="新追蹤" style="width:90px">
-    <input id="m-note" placeholder="備註" class="grow" style="width:auto"><button type="button" class="btn" id="m-add">記錄</button></div></div>`;
+    <input id="m-note" placeholder="備註" class="grow" style="width:auto"><button type="button" class="btn" id="m-add">記錄</button></div>
+    <div class="row" style="margin-top:8px"><input id="m-yt-url" class="grow" placeholder="貼上 YouTube 影片網址（手動上傳的用），之後按一次就會自動更新成效" style="width:auto">
+    <button type="button" class="btn" id="m-yt-sync">從 YouTube 同步</button></div></div>`;
 }
 
 function youtubeBlock(ep) {
@@ -356,6 +358,16 @@ export async function viewEpisode(main, id) {
     for (const k of ["platform", "date", "views", "watch_time", "followers", "note"]) body[k] = $(`#m-${k}`, main).value;
     await api(`/api/episodes/${eid}/metrics`, { method: "POST", body });
     if (state.onRoute) state.onRoute();
+  });
+  $("#m-yt-sync", main) && ($("#m-yt-sync", main).onclick = async () => {
+    try {
+      const url = ($("#m-yt-url", main).value || "").trim();
+      const res = await api(`/api/episodes/${encodeURIComponent(eid)}/metrics/youtube`, { method: "POST", body: { url } });
+      toast(`已${res.action === "updated" ? "更新" : "寫入"}今日成效：觀看 ${res.row.views}、讚 ${res.row.likes}、留言 ${res.row.comments}`);
+      if (state.onRoute) state.onRoute();
+    } catch (e) {
+      toast(e.message);
+    }
   });
   $$("[data-mdel]", main).forEach((b) => {
     b.onclick = async () => {

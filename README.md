@@ -37,7 +37,7 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 | 包裝 | 標題候選、縮圖候選、說明欄、IG 輪播圖卡、FB 貼文、shorts 發布包（TikTok／IG 說明文＋9:16 直式成片） | **挑標題、挑縮圖**、排程時間 |
 | 成片審核 | — | 看成片 → **核准**或**退件**（一句理由） |
 | 發布包 | 輸出到 `data/episodes/<id>/publish/`（shorts 另存 `publish/shorts/`） | 上傳到各平台 |
-| 成效回收 | — | 填各平台數字 |
+| 成效回收 | 從 YouTube Data API 自動抓觀看、讚、留言（每集每天一筆） | 其他平台數字手動填；按「從 YouTube 更新」 |
 
 退件理由會被抽象成一條規則寫進「品味紀錄」，之後每一步都會遵守（SOP 原則 3）。
 
@@ -80,6 +80,7 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 - **參考影片風格分析**：風格頁「從參考影片分析」貼 YouTube／Shorts／Reels 連結（或本機影片路徑），用 yt-dlp 抓下來後量剪點節奏、鏡頭長度分佈與畫面統計，再交給 LLM 寫成風格卡。只做大綱分析，不下載成片保存。分鏡表列出每個鏡頭的實際秒數。
 - **YouTube 連結沒有字幕時**（影片本身沒字幕，或 YouTube 回 HTTP 429 擋字幕）：只下載音軌，轉成 16 kHz WAV 後交給本機 audio.cpp `qwen3-asr-1-7b-q8-0` 轉文字，結果快取在 `data/yt_asr/<影片ID>.txt`。設定在 `youtube.asr_fallback`／`asr_model`／`asr_max_minutes`（預設 30 分鐘以上不轉）／`asr_busy_wait_s`。audio.cpp 同時只載入一個模型，會跟配音排隊。
 - **成片引擎**：`ffmpeg`（燒字幕）或 `remotion`（React 動畫：Ken Burns、標題與重點逐條進場、浮動字幕條）。Remotion 的實拍／H3 畫面直接播放影片（`render.remotion_video`，預設開），不再只取一張靜態畫格。Remotion 音軌仍由 ffmpeg 準備後再合成，失敗會自動退回 ffmpeg。Remotion 專案在 `remotion/`，第一次用要先 `npm install`。
+- **成效自動回收**：集數頁貼一次 YouTube 網址（手動上傳的也適用），之後按「從 YouTube 同步」就會把當天的觀看、讚、留言寫進成效紀錄；同一天重抓會覆蓋當天那一筆，不會重複。復盤頁的「從 YouTube 更新」會一次更新所有已連結影片的集數。YouTube Data API 不提供平均觀看時間與新追蹤，這兩欄仍手動填。
 - **官方 H3 提示詞技能**：MiniMax 官方的 9 個 H3 skill（`h3-prompt-writing` 與 8 個風格生成器）放在 `.claude/skills/`，Claude 在專案內可直接引用；`h3-prompt-writing/references/base-en.txt` 是 T2VA／I2VA／FL2VA／L2VA 的三段式欄位規範，`app/h3video.py` 的提示詞模板照這份寫。
 - **GPU**：LM Studio、Strata、ComfyUI 共用同一塊記憶體，不要同時載入大模型。
 

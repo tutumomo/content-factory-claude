@@ -107,6 +107,7 @@ export async function viewInsights(main) {
       <div class="page-head">
         <div><h1>復盤</h1><p class="sub">彙整跨集數成效表現，讓 AI 從真實數據提煉建議，一鍵寫進品味紀錄。</p></div>
         <div class="row">
+          <button type="button" class="btn" id="in-yt">從 YouTube 更新</button>
           <button type="button" class="btn" id="in-csv">匯入 CSV</button>
           <button type="button" class="btn primary" id="in-add">＋ 錄入數據</button>
         </div>
@@ -243,6 +244,16 @@ export async function viewInsights(main) {
 
     $("#in-add", main).onclick = () => openAddMetricModal(eps, null, load);
     $("#in-csv", main).onclick = () => openImportCsvModal(load);
+    $("#in-yt", main).onclick = async () => {
+      try {
+        const r = await api("/api/insights/sync-youtube", { method: "POST" });
+        const miss = r.missing?.length ? `；${r.missing.length} 支影片在 YouTube 找不到` : "";
+        toast(`已更新 ${r.updated} 集的今日成效${miss}`);
+        load();
+      } catch (e) {
+        toast(e.message);
+      }
+    };
     $$("[data-days]", main).forEach((b) => { b.onclick = () => { fDays = +b.dataset.days; load(); }; });
     $("#in-plat", main).onchange = (e) => { fPlatform = e.target.value; load(); };
     $$("[data-im]", main).forEach((b) => { b.onclick = () => { chartMetric = b.dataset.im; load(); }; });

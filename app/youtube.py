@@ -224,6 +224,36 @@ def _raise_api(r: httpx.Response, what: str) -> None:
     raise YouTubeError(f"{what}失敗 HTTP {r.status_code}：{msg}")
 
 
+def video_id_from_url(url: str) -> str:
+    """Video id from a YouTube URL the owner pasted (manual uploads do not set one)."""
+    from . import yt_page
+
+    return (yt_page.parse_url(url or "") or {}).get("id") or ""
+
+
+def _count(val) -> int:
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return 0
+
+
+def video_stats(video_ids: list[str]) -> dict[str, dict]:
+    """Public statistics for up to 50 videos per call: {video_id: {views, likes, comments}}."""
+    ids = [v for v in dict.fromkeys(video_ids) if v]
+    out: dict[str, dict] = {}
+    for i in range(0, len(ids), 50):
+        r = httpx.get(f"{API}/videos", params={"part": "statistics", "id": ",".join(ids[i:i + 50])},
+                      headers={"Authorization": f"Bearer {_access_token()}"}, timeout=30)
+        _raise_api(r, "讀取影片成效")
+        for item in r.json().get("items", []):
+            s = item.get("statistics") or {}
+            out[item.get("id") or ""] = {"views": _count(s.get("viewCount")),
+                                         "likes": _count(s.get("likeCount")),
+                                         "comments": _count(s.get("commentCount"))}
+    return out
+
+
 def _clean(s: str, n: int) -> str:
     return re.sub(r"[<>]", "", s or "").strip()[:n]
 

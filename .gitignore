@@ -6,3 +6,4 @@ __pycache__/
 remotion/node_modules/
 remotion/out/
 .cf-smoke-data/
+.qwen/

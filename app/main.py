@@ -764,6 +764,77 @@ def delete_metrics(eid: str, idx: int):
     return m
 
 
+def _yt_video_id(ep: dict) -> str:
+    return str(((ep.get("youtube") or {}).get("video_id")) or "").strip()
+
+
+def _apply_youtube_stats(eid: str, stats: dict) -> tuple[dict, str]:
+    """Write today's YouTube row: update the same-day row, otherwise append one."""
+    rows = store.read_json(eid, "metrics.json", [])
+    today = time.strftime("%Y-%m-%d")
+    for row in rows:
+        if (isinstance(row, dict) and str(row.get("platform") or "").lower() == "youtube"
+                and str(row.get("date") or "") == today):
+            for k in ("views", "likes", "comments"):
+                row[k] = str(stats.get(k, 0))
+            store.write_json(eid, "metrics.json", rows)
+            return row, "updated"
+    row = {"platform": "YouTube", "date": today, "views": str(stats.get("views", 0)),
+           "watch_time": "", "followers": "", "likes": str(stats.get("likes", 0)),
+           "saves": "", "comments": str(stats.get("comments", 0)), "note": ""}
+    rows.append(row)
+    store.write_json(eid, "metrics.json", rows)
+    return row, "appended"
+
+
+@app.post("/api/episodes/{eid}/metrics/youtube")
+def sync_youtube_metric(eid: str, body: dict | None = Body(default=None)):
+    """Pull views/likes/comments from the YouTube Data API for one episode.
+
+    `url` is optional: manual uploads have no video id, so the owner can paste the link once.
+    """
+    ep = _ep(eid)
+    url = str((body or {}).get("url") or "").strip()
+    vid = _yt_video_id(ep)
+    if url:
+        vid = youtube.video_id_from_url(url)
+        if not vid:
+            raise HTTPException(400, "這不是可辨識的 YouTube 影片網址")
+        yt = {**(ep.get("youtube") or {}), "video_id": vid, "url": f"https://www.youtube.com/watch?v={vid}"}
+        store.update_episode(eid, youtube=yt)
+    if not vid:
+        raise HTTPException(400, "這一集還沒有 YouTube 影片，請貼上影片網址")
+    try:
+        stats = youtube.video_stats([vid]).get(vid)
+    except youtube.YouTubeError as e:
+        raise HTTPException(400, str(e)) from e
+    if not stats:
+        raise HTTPException(404, "YouTube 找不到這支影片（可能已刪除、未公開，或不同頻道）")
+    row, action = _apply_youtube_stats(eid, stats)
+    return {"action": action, "row": row, "video_id": vid}
+
+
+@app.post("/api/insights/sync-youtube")
+def sync_insights_youtube():
+    """Refresh today's metrics for every episode that already has a YouTube video id."""
+    todo = [(ep["id"], _yt_video_id(ep)) for ep in store.list_episodes() if _yt_video_id(ep)]
+    if not todo:
+        raise HTTPException(400, "還沒有任何集數連結 YouTube 影片，請到集數頁貼上影片網址")
+    try:
+        stats = youtube.video_stats([vid for _, vid in todo])
+    except youtube.YouTubeError as e:
+        raise HTTPException(400, str(e)) from e
+    updated, missing = 0, []
+    for eid, vid in todo:
+        s = stats.get(vid)
+        if not s:
+            missing.append(eid)
+            continue
+        _apply_youtube_stats(eid, s)
+        updated += 1
+    return {"updated": updated, "missing": missing}
+
+
 # ---------- insights ----------
 
 @app.get("/api/insights")
