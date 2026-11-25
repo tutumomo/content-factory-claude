@@ -8,17 +8,36 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-FONT_DIR = Path("/usr/share/fonts/opentype/noto")
+FONT_DIRS = (
+    Path("/usr/share/fonts/opentype/noto"),
+    Path("/Library/Fonts"),
+    Path.home() / "Library" / "Fonts",
+)
+
+
+def _font_file(weight: str) -> Path:
+    for folder in FONT_DIRS:
+        for name in (f"NotoSansCJK-{weight}.ttc", "NotoSansCJK.ttc"):
+            if (folder / name).exists():
+                return folder / name
+    raise FileNotFoundError(f"找不到 Noto Sans CJK（{weight}），已找：{', '.join(map(str, FONT_DIRS))}")
 
 
 @lru_cache(maxsize=64)
 def font(size: int, weight: str = "Bold") -> ImageFont.FreeTypeFont:
-    path = FONT_DIR / f"NotoSansCJK-{weight}.ttc"
-    for idx in range(5):  # pick the Traditional Chinese face inside the collection
-        f = ImageFont.truetype(str(path), size, index=idx)
-        if "TC" in " ".join(f.getname()):
+    path = str(_font_file(weight))
+    fallback = None
+    for idx in range(40):  # pick the Traditional Chinese face of this weight inside the collection
+        try:
+            f = ImageFont.truetype(path, size, index=idx)
+        except OSError:
+            break
+        family, style = f.getname()
+        if "TC" in family and style == weight:
             return f
-    return ImageFont.truetype(str(path), size)
+        if "TC" in family and fallback is None:
+            fallback = f
+    return fallback or ImageFont.truetype(path, size)
 
 
 def wrap(draw: ImageDraw.ImageDraw, text: str, f: ImageFont.FreeTypeFont, width: int) -> list[str]:

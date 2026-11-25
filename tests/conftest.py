@@ -20,12 +20,12 @@ from pathlib import Path
 
 import pytest
 
-_DATA = Path(tempfile.mkdtemp(prefix="cf-smoke-data-"))
+_DATA = Path(tempfile.mkdtemp(prefix="cf-smoke-data-")).resolve()
 os.environ["CF_DATA"] = str(_DATA)
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import comfy, h3video, llm, main, media, music, pipeline, stock, store, video  # noqa: E402
+from app import comfy, h3video, llm, main, media, music, pipeline, sources, stock, store, video  # noqa: E402
 
 RATE = 24000
 
@@ -70,8 +70,11 @@ class Fakes:
         self.calls[name] = self.calls.get(name, 0) + 1
 
     # audio.cpp
-    def tts_health(self) -> dict:
+    def tts_health(self, timeout: float = 5) -> dict:
         return {"ok": True, "models": ["fake"], "detail": "就緒（fake）"}
+
+    def music_models(self, base: str, timeout: float = 5) -> list[dict]:
+        return [{"id": "fake-yue2", "task": "gen", "family": "yue2"}]
 
     def tts(self, text: str, out: Path, emotion: str = "") -> Path:
         self.hit("tts")
@@ -149,6 +152,9 @@ def data_dir() -> Path:
 def fakes(data_dir) -> Fakes:
     f = Fakes()
     mp = pytest.MonkeyPatch()
+    # probe results are cached ~30 s module-wide; a cached failure from a non-faked test
+    # would send faked episodes to the fallback source
+    sources._cache.clear()
     real_json = llm.complete_json
 
     def short_json(task, system, prompt):
@@ -175,6 +181,7 @@ def fakes(data_dir) -> Fakes:
     mp.setattr(comfy, "free", lambda: None)
     mp.setattr(h3video, "generate", f.h3_generate)
     mp.setattr(music, "generate", f.music_generate)
+    mp.setattr(music, "models", f.music_models)
     mp.setattr(video, "available", f.remotion_available)
     mp.setattr(video, "render", f.remotion_render)
     # nothing in the smoke test may reach a real web page

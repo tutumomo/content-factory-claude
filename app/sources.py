@@ -24,7 +24,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, wait as fut_wait
 
-from . import comfy, cost, h3video, music, sfx, stock, stock_audio, store
+from . import comfy, cost, h3video, media, music, sfx, stock, stock_audio, store
 
 KINDS = ["visuals", "voice", "music", "sfx"]
 
@@ -176,15 +176,9 @@ def _probe_visuals(src: str) -> dict:
 
 def _probe_voice(src: str) -> dict:
     if src == "audiocpp":
-        h = store.get_settings()["tts"]
-        try:
-            import httpx
-            r = httpx.get(h["base_url"].rstrip("/") + "/v1/models", timeout=_tmo())
-            r.raise_for_status()
-            ids = [m.get("id") for m in r.json().get("data", [])]
-        except Exception as e:  # noqa: BLE001 - any failure means "not usable"
-            return {"ok": False, "detail": f"audio.cpp 連不上：{type(e).__name__}"}
-        return {"ok": h["model"] in ids, "detail": "就緒" if h["model"] in ids else f"伺服器上沒有 {h['model']}"}
+        # Reuse media.tts_health: it is the same HTTP check, and tests fake it there.
+        h = media.tts_health(timeout=_tmo())
+        return {"ok": bool(h.get("ok")) and not h.get("needs_voice_ref"), "detail": h.get("detail") or "就緒"}
     if src == "edge":
         try:
             import edge_tts  # noqa: F401
@@ -199,18 +193,14 @@ def _probe_voice(src: str) -> dict:
 
 def _probe_music(src: str) -> dict:
     if src == "audiocpp":
+        base = (music.cfg().get("base_url") or store.get_settings()["tts"]["base_url"]).rstrip("/")
         try:
-            import httpx
-            base = (music.cfg().get("base_url") or store.get_settings()["tts"]["base_url"]).rstrip("/")
-            r = httpx.get(base + "/v1/models", timeout=_tmo())
-            r.raise_for_status()
-            rows = r.json().get("data", [])
+            rows = music.models(base, timeout=_tmo())
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "detail": f"audio.cpp 連不上：{type(e).__name__}"}
-        # same rule as music.model_id: any installed music generator (not the sfx model) will do
+            return {"ok": False, "detail": f"audio.cpp 連不上：{type(e).__name__}: {e}"}
+        # any installed music generator (not the sfx model) will do; generation picks the model itself
         mus = [m for m in rows if m.get("task") == "gen" and (m.get("family") or "") != "moss_soundeffect"]
-        model = music.model_id(base)
-        return {"ok": bool(mus), "detail": f"模型 {model}" if mus else f"伺服器上沒有音樂模型 {model}"}
+        return {"ok": bool(mus), "detail": f"{len(mus)} 個音樂模型" if mus else "伺服器上沒有音樂模型"}
     if src == "openverse":
         # No request here: the anonymous quota is 20/min and 200/day, so keep it for real fetches.
         return {"ok": True, "detail": "免金鑰（授權曲庫；抓不到會往下一順位）"}

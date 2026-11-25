@@ -37,6 +37,13 @@ class MusicError(RuntimeError):
     pass
 
 
+def models(base: str, timeout: float = 5) -> list[dict]:
+    """Model list from an audio.cpp server; raises httpx.HTTPError when unreachable."""
+    r = httpx.get(base + "/v1/models", timeout=timeout)
+    r.raise_for_status()
+    return r.json().get("data", [])
+
+
 def cfg() -> dict:
     return store.get_settings().get("music") or {}
 
