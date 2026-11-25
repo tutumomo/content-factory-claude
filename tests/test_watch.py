@@ -105,3 +105,48 @@ def test_run_llm_failure_keeps_items_unseen(monkeypatch, tmp_path):
     watch.run(src["id"])
     s = watch.get(src["id"])
     assert s["last_status"] == "error" and s["seen"] == []
+
+
+# --- built-in catalog and keyword tracking -------------------------------------------------
+
+def test_catalog_lists_builtin_feeds(monkeypatch, tmp_path):
+    monkeypatch.setattr(store, "DATA", tmp_path)
+    rows = watch.catalog()
+    assert {"gn-tw", "gn-tech", "hn", "gtrends-tw"} <= {c["id"] for c in rows}
+    assert all(c["url"].startswith("https://") for c in rows)
+    assert not any(c["enabled"] for c in rows)
+
+
+def test_catalog_add_is_idempotent(monkeypatch, tmp_path):
+    monkeypatch.setattr(store, "DATA", tmp_path)
+    first = watch.add_catalog("gn-tw")
+    assert first["already"] is False
+    assert first["name"] == "Google 新聞・台灣頭條"
+    again = watch.add_catalog("gn-tw")
+    assert again["already"] is True and again["id"] == first["id"]
+    assert len(watch.list_sources()) == 1
+    assert next(c for c in watch.catalog() if c["id"] == "gn-tw")["enabled"] is True
+
+
+def test_unknown_catalog_id_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr(store, "DATA", tmp_path)
+    with pytest.raises(watch.WatchError):
+        watch.add_catalog("nope")
+
+
+def test_keyword_tracking_builds_a_google_news_feed(monkeypatch, tmp_path):
+    monkeypatch.setattr(store, "DATA", tmp_path)
+    src = watch.add_keyword("AI 晶片")
+    assert src["name"] == "關鍵字：AI 晶片"
+    assert src["url"].startswith("https://news.google.com/rss/search?q=")
+    assert "AI%20%E6%99%B6%E7%89%87" in src["url"]
+    assert src["freq"] == "hours"
+    assert watch.add_keyword("AI 晶片")["already"] is True
+    assert len(watch.list_sources()) == 1
+
+
+def test_keyword_needs_at_least_two_characters(monkeypatch, tmp_path):
+    monkeypatch.setattr(store, "DATA", tmp_path)
+    for bad in ("", " ", "A", " x "):
+        with pytest.raises(watch.WatchError):
+            watch.add_keyword(bad)

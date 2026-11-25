@@ -15,7 +15,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 
@@ -24,6 +24,31 @@ from . import llm, store
 FREQS = ("daily", "weekdays", "weekly", "hours")
 FREQ_LABEL = {"daily": "每天", "weekdays": "週一到週五", "weekly": "每週", "hours": "每隔幾小時"}
 WEEKDAYS = "一二三四五六日"
+
+# Built-in public feeds: no key and no signup, so the radar can find topics with one click.
+# Every entry goes through the same scan → radar scoring → idea card path as a manual source.
+CATALOG = (
+    {"id": "gn-tw", "name": "Google 新聞・台灣頭條", "category": "新聞",
+     "url": "https://news.google.com/rss?hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
+     "freq": "hours", "every_hours": 3},
+    {"id": "gn-tech", "name": "Google 新聞・科技", "category": "科技",
+     "url": "https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
+     "freq": "hours", "every_hours": 3},
+    {"id": "gn-business", "name": "Google 新聞・財經", "category": "財經",
+     "url": "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
+     "freq": "hours", "every_hours": 6},
+    {"id": "gn-world", "name": "Google 新聞・國際", "category": "國際",
+     "url": "https://news.google.com/rss/headlines/section/topic/WORLD?hl=zh-TW&gl=TW&ceid=TW:zh-Hant",
+     "freq": "hours", "every_hours": 6},
+    {"id": "hn", "name": "Hacker News 熱門", "category": "科技",
+     "url": "https://news.ycombinator.com/rss",
+     "freq": "hours", "every_hours": 6},
+    {"id": "gtrends-tw", "name": "Google 趨勢・台灣熱搜", "category": "話題",
+     "url": "https://trends.google.com/trending/rss?geo=TW",
+     "freq": "hours", "every_hours": 6},
+)
+KEYWORD_FEED = "https://news.google.com/rss/search?q={q}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+
 SEEN_MAX = 1000
 MAX_BYTES = 5_000_000
 TICK = 30  # seconds between scheduler checks
@@ -144,6 +169,40 @@ def create(data: dict) -> dict:
         rows.append(src)
         _save(rows)
         return public(src)
+
+
+def catalog() -> list[dict]:
+    """Built-in feeds with whether the owner already added each one."""
+    have = {s["url"] for s in _load()}
+    return [{"id": c["id"], "name": c["name"], "category": c["category"],
+             "url": c["url"], "enabled": c["url"] in have} for c in CATALOG]
+
+
+def _ensure(name: str, url: str, extra: dict | None = None) -> dict:
+    """Add a source once; a second click returns the existing one instead of an error."""
+    with _lock:
+        hit = next((s for s in _load() if s["url"] == url), None)
+        if hit:
+            return {**public(hit), "already": True}
+    return {**create({"name": name, "url": url, **(extra or {})}), "already": False}
+
+
+def add_catalog(cid: str) -> dict:
+    c = next((x for x in CATALOG if x["id"] == cid), None)
+    if not c:
+        raise WatchError("找不到這個內建來源")
+    extra = {k: c[k] for k in ("freq", "every_hours", "max_items") if k in c}
+    return _ensure(c["name"], c["url"], extra)
+
+
+def add_keyword(keyword: str, extra: dict | None = None) -> dict:
+    """A Google News search feed, so the owner only types a keyword instead of a URL."""
+    kw = re.sub(r"\s+", " ", str(keyword or "")).strip()[:60]
+    if len(kw) < 2:
+        raise WatchError("請輸入至少 2 個字的關鍵字")
+    url = KEYWORD_FEED.format(q=quote(kw))
+    return _ensure(f"關鍵字：{kw}", url,
+                   {"freq": "hours", "every_hours": 6, "max_items": 10, **(extra or {})})
 
 
 def update(sid: str, patch: dict) -> dict:

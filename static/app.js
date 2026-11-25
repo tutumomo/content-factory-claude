@@ -3,7 +3,7 @@ import { $, $$, api, applyNavLayout, esc, getNavLayout, state, toast } from "./l
 import { openNewEpisodeModal, openSettingsModal } from "./modals.js?v=20261125g";
 import { viewContent } from "./views/content.js?v=20261125g";
 import { viewEpisode } from "./views/episode.js?v=20261126a";
-import { viewIdeas } from "./views/ideas.js?v=20261125g";
+import { viewIdeas } from "./views/ideas.js?v=20261126b";
 import { viewInsights } from "./views/insights.js?v=20261126a";
 import { viewSchedule } from "./views/schedule.js?v=20261125g";
 import { viewStyle } from "./views/style.js?v=20261125g";

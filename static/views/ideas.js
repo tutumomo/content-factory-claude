@@ -176,6 +176,11 @@ export async function viewIdeas(main) {
           <b class="grow">訂閱來源定時掃描</b>
           <span class="muted">時間以伺服器時區為準</span>
         </div>
+        <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <input id="w-kw" placeholder="追蹤關鍵字，例如：AI 晶片、台積電" style="flex:1 1 220px">
+          <button type="button" class="btn" id="w-kw-add">追蹤關鍵字</button>
+        </div>
+        <div id="watch-catalog" class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
         <div class="row watch-form" style="gap:8px;flex-wrap:wrap">
           <input id="w-url" placeholder="https://aihot.news/ 貼上網站首頁或 RSS 網址" style="flex:2 1 260px">
           <input id="w-name" placeholder="名稱（選填）" style="flex:1 1 120px">
@@ -395,6 +400,39 @@ export async function viewIdeas(main) {
   const newForm = $(".watch-form", main);
   syncSchedule(newForm);
   $("[data-w=freq]", newForm).onchange = () => syncSchedule(newForm);
+
+  const drawCatalog = (rows) => {
+    const box = $("#watch-catalog", main);
+    if (!box) return;
+    box.innerHTML = rows.map((c) => `<button type="button" class="btn sm" data-cat="${esc(c.id)}"
+      ${c.enabled ? "disabled" : ""} title="${esc(c.category)}">${c.enabled ? "✓" : "＋"} ${esc(c.name)}</button>`).join("");
+    $$("[data-cat]", box).forEach((b) => {
+      b.onclick = async () => {
+        try {
+          await api("/api/watch/catalog", { method: "POST", body: { id: b.dataset.cat, run_now: true } });
+          toast("已啟用內建來源，開始掃描");
+          loadWatch();
+          loadCatalog();
+        } catch (e) { toast(e.message); }
+      };
+    });
+  };
+  const loadCatalog = async () => {
+    const r = await api("/api/watch/catalog").catch(() => null);
+    if (r) drawCatalog(r.catalog);
+  };
+  $("#w-kw-add", main).onclick = async () => {
+    const keyword = $("#w-kw", main).value.trim();
+    if (!keyword) return toast("請輸入關鍵字");
+    try {
+      const r = await api("/api/watch/keyword", { method: "POST", body: { keyword, run_now: true } });
+      toast(r.already ? "這個關鍵字已經在訂閱清單" : "已加入關鍵字追蹤");
+      $("#w-kw", main).value = "";
+      loadWatch();
+      loadCatalog();
+    } catch (e) { toast(e.message); }
+  };
+
   $("#w-add", main).onclick = async () => {
     const url = $("#w-url", main).value.trim();
     if (!url) return toast("請貼上網址");
@@ -410,6 +448,7 @@ export async function viewIdeas(main) {
     } catch (e) { toast(e.message); }
   };
   loadWatch();
+  loadCatalog();
 
   $("#i-search", main).oninput = (e) => {
     ideaQuery = e.target.value;

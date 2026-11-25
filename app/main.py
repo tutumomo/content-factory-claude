@@ -464,6 +464,33 @@ def watch_list():
     return {"sources": watch.list_sources(), "now": time.time()}
 
 
+@app.get("/api/watch/catalog")
+def watch_catalog():
+    return {"catalog": watch.catalog()}
+
+
+@app.post("/api/watch/catalog")
+def watch_catalog_add(body: dict = Body(...)):
+    try:
+        src = watch.add_catalog(body.get("id") or "")
+    except watch.WatchError as e:
+        raise HTTPException(400, str(e)) from e
+    if body.get("run_now") and not src["already"]:
+        watch.run_now(src["id"])
+    return src
+
+
+@app.post("/api/watch/keyword")
+def watch_keyword(body: dict = Body(...)):
+    try:
+        src = watch.add_keyword(body.get("keyword") or "")
+    except watch.WatchError as e:
+        raise HTTPException(400, str(e)) from e
+    if body.get("run_now") and not src["already"]:
+        watch.run_now(src["id"])
+    return src
+
+
 @app.post("/api/watch")
 def watch_create(body: dict = Body(...)):
     try:
