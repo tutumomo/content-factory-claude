@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 
 from . import characters, comfy, cost, llm, media, music, pipeline, prompts, sfx, sources, stock, stock_audio, store, suggest, video, video_analysis, watch, youtube
+from . import health as service_health
 
 app = FastAPI(title="內容工廠")
 STATIC = store.ROOT / "static"
@@ -89,6 +90,12 @@ def health(llm_check: bool = False):
     if llm_check:
         out["llm"] = llm.health()
     return out
+
+
+@app.get("/api/status")
+def service_status():
+    """Status page: every local service and CLI, probed in parallel (never starts anything)."""
+    return service_health.services()
 
 
 def _comfy_status() -> dict:

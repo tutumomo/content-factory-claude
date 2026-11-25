@@ -1348,7 +1348,9 @@ def test_every_frontend_file_that_uses_state_imports_it():
     static = Path(__file__).resolve().parent.parent / "static"
     for f in sorted(static.rglob("*.js")):
         text = f.read_text("utf-8")
-        if not re.search(r"\bstate\b", text):
+        # `state.meta` is the global; a data field like `row.state` is not (the old
+        # pattern flagged the status page for reading `s.state` off the API row).
+        if not re.search(r"(?<![.\w])state\s*\.", text):
             continue
         if re.search(r"export\s+(const|let|var)\s+state\b", text):
             continue          # lib.js defines it; everyone else imports it

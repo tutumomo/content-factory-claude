@@ -84,6 +84,7 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 - **成效自動回收**：集數頁貼一次 YouTube 網址（手動上傳的也適用），之後按「從 YouTube 同步」就會把當天的觀看、讚、留言寫進成效紀錄；同一天重抓會覆蓋當天那一筆，不會重複。復盤頁的「從 YouTube 更新」會一次更新所有已連結影片的集數。YouTube Data API 不提供平均觀看時間與新追蹤，這兩欄仍手動填。
 - **官方 H3 提示詞技能**：MiniMax 官方的 9 個 H3 skill（`h3-prompt-writing` 與 8 個風格生成器）放在 `.claude/skills/`，Claude 在專案內可直接引用；`h3-prompt-writing/references/base-en.txt` 是 T2VA／I2VA／FL2VA／L2VA 的三段式欄位規範，`app/h3video.py` 的提示詞模板照這份寫。
 - **GPU**：LM Studio、Strata、ComfyUI 共用同一塊記憶體，不要同時載入大模型。
+- **系統狀態**：右上「系統」頁一次列出 11 項依賴（LLM、ffmpeg＋libass、字型、背景 worker、audio.cpp、ComfyUI、Remotion、yt-dlp、素材金鑰、音效庫、YouTube 登入），每項有就緒／降級／停用三種燈號、目前細節與下一步指令。探測平行執行且只讀不啟服務，逾時 8 秒；有替代方案的（audio.cpp→Edge TTS、ComfyUI→素材／字卡、Remotion→ffmpeg）標「降級」而不是「停用」。每 30 秒自動刷新，也可按「重新檢查」。
 
 ## 內容模式與分級
 

@@ -7,6 +7,7 @@ import { viewIdeas } from "./views/ideas.js?v=20261126b";
 import { viewInsights } from "./views/insights.js?v=20261126a";
 import { viewSchedule } from "./views/schedule.js?v=20261125g";
 import { viewStyle } from "./views/style.js?v=20261125g";
+import { viewStatus } from "./views/status.js?v=20261126c";
 
 const main = $("#main");
 
@@ -94,6 +95,7 @@ async function route() {
     else if (name === "schedule") await viewSchedule(main);
     else if (name === "insights") await viewInsights(main);
     else if (name === "style") await viewStyle(main);
+    else if (name === "status") await viewStatus(main);
     else if (name === "ep" && arg) await viewEpisode(main, decodeURIComponent(arg));
     else {
       $$("[data-nav]").forEach((a) => a.classList.toggle("on", a.dataset.nav === "content"));
