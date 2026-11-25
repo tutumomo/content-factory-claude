@@ -16,7 +16,10 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 
 ## 啟動
 
+首次設定 API 金鑰可複製範本到 `data/.env`（啟動腳本與後端啟動時會自動載入，且不覆蓋外部已設定的非空系統環境變數，從非互動環境啟動也能讀到）：
+
 ```bash
+cp .env.example data/.env && chmod 600 data/.env
 ~/content-factory-claude/run.sh
 ```
 
@@ -156,6 +159,7 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 
 ```
 app/main.py      API 與路由
+app/env.py       讀取 data/.env 環境變數（不覆蓋已設定變數）
 app/pipeline.py  SOP 各階段、背景 worker、你的決策
 app/prompts.py   各任務提示詞（JSON 輸出；含改寫自 AIHOT 的編輯規則）
 app/editorial.py 選題預篩、注意力評分、同事件聚類、來源求證與標題檢查
@@ -174,6 +178,7 @@ app/render.py    畫面、縮圖、輪播圖卡
 remotion/        Remotion 專案（Episode 組合：動畫排版與字幕）
 static/          網頁介面
 data/            頻道定位、設定、品味紀錄、雷達、每一集的檔案
+.env.example     環境變數範本（複製到 data/.env 使用）
 ```
 
 ## 致謝

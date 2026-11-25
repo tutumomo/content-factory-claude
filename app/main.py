@@ -14,12 +14,13 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import characters, comfy, cost, llm, media, music, pipeline, prompts, sfx, sources, stock, stock_audio, store, suggest, video, video_analysis, watch, youtube
+from . import characters, comfy, cost, env, llm, media, music, pipeline, prompts, sfx, sources, stock, stock_audio, store, suggest, video, video_analysis, watch, youtube
 from . import health as service_health
 
 app = FastAPI(title="內容工廠")
 STATIC = store.ROOT / "static"
 store.DATA.mkdir(parents=True, exist_ok=True)
+env.load_dotenv(store.DATA / ".env")
 
 
 @app.on_event("startup")
@@ -1071,7 +1072,7 @@ def youtube_upload(eid: str):
 
 # ---------- files & SPA ----------
 
-_FILES_ROOTS = ("episodes", "music", "sfx", "stock", "tmp")  # settings.json / youtube token / cost stay private
+_FILES_ROOTS = ("episodes", "music", "sfx", "stock", "tmp")  # settings.json / .env / youtube token / cost stay private
 
 
 def _episode_id_from_path(rel: Path) -> str:
